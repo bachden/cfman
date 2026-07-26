@@ -6,6 +6,7 @@ import { requireAuth } from "../lib/auth.js";
 import { CloudflareClient } from "../lib/cloudflare.js";
 import { pool, withTransaction } from "../lib/database.js";
 import { appendNameFilter, nameFilterFields, validateNameFilter } from "../lib/name-filter.js";
+import { executionVariablesSchema } from "../lib/execution-variables.js";
 import { decryptSecret, encryptSecret } from "../lib/security.js";
 
 const domainName = z.string().trim().toLowerCase().min(3).max(253).regex(
@@ -51,6 +52,7 @@ const zoneSchema = z.object({
 });
 
 const accountListQuerySchema = z.object(nameFilterFields).superRefine(validateNameFilter);
+const executionVariablesUpdateSchema = z.object({ variables: executionVariablesSchema });
 
 async function accountList(filter: z.infer<typeof accountListQuerySchema>) {
   const conditions: string[] = [];
@@ -60,7 +62,7 @@ async function accountList(filter: z.infer<typeof accountListQuerySchema>) {
   const result = await pool.query(`
     SELECT a.id, a.name, a.provider_mode AS "providerMode", a.cf_account_id AS "cfAccountId",
            a.status, a.tunnel_limit AS "tunnelLimit", a.soft_tunnel_limit AS "softTunnelLimit",
-           a.rdp_allowed_emails AS "rdpAllowedEmails",
+           a.rdp_allowed_emails AS "rdpAllowedEmails", a.execution_variables AS "executionVariables",
            a.last_synced_at AS "lastSyncedAt", a.last_error AS "lastError", a.created_at AS "createdAt",
            COALESCE((SELECT count(*)::int FROM stores s WHERE s.account_id = a.id), 0) AS "storeCount",
            COALESCE((
@@ -71,6 +73,7 @@ async function accountList(filter: z.infer<typeof accountListQuerySchema>) {
                'status', z.status,
                'dnsRecordLimit', z.dns_record_limit,
                'softStoreLimit', z.soft_store_limit,
+               'executionVariables', z.execution_variables,
                'storeCount', (SELECT count(*) FROM stores s WHERE s.zone_id = z.id)
              ) ORDER BY z.name)
              FROM zones z WHERE z.account_id = a.id
@@ -160,6 +163,30 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/accounts", { preHandler: requireAuth }, async (request) => {
     const query = accountListQuerySchema.parse(request.query);
     return { accounts: await accountList(query) };
+  });
+
+  app.put("/api/accounts/:id/execution-variables", { preHandler: requireAuth }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = executionVariablesUpdateSchema.parse(request.body);
+    const result = await pool.query(
+      "UPDATE cloudflare_accounts SET execution_variables = $1, updated_at = now() WHERE id = $2 RETURNING name",
+      [body.variables, id]
+    );
+    if (!result.rowCount) return reply.code(404).send({ error: "Account not found" });
+    await writeAudit({ actorUserId: request.authUser!.id, action: "account.execution_variables_updated", entityType: "cloudflare_account", entityId: id, details: { variableNames: Object.keys(body.variables) } });
+    return { variables: body.variables };
+  });
+
+  app.put("/api/accounts/:accountId/zones/:zoneId/execution-variables", { preHandler: requireAuth }, async (request, reply) => {
+    const { accountId, zoneId } = z.object({ accountId: z.string().uuid(), zoneId: z.string().uuid() }).parse(request.params);
+    const body = executionVariablesUpdateSchema.parse(request.body);
+    const result = await pool.query(
+      "UPDATE zones SET execution_variables = $1, updated_at = now() WHERE id = $2 AND account_id = $3 RETURNING name",
+      [body.variables, zoneId, accountId]
+    );
+    if (!result.rowCount) return reply.code(404).send({ error: "Zone not found" });
+    await writeAudit({ actorUserId: request.authUser!.id, action: "zone.execution_variables_updated", entityType: "zone", entityId: zoneId, details: { accountId, variableNames: Object.keys(body.variables) } });
+    return { variables: body.variables };
   });
 
   app.post("/api/accounts/validate-token", {

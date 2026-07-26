@@ -6,13 +6,14 @@ import { toast } from "sonner";
 import { api } from "../api";
 import { useDrawers } from "../components/DrawerContext";
 import { ExecutionStatsSummary } from "../components/ExecutionStatsSummary";
+import { ScriptArgumentsEditor } from "../components/ExecutionVariablesEditor";
 import { FieldHelp } from "../components/FieldHelp";
 import { HostPlatformIcon } from "../components/HostPlatformIcon";
 import { Modal } from "../components/Modal";
 import { PageHeader } from "../components/PageHeader";
 import { ScriptEditor } from "../components/ScriptEditor";
 import { SearchableSelect } from "../components/SearchableSelect";
-import type { ManagedScriptSummary } from "../types";
+import type { ManagedScriptSummary, ScriptArgument } from "../types";
 
 const defaultContent = {
   windows: "Write-Output \"Store: $env:COMPUTERNAME\"\n",
@@ -44,6 +45,7 @@ export function ScriptsPage() {
   const [createDescription, setCreateDescription] = useState("");
   const [createTimeoutSeconds, setCreateTimeoutSeconds] = useState(60);
   const [createContent, setCreateContent] = useState(defaultContent.windows);
+  const [createArguments, setCreateArguments] = useState<ScriptArgument[]>([]);
   const scriptPageSize = 12;
   const scriptParams = new URLSearchParams({ page: String(scriptPage), pageSize: String(scriptPageSize) });
   if (nameFilter.trim()) scriptParams.set("name", nameFilter.trim());
@@ -77,6 +79,7 @@ export function ScriptsPage() {
     setCreateDescription("");
     setCreateTimeoutSeconds(60);
     setCreateContent(defaultContent.windows);
+    setCreateArguments([]);
     setCreateOpen(true);
   };
   const changeCreatePlatform = (platform: "windows" | "unix") => {
@@ -85,7 +88,7 @@ export function ScriptsPage() {
     setCreateContent(defaultContent[platform]);
   };
   const create = useMutation({
-    mutationFn: () => api.post<{ id: string }>("/api/scripts", { name: createName, platform: createPlatform, language: createLanguage, description: createDescription, defaultTimeoutMs: createTimeoutSeconds * 1000, content: createContent }),
+    mutationFn: () => api.post<{ id: string }>("/api/scripts", { name: createName, platform: createPlatform, language: createLanguage, description: createDescription, defaultTimeoutMs: createTimeoutSeconds * 1000, arguments: createArguments, content: createContent }),
     onSuccess: async (result) => {
       setCreateOpen(false);
       await queryClient.invalidateQueries({ queryKey: ["scripts"] });
@@ -129,6 +132,7 @@ export function ScriptsPage() {
           <label className="field"><span className="field-label">Description</span><input value={createDescription} onChange={(event) => setCreateDescription(event.target.value)} placeholder="Optional description" /></label>
           <label className="field"><span className="field-label">Default timeout (seconds)</span><input type="number" min={1} max={300} value={createTimeoutSeconds} onChange={(event) => setCreateTimeoutSeconds(Math.min(300, Math.max(1, Number(event.target.value) || 1)))} /></label>
         </div>
+        <ScriptArgumentsEditor argumentsList={createArguments} onChange={setCreateArguments} />
         <ScriptEditor value={createContent} language={createLanguage} height="300px" onChange={setCreateContent} />
         <div className="form-actions"><span className="script-editor-hint">Creates version 1</span><button className="button button-primary" type="button" disabled={!createName.trim() || !createContent.trim() || create.isPending} onClick={() => create.mutate()}><Save size={15} />{create.isPending ? "Saving..." : "Create script"}</button></div>
       </div>

@@ -1,12 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Globe2, KeyRound, LogOut, RefreshCw, Save, ServerCog, ShieldCheck } from "lucide-react";
-import { useMemo, useState, type FormEvent } from "react";
+import { Braces, Globe2, KeyRound, LogOut, RefreshCw, Save, ServerCog, ShieldCheck } from "lucide-react";
+import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 import { ApiError, api } from "../api";
 import { CopyButton } from "../components/CopyButton";
 import { FieldHelp } from "../components/FieldHelp";
+import { AddVariableButton, ExecutionVariablesEditor } from "../components/ExecutionVariablesEditor";
 import { PageHeader } from "../components/PageHeader";
-import type { AppSettings, User } from "../types";
+import type { AppSettings, ExecutionVariables, User } from "../types";
 
 type McpSettingsResponse = {
   settings: AppSettings["mcp"];
@@ -22,6 +23,7 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
   const [error, setError] = useState("");
   const [settingsError, setSettingsError] = useState("");
   const [mcpToken, setMcpToken] = useState<string | null>(null);
+  const [globalVariables, setGlobalVariables] = useState<ExecutionVariables>({});
   const { data: settingsData, isLoading: settingsLoading } = useQuery({
     queryKey: ["settings"],
     queryFn: () => api.get<{ settings: AppSettings }>("/api/settings")
@@ -43,6 +45,15 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
       toast.success(data.settings.enabled ? "MCP server enabled" : "MCP server disabled");
     },
     onError: (requestError) => toast.error(requestError instanceof ApiError ? requestError.message : "Unable to update MCP server")
+  });
+  useEffect(() => { if (settingsData?.settings.executionVariables) setGlobalVariables(settingsData.settings.executionVariables); }, [settingsData?.settings.executionVariables]);
+  const updateExecutionVariables = useMutation({
+    mutationFn: () => api.put<{ variables: ExecutionVariables }>("/api/settings/execution-variables", { variables: globalVariables }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["settings"] });
+      toast.success("Global execution variables updated");
+    },
+    onError: (requestError) => toast.error(requestError instanceof Error ? requestError.message : "Unable to update global execution variables")
   });
   const rotateMcp = useMutation({
     mutationFn: () => api.post<McpSettingsResponse>("/api/settings/mcp/rotate"),
@@ -93,6 +104,11 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
         <label className="field"><span className="field-label">Public base URL <FieldHelp text="The HTTPS origin reachable from store machines. Enrollment commands, installer callback URLs, and the MCP endpoint use this value. Enter a full origin without a path." /></span><input name="publicBaseUrl" defaultValue={settingsData?.settings.publicBaseUrl ?? ""} placeholder="https://cloudflare-man.example.com" disabled={settingsLoading} required /></label>
         <button className="button button-primary" disabled={settingsLoading || updateSettings.isPending}><Save size={15} />{updateSettings.isPending ? "Saving..." : "Save URL"}</button>
       </form>
+    </section>
+
+    <section className="settings-section execution-variable-settings-section">
+      <header><span><Braces size={19} /></span><div className="settings-heading-copy"><h2>Global execution variables</h2><small>Inherited by every saved and inline script execution. Account, zone, store, computer, and run overrides take precedence.</small></div></header>
+      <div className="settings-form execution-variable-settings-body"><ExecutionVariablesEditor variables={globalVariables} savedVariables={settingsData?.settings.executionVariables ?? {}} onChange={setGlobalVariables} /><div className="form-actions"><AddVariableButton variables={globalVariables} onChange={setGlobalVariables} /><button className="button button-primary" type="button" disabled={settingsLoading || updateExecutionVariables.isPending} onClick={() => updateExecutionVariables.mutate()}><Save size={15} />{updateExecutionVariables.isPending ? "Saving..." : "Save variables"}</button></div></div>
     </section>
 
     <section className="settings-section mcp-settings-section">

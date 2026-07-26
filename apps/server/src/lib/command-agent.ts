@@ -110,6 +110,8 @@ export async function createCommandExecution(
     scriptPlatform: "windows" | "unix";
     scriptLanguage: "powershell" | "bash" | "sh";
     scriptVersion: number | null;
+    environmentVariables?: Record<string, string>;
+    argumentSources?: Record<string, unknown>;
     bulkExecutionId?: string | null;
   }
 ): Promise<CommandExecutionHandle> {
@@ -118,9 +120,9 @@ export async function createCommandExecution(
     `INSERT INTO store_command_executions(
        store_id, enrollment_id, script_version_id, requested_by, script, timeout_ms,
        script_type, script_name, script_platform, script_language, script_version_number,
-       report_token_hash, bulk_execution_id
+       report_token_hash, bulk_execution_id, environment_variables, argument_sources
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
      RETURNING id`,
     [
       input.storeId,
@@ -135,7 +137,9 @@ export async function createCommandExecution(
       input.scriptLanguage,
       input.scriptVersion,
       hashToken(reportToken),
-      input.bulkExecutionId ?? null
+      input.bulkExecutionId ?? null,
+      input.environmentVariables ?? {},
+      input.argumentSources ?? {}
     ]
   );
   return { executionId: result.rows[0].id as string, reportToken };

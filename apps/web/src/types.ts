@@ -4,9 +4,37 @@ export type User = {
   mustChangePassword: boolean;
 };
 
+export type ExecutionVariables = Record<string, string>;
+
+export type ScriptArgument = {
+  name: string;
+  defaultValue: string;
+  description: string;
+  required: boolean;
+};
+
+// How a declared script argument gets its value at execution time, chosen by
+// the operator when preparing a run. This mapping only exists at that moment -
+// it is never persisted as part of the script/argument definition, and script
+// arguments and environment variables otherwise know nothing about each other.
+export type ArgumentBinding =
+  | { type: "custom"; value: string }
+  | { type: "variable"; variable: string };
+
+export type ArgumentBindings = Record<string, ArgumentBinding>;
+
+// Where a resolved argument value came from, recorded at execution time so
+// history can show it later even though the binding itself is never
+// persisted as part of the script/argument definition.
+export type ArgumentValueSource =
+  | { origin: "custom" }
+  | { origin: "default" }
+  | { origin: "variable"; variable: string; scope: "global" | "account" | "zone" | "store" | "built-in" | "computer" };
+
 export type AppSettings = {
   publicBaseUrl: string;
   configured: boolean;
+  executionVariables: ExecutionVariables;
   mcp: {
     enabled: boolean;
     endpoint: string;
@@ -24,6 +52,7 @@ export type Zone = {
   dnsRecordLimit: number;
   softStoreLimit: number;
   storeCount: number;
+  executionVariables: ExecutionVariables;
 };
 
 export type CloudflareAccount = {
@@ -39,6 +68,7 @@ export type CloudflareAccount = {
   lastSyncedAt: string | null;
   lastError: string | null;
   zones: Zone[];
+  executionVariables: ExecutionVariables;
 };
 
 export type StoreRoute = {
@@ -88,6 +118,7 @@ export type Store = {
   rdpUrl: string | null;
   rdpLastError: string | null;
   publications: StorePublication[];
+  executionVariables: ExecutionVariables;
   enrollments?: StoreEnrollment[];
   commandExecutions?: StoreCommandExecution[];
   commandAgent?: {
@@ -137,6 +168,7 @@ export type StoreEnrollment = {
   unenrollLastError: string | null;
   unenrolledAt: string | null;
   logCount: number;
+  executionVariables: ExecutionVariables;
   hostInfo: {
     osName?: string;
     osVersion?: string;
@@ -169,7 +201,7 @@ export type StoreCommandExecution = {
   language: "powershell" | "bash" | "sh" | null;
   script: string;
   timeoutMs: number;
-  status: "scheduled" | "running" | "succeeded" | "failed" | "timed_out" | "cancelled";
+  status: "scheduled" | "running" | "succeeded" | "failed" | "timed_out" | "cancelled" | "never_run";
   taskId: string | null;
   processId: number | null;
   createdAt: string;
@@ -182,6 +214,8 @@ export type StoreCommandExecution = {
   error: string | null;
   requestedBy: string | null;
   bulkExecutionId?: string | null;
+  environmentVariables: ExecutionVariables;
+  argumentSources: Record<string, ArgumentValueSource>;
 };
 
 export type ScriptCommandExecution = StoreCommandExecution & {
@@ -203,6 +237,7 @@ export type ManagedScriptSummary = {
   language: "powershell" | "bash" | "sh";
   description: string;
   defaultTimeoutMs: number;
+  arguments: ScriptArgument[];
   latestVersion: number | null;
   latestVersionId: string | null;
   versionCount: number;
@@ -245,7 +280,6 @@ export type BulkScriptRun = {
   id: string;
   name: string;
   description: string;
-  descriptionVersion: number;
   scriptVersionId: string;
   timeoutMs: number;
   createdAt: string;
@@ -257,6 +291,7 @@ export type BulkScriptRun = {
   timedOut: number;
   cancelled: number;
   scheduled: number;
+  argumentBindings: ArgumentBindings;
 };
 
 export type EnrollmentResult = {

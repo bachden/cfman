@@ -24,14 +24,16 @@ export function validateNameFilter(filter: NameFilter, context: z.RefinementCtx)
 export function appendNameFilter(
   conditions: string[],
   values: unknown[],
-  column: string,
+  column: string | string[],
   filter: NameFilter
 ): void {
   if (!filter.name) return;
   const value = filter.nameMatch === "ilike" ? `%${filter.name}%` : filter.name;
   values.push(value);
   const parameter = `$${values.length}`;
-  if (filter.nameMatch === "exact") conditions.push(`lower(${column}) = lower(${parameter})`);
-  else if (filter.nameMatch === "regex") conditions.push(`${column} ~* ${parameter}`);
-  else conditions.push(`${column} ILIKE ${parameter}`);
+  const columns = Array.isArray(column) ? column : [column];
+  const clause = columns
+    .map((col) => filter.nameMatch === "exact" ? `lower(${col}) = lower(${parameter})` : filter.nameMatch === "regex" ? `${col} ~* ${parameter}` : `${col} ILIKE ${parameter}`)
+    .join(" OR ");
+  conditions.push(columns.length > 1 ? `(${clause})` : clause);
 }

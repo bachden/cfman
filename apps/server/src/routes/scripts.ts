@@ -5,6 +5,7 @@ import { requireAuth } from "../lib/auth.js";
 import { createCommandExecution, executeStoreScript, getCommandAgentConfig } from "../lib/command-agent.js";
 import { pool, withTransaction } from "../lib/database.js";
 import { appendNameFilter, nameFilterFields, validateNameFilter } from "../lib/name-filter.js";
+import { argumentBindingsSchema, applyScriptArguments, describeArgumentValueSources, resolveArgumentValues, resolveAvailableVariablesForStores, scriptArgumentsSchema } from "../lib/execution-variables.js";
 import { latestEnrollmentJoin, onboardingStatusExpression } from "./stores.js";
 
 const platformSchema = z.enum(["windows", "unix"]);
@@ -15,14 +16,16 @@ const scriptMetadata = z.object({
   platform: platformSchema,
   language: languageSchema,
   description: z.string().trim().max(500).default(""),
-  defaultTimeoutMs: z.number().int().min(1_000).max(300_000).default(60_000)
+  defaultTimeoutMs: z.number().int().min(1_000).max(300_000).default(60_000),
+  arguments: scriptArgumentsSchema.default([])
 });
 const scriptCreateSchema = scriptMetadata.extend({ content: scriptContent });
 const scriptUpdateSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   language: languageSchema.optional(),
   description: z.string().trim().max(500).optional(),
-  defaultTimeoutMs: z.number().int().min(1_000).max(300_000).optional()
+  defaultTimeoutMs: z.number().int().min(1_000).max(300_000).optional(),
+  arguments: scriptArgumentsSchema.optional()
 });
 const versionSchema = z.object({ content: scriptContent });
 const executionTimestampSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/, "Timestamp must use ISO 8601 format");
@@ -35,18 +38,21 @@ const executionHistorySchema = z.object({
   pageSize: z.coerce.number().int().min(5).max(50).default(10)
 });
 const bulkFilterSchema = z.object({
+  ...nameFilterFields,
   tenantCode: z.string().trim().max(80).optional(),
   tunnelStatus: z.string().trim().max(40).optional(),
   enrollmentStatus: z.string().trim().max(40).optional()
-});
+}).superRefine(validateNameFilter);
 const bulkExecuteSchema = z.object({
   scriptVersionId: z.string().uuid(),
   name: z.string().trim().min(1).max(120),
   description: z.string().trim().max(1000).default(""),
   timeoutMs: z.number().int().min(1_000).max(300_000).optional(),
   storeIds: z.array(z.string().uuid()).max(5000).optional(),
-  filters: bulkFilterSchema.default({}),
-  selectAll: z.boolean().default(false)
+  excludeStoreIds: z.array(z.string().uuid()).max(5000).optional(),
+  filters: bulkFilterSchema.default({ nameMatch: "ilike" }),
+  selectAll: z.boolean().default(false),
+  argumentBindings: argumentBindingsSchema.default({})
 }).superRefine((value, context) => {
   if (!value.selectAll && !value.storeIds?.length) {
     context.addIssue({ code: "custom", path: ["storeIds"], message: "Select stores or provide filters before starting a bulk execution" });
@@ -72,6 +78,7 @@ const scriptSummary = `jsonb_build_object(
   'language', s.language,
   'description', s.description,
   'defaultTimeoutMs', s.default_timeout_ms,
+  'arguments', s.arguments,
   'latestVersion', latest.version,
   'latestVersionId', latest.id,
   'versionCount', COALESCE(latest."versionCount", 0),
@@ -248,7 +255,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                 COALESCE(executed_version.version, saved_version.version) AS "scriptVersion",
                 COALESCE(ce.script_name, 'Inline script') AS "scriptName",
                 ce.script_platform AS platform, ce.script_language AS language,
-                ce.script, ce.timeout_ms AS "timeoutMs", ce.status, ce.task_id AS "taskId", ce.process_id AS "processId",
+                ce.script, ce.environment_variables AS "environmentVariables", ce.argument_sources AS "argumentSources", ce.timeout_ms AS "timeoutMs", ce.status, ce.task_id AS "taskId", ce.process_id AS "processId",
                 ce.created_at AS "createdAt", ce.started_at AS "startedAt", ce.finished_at AS "finishedAt",
                 ce.elapsed_ms AS "elapsedMs", ce.exit_code AS "exitCode",
                 ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy"
@@ -362,6 +369,8 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                  'platform', ce.script_platform,
                  'language', ce.script_language,
                  'script', ce.script,
+                 'environmentVariables', ce.environment_variables,
+                 'argumentSources', ce.argument_sources,
                  'timeoutMs', ce.timeout_ms,
                  'status', ce.status,
                  'taskId', ce.task_id,
@@ -395,11 +404,11 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                  'id', r.id,
                  'name', r.name,
                  'description', r.description,
-                 'descriptionVersion', r.description_version,
                  'scriptVersionId', r.saved_script_version_id,
                  'timeoutMs', r.timeout_ms,
                  'createdAt', r.created_at,
                  'requestedBy', bulk_user.username,
+                 'argumentBindings', r.argument_overrides,
                  'selectedCount', count(ce.id)::int,
                  'running', count(ce.id) FILTER (WHERE ce.status = 'running'),
                  'succeeded', count(ce.id) FILTER (WHERE ce.status = 'succeeded'),
@@ -460,8 +469,8 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     const offset = (query.page - 1) * query.pageSize;
     const [runsResult, countResult] = await Promise.all([
       pool.query(
-        `SELECT r.id, r.name, r.description, r.description_version AS "descriptionVersion",
-                r.saved_script_version_id AS "scriptVersionId", r.timeout_ms AS "timeoutMs",
+        `SELECT r.id, r.name, r.description,
+                r.saved_script_version_id AS "scriptVersionId", r.timeout_ms AS "timeoutMs", r.argument_overrides AS "argumentBindings",
                 r.created_at AS "createdAt", u.username AS "requestedBy",
                 count(ce.id)::int AS "selectedCount",
                 (count(ce.id) FILTER (WHERE ce.status = 'running'))::int AS running,
@@ -496,8 +505,8 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     }).parse(request.query);
     const offset = (query.page - 1) * query.pageSize;
     const runResult = await pool.query(
-      `SELECT r.id, r.name, r.description, r.description_version AS "descriptionVersion",
-              r.saved_script_version_id AS "scriptVersionId", r.timeout_ms AS "timeoutMs",
+      `SELECT r.id, r.name, r.description,
+              r.saved_script_version_id AS "scriptVersionId", r.timeout_ms AS "timeoutMs", r.argument_overrides AS "argumentBindings",
               r.created_at AS "createdAt", u.username AS "requestedBy"
          FROM script_bulk_executions r
          LEFT JOIN users u ON u.id = r.requested_by
@@ -533,7 +542,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                 ce.script_version_id AS "scriptVersionId", ce.saved_script_id AS "savedScriptId",
                 ce.saved_script_version_id AS "savedScriptVersionId", ce.script_name AS "scriptName",
                 ce.script_version_number AS "scriptVersion", ce.script_platform AS platform,
-                ce.script_language AS language, ce.script, ce.timeout_ms AS "timeoutMs", ce.status,
+                ce.script_language AS language, ce.script, ce.environment_variables AS "environmentVariables", ce.argument_sources AS "argumentSources", ce.timeout_ms AS "timeoutMs", ce.status,
                 ce.task_id AS "taskId", ce.process_id AS "processId",
                 ce.created_at AS "createdAt", ce.started_at AS "startedAt", ce.finished_at AS "finishedAt", ce.elapsed_ms AS "elapsedMs",
                 ce.exit_code AS "exitCode", ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy"
@@ -572,7 +581,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     const body = bulkExecuteSchema.parse(request.body);
     const selectedVersion = await pool.query(
       `SELECT v.id, v.version, v.content, s.id AS "scriptId", s.name AS "scriptName", s.platform, s.language,
-              s.default_timeout_ms AS "defaultTimeoutMs"
+              s.default_timeout_ms AS "defaultTimeoutMs", s.arguments
          FROM managed_script_versions v JOIN managed_scripts s ON s.id = v.script_id
         WHERE v.id = $1 AND s.id = $2`,
       [body.scriptVersionId, id]
@@ -584,9 +593,11 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     const conditions: string[] = [];
     if (body.selectAll) {
       conditions.push("TRUE");
+      appendNameFilter(conditions, values, ["s.display_name", "s.store_code"], filters);
       if (filters.tenantCode) { values.push(`%${filters.tenantCode}%`); conditions.push(`s.tenant_code ILIKE $${values.length}`); }
       if (filters.tunnelStatus) { values.push(filters.tunnelStatus); conditions.push(`s.tunnel_status = $${values.length}`); }
       if (filters.enrollmentStatus) { values.push(filters.enrollmentStatus); conditions.push(`${onboardingStatusExpression} = $${values.length}`); }
+      if (body.excludeStoreIds?.length) { values.push(body.excludeStoreIds); conditions.push(`s.id <> ALL($${values.length}::uuid[])`); }
     }
     const storeIds = body.selectAll ? undefined : body.storeIds;
     if (!storeIds?.length && !body.selectAll) return reply.code(400).send({ error: "No stores selected" });
@@ -610,23 +621,55 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     );
     if (!targetResult.rowCount) return reply.code(409).send({ error: "No stores matched the selected filters" });
     const timeoutMs = body.timeoutMs ?? version.defaultTimeoutMs;
+    const scriptArguments = scriptArgumentsSchema.parse(version.arguments);
+    let availableByStore: Awaited<ReturnType<typeof resolveAvailableVariablesForStores>>;
+    try {
+      availableByStore = await resolveAvailableVariablesForStores(targetResult.rows.map((target) => target.id));
+    } catch (error) {
+      return reply.code(409).send({ error: error instanceof Error ? error.message : "Unable to resolve available variables" });
+    }
     const run = await withTransaction(async (client) => {
-      const next = await client.query(
-        `SELECT COALESCE(MAX(description_version), 0) + 1 AS version
-           FROM script_bulk_executions WHERE saved_script_id = $1 AND name = $2`,
-        [id, body.name]
-      );
       const inserted = await client.query(
-        `INSERT INTO script_bulk_executions(saved_script_id, saved_script_version_id, name, description, description_version, timeout_ms, requested_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, description_version AS "descriptionVersion"`,
-        [id, body.scriptVersionId, body.name, body.description, next.rows[0].version, timeoutMs, request.authUser!.id]
+        `INSERT INTO script_bulk_executions(saved_script_id, saved_script_version_id, name, description, timeout_ms, requested_by, argument_overrides)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [id, body.scriptVersionId, body.name, body.description, timeoutMs, request.authUser!.id, body.argumentBindings]
       );
-      return inserted.rows[0] as { id: string; descriptionVersion: number };
+      return inserted.rows[0] as { id: string };
     });
     const executions: string[] = [];
-    const pending: Array<{ storeId: string; execution: Awaited<ReturnType<typeof createCommandExecution>> }> = [];
+    const pending: Array<{ storeId: string; script: string; execution: Awaited<ReturnType<typeof createCommandExecution>> }> = [];
     for (const target of targetResult.rows) {
       const platform = target.platform === "windows" ? "windows" : "unix";
+      const available = availableByStore.get(target.id);
+      if (!available) continue;
+      let argumentValues: ReturnType<typeof resolveArgumentValues>;
+      let argumentSources: ReturnType<typeof describeArgumentValueSources>;
+      try {
+        argumentValues = resolveArgumentValues(scriptArguments, available.variables, body.argumentBindings);
+        argumentSources = describeArgumentValueSources(scriptArguments, available.sources, body.argumentBindings);
+      } catch (error) {
+        const execution = await createCommandExecution({
+          storeId: target.id,
+          enrollmentId: target.enrollmentId ?? null,
+          scriptVersionId: version.id,
+          requestedBy: request.authUser!.id,
+          script: version.content,
+          timeoutMs,
+          scriptType: "managed",
+          scriptName: version.scriptName,
+          scriptPlatform: version.platform,
+          scriptLanguage: version.language,
+          scriptVersion: version.version,
+          environmentVariables: {},
+          bulkExecutionId: run.id
+        });
+        executions.push(execution.executionId);
+        await pool.query(
+          `UPDATE store_command_executions SET status = 'never_run', finished_at = now(), elapsed_ms = 0, error = $1 WHERE id = $2`,
+          [error instanceof Error ? error.message : "Unable to resolve script arguments", execution.executionId]
+        );
+        continue;
+      }
       const execution = await createCommandExecution({
         storeId: target.id,
         enrollmentId: target.enrollmentId ?? null,
@@ -639,26 +682,35 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
         scriptPlatform: version.platform,
         scriptLanguage: version.language,
         scriptVersion: version.version,
+        environmentVariables: argumentValues,
+        argumentSources,
         bulkExecutionId: run.id
       });
       executions.push(execution.executionId);
-      if (!target.enrollmentId || platform !== version.platform) {
+      if (!target.enrollmentId) {
         await pool.query(
-          `UPDATE store_command_executions SET status = 'failed', finished_at = now(), elapsed_ms = 0, error = $1 WHERE id = $2`,
-          [target.enrollmentId ? `This script is for ${version.platform}, but the active enrollment is ${platform}` : "This store has no active enrollment", execution.executionId]
+          `UPDATE store_command_executions SET status = 'never_run', finished_at = now(), elapsed_ms = 0, error = $1 WHERE id = $2`,
+          ["This store has no active enrollment", execution.executionId]
         );
         continue;
       }
-      pending.push({ storeId: target.id, execution });
+      if (platform !== version.platform) {
+        await pool.query(
+          `UPDATE store_command_executions SET status = 'failed', finished_at = now(), elapsed_ms = 0, error = $1 WHERE id = $2`,
+          [`This script is for ${version.platform}, but the active enrollment is ${platform}`, execution.executionId]
+        );
+        continue;
+      }
+      pending.push({ storeId: target.id, script: applyScriptArguments(version.content, version.language, argumentValues), execution });
     }
     void (async () => {
       for (let index = 0; index < pending.length; index += 20) {
         const batch = pending.slice(index, index + 20);
-        await Promise.allSettled(batch.map((item) => executeStoreScript(item.storeId, version.content, timeoutMs, item.execution)));
+        await Promise.allSettled(batch.map((item) => executeStoreScript(item.storeId, item.script, timeoutMs, item.execution)));
       }
     })();
-    await writeAudit({ actorUserId: request.authUser!.id, action: "script.bulk_executed", entityType: "script", entityId: id, details: { bulkExecutionId: run.id, name: body.name, descriptionVersion: run.descriptionVersion, selectedCount: executions.length, timeoutMs } });
-    return reply.code(202).send({ bulkExecutionId: run.id, scriptId: id, scriptVersionId: version.id, name: body.name, descriptionVersion: run.descriptionVersion, selectedCount: executions.length, executionIds: executions, timeoutMs });
+    await writeAudit({ actorUserId: request.authUser!.id, action: "script.bulk_executed", entityType: "script", entityId: id, details: { bulkExecutionId: run.id, name: body.name, selectedCount: executions.length, timeoutMs, argumentBindingNames: Object.keys(body.argumentBindings), excludedCount: body.excludeStoreIds?.length ?? 0 } });
+    return reply.code(202).send({ bulkExecutionId: run.id, scriptId: id, scriptVersionId: version.id, name: body.name, selectedCount: executions.length, executionIds: executions, timeoutMs });
   });
 
   app.post("/api/scripts", { preHandler: requireAuth }, async (request, reply) => {
@@ -667,10 +719,10 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     if (languageError) return reply.code(400).send({ error: languageError });
     const created = await withTransaction(async (client) => {
       const script = await client.query(
-        `INSERT INTO managed_scripts(name, platform, language, description, default_timeout_ms, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        `INSERT INTO managed_scripts(name, platform, language, description, default_timeout_ms, arguments, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          RETURNING id`,
-        [body.name, body.platform, body.language, body.description, body.defaultTimeoutMs, request.authUser!.id]
+        [body.name, body.platform, body.language, body.description, body.defaultTimeoutMs, JSON.stringify(body.arguments), request.authUser!.id]
       );
       const version = await client.query(
         `INSERT INTO managed_script_versions(script_id, version, content, created_by)
@@ -701,10 +753,11 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     const result = await pool.query(
       `UPDATE managed_scripts
           SET name = COALESCE($1, name), language = COALESCE($2, language),
-              description = COALESCE($3, description), default_timeout_ms = COALESCE($4, default_timeout_ms), updated_at = now()
-        WHERE id = $5
+              description = COALESCE($3, description), default_timeout_ms = COALESCE($4, default_timeout_ms),
+              arguments = COALESCE($5, arguments), updated_at = now()
+        WHERE id = $6
         RETURNING id`,
-      [body.name ?? null, body.language ?? null, body.description ?? null, body.defaultTimeoutMs ?? null, id]
+      [body.name ?? null, body.language ?? null, body.description ?? null, body.defaultTimeoutMs ?? null, body.arguments ? JSON.stringify(body.arguments) : null, id]
     );
     await writeAudit({ actorUserId: request.authUser!.id, action: "script.updated", entityType: "script", entityId: id, details: body });
     return { success: Boolean(result.rowCount) };

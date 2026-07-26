@@ -897,9 +897,11 @@ test("executes a script through the configured store command agent", async () =>
     assert.match(headers.get("X-Cloudflare-Man-Agent-Token") ?? "", /^[A-Za-z0-9_-]{40,}$/);
     executionCall += 1;
     const requestBody = JSON.parse(String(init?.body));
-    assert.deepEqual({ script: requestBody.script, timeoutMs: requestBody.timeoutMs }, executionCall <= 2
-      ? { script: "Write-Output 'ready v2'", timeoutMs: executionCall === 1 ? 90000 : 30000 }
-      : { script: "Write-Output 'inline'", timeoutMs: 15000 });
+    assert.equal(requestBody.timeoutMs, executionCall === 1 ? 90000 : executionCall === 2 ? 30000 : 15000);
+    assert.match(requestBody.script, /\$STORE_CODE = '0001'/);
+    assert.match(requestBody.script, /\$STORE_NAME = 'Highlands Test Store'/);
+    assert.match(requestBody.script, /\$TENANT_CODE = 'HLC'/);
+    assert.ok(requestBody.script.endsWith(executionCall <= 2 ? "Write-Output 'ready v2'" : "Write-Output 'inline'"));
     assert.match(requestBody.executionId, /^[0-9a-f-]{36}$/);
     assert.match(requestBody.reportToken, /^[A-Za-z0-9_-]{40,}$/);
     assert.equal(requestBody.startUrl, `https://cfman.example.test/api/public/command-executions/${requestBody.executionId}/started`);
@@ -1243,7 +1245,6 @@ test("groups a bulk script execution and exposes per-store detail", async () => 
     });
     assert.equal(started.statusCode, 202, started.body);
     assert.equal(started.json().selectedCount, 1);
-    assert.equal(started.json().descriptionVersion, 1);
     assert.equal(started.json().timeoutMs, 90000);
     const runId = started.json().bulkExecutionId as string;
     const scriptVersion = await pool.query("SELECT version FROM managed_script_versions WHERE id = $1", [scriptVersionId]);
@@ -1378,6 +1379,26 @@ test("tracks enrollment history and issues cleanup for a running tunnel", async 
   assert.equal(issued.unenrollCommands.length, 1);
   assert.equal(issued.unenrollCommands[0].enrollmentId, enrollmentId);
   assert.match(issued.unenrollCommands[0].urls.shell, /\/unenroll\.sh$/);
+
+  const revertedEnrollment = await pool.query(
+    `SELECT unenroll_token_hash, unenroll_requested_at, unenrolled_at, superseded_by_enrollment_id
+       FROM enrollments WHERE id = $1`,
+    [enrollmentId]
+  );
+  assert.deepEqual(revertedEnrollment.rows[0], {
+    unenroll_token_hash: null,
+    unenroll_requested_at: null,
+    unenrolled_at: null,
+    superseded_by_enrollment_id: null
+  });
+  const revertedCleanupScripts = await pool.query(
+    "SELECT 1 FROM enrollment_scripts WHERE enrollment_id = $1 AND script_kind = 'unenroll'",
+    [enrollmentId]
+  );
+  assert.equal(revertedCleanupScripts.rowCount, 0);
+  const detailAfterRevert = await app.inject({ method: "GET", url: `/api/stores/${storeId}`, headers: { cookie: sessionCookie } });
+  assert.equal(detailAfterRevert.statusCode, 200, detailAfterRevert.body);
+  assert.equal(detailAfterRevert.json().store.enrollments[0].unenrollStatus, "not_required");
 
   const cloudflareResources = await pool.query(
     `SELECT tunnel_id, dns_record_id, rdp_route_id, rdp_target_id, rdp_vnet_id

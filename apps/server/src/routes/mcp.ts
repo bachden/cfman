@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { argumentBindingsSchema, executionVariablesSchema, scriptArgumentsSchema } from "../lib/execution-variables.js";
 import { requireMcpAuth } from "../lib/auth.js";
 
 type ToolShape = z.ZodRawShape;
@@ -145,15 +146,17 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     cfAccountId: z.string().min(1),
     apiToken: z.string().min(1)
   }, (args) => callApi(app, token, "POST", "/api/accounts/validate-token", args));
+  registerApiTool(server, app, token, "cfman_list_tenant_codes", "List every distinct tenant code assigned to at least one store, sorted alphabetically. Use to populate a tenant-code picker before filtering stores.", {}, () => callApi(app, token, "GET", "/api/stores/tenant-codes"));
   registerApiTool(server, app, token, "cfman_list_stores", "List stores with display-name, tenant-code, tunnel-status, enrollment-status, broad search, and pagination filters.", {
     ...mcpNameFilterFields,
+    name: z.string().trim().min(1).max(160).optional().describe("Matches store display name or store code, case-insensitively"),
     search: z.string().optional(),
     tenantCode: z.string().optional().describe("Case-insensitive tenant code substring"),
     status: z.string().optional().describe("Backward-compatible alias for enrollment status"),
     tunnelStatus: z.string().optional(),
     enrollmentStatus: z.string().optional(),
     page: z.number().int().min(1).default(1),
-    pageSize: z.number().int().min(10).max(100).default(25)
+    pageSize: z.number().int().min(5).max(100).default(25)
   }, (args) => {
     const params = new URLSearchParams();
     setNameFilterParams(params, args);
@@ -348,6 +351,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
   registerApiTool(server, app, token, "cfman_execute_script", "Schedule a saved script version on the store's command agent. Returns a stable execution/task identifier and scheduled status; poll execution history or logs for running and terminal results.", {
     storeId: z.string().uuid(),
     scriptVersionId: z.string().uuid(),
+    argumentBindings: argumentBindingsSchema.optional().describe("Per-declared-argument mapping, keyed by argument name: { type: 'custom', value } for a literal value, or { type: 'variable', variable } to bind to one of the store's resolved environment variables (see cfman_resolve_execution_variables). Arguments with no binding use their own declared default value."),
     timeoutMs: z.number().int().min(1000).max(300000).optional().describe("Optional override; omitted uses the saved script default timeout")
   }, (args) => {
     const { storeId, ...body } = args;
@@ -358,10 +362,18 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     inlineScript: z.string().min(1).max(262144),
     name: z.string().trim().min(1).max(120).optional().describe("Operator-facing name shown beside the inline tag in execution history"),
     language: z.enum(["powershell", "bash", "sh"]).optional().describe("Optional for inline scripts; defaults to PowerShell on Windows and Bash on Unix"),
+    argumentBindings: argumentBindingsSchema.optional().describe("Inline scripts declare no arguments, so this is only useful if you plan to reference the bound names directly in the inline source."),
     timeoutMs: z.number().int().min(1000).max(300000).optional().default(60000)
   }, (args) => {
     const { storeId, ...body } = args;
     return callApi(app, token, "POST", `/api/stores/${storeId}/commands/execute`, body);
+  });
+  registerApiTool(server, app, token, "cfman_resolve_execution_variables", "List every environment variable available to a store (global, account, zone, store, active-computer scopes, and built-in identity values) along with the script's declared arguments, without running anything or applying any mapping. Script arguments and environment variables are independent until an operator explicitly binds an argument to one of these variable names via argumentBindings on cfman_execute_script / cfman_bulk_execute_script; an argument with no binding uses its own declared default value instead.", {
+    storeId: z.string().uuid(),
+    scriptVersionId: z.string().uuid().optional().describe("Omit for inline scripts, which have no declared arguments")
+  }, (args) => {
+    const { storeId, ...body } = args;
+    return callApi(app, token, "POST", `/api/stores/${storeId}/execution-variables/resolve`, body);
   });
   registerApiTool(server, app, token, "cfman_save_inline_execution_as_script", "Save the exact source snapshot from an inline execution as version 1 of a reusable script. Repeated calls return the same script and version identifiers.", {
     storeId: z.string().uuid(),
@@ -385,6 +397,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     language: z.enum(["powershell", "bash", "sh"]),
     description: z.string().default(""),
     defaultTimeoutMs: z.number().int().min(1000).max(300000).default(60000),
+    arguments: scriptArgumentsSchema.optional(),
     content: z.string().min(1)
   }, (args) => callApi(app, token, "POST", "/api/scripts", args));
   registerApiTool(server, app, token, "cfman_update_script", "Update saved script metadata without changing its immutable versions.", {
@@ -392,20 +405,29 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     name: z.string().min(1).optional(),
     language: z.enum(["powershell", "bash", "sh"]).optional(),
     description: z.string().optional(),
-    defaultTimeoutMs: z.number().int().min(1000).max(300000).optional()
+    defaultTimeoutMs: z.number().int().min(1000).max(300000).optional(),
+    arguments: scriptArgumentsSchema.optional()
   }, (args) => {
     const { scriptId, ...body } = args;
     return callApi(app, token, "PATCH", `/api/scripts/${scriptId}`, body);
   });
-  registerApiTool(server, app, token, "cfman_bulk_execute_script", "Schedule a named, described bulk execution of one saved script version concurrently across selected stores or all stores matching tenant/tunnel/enrollment filters. Each per-store execution starts as scheduled and can be polled or cancelled independently; the description is versioned per name.", {
+  registerApiTool(server, app, token, "cfman_bulk_execute_script", "Schedule a named, described bulk execution of one saved script version concurrently across selected stores or all stores matching name/tenant/tunnel/enrollment filters. Each per-store execution starts as scheduled and can be polled or cancelled independently. Each run is an independent, immutable record; running again with the same name does not edit or version the earlier run.", {
     scriptId: z.string().uuid(),
     scriptVersionId: z.string().uuid(),
     name: z.string().trim().min(1).max(120),
     description: z.string().trim().max(1000).default(""),
     timeoutMs: z.number().int().min(1000).max(300000).optional(),
     storeIds: z.array(z.string().uuid()).max(5000).optional(),
-    filters: z.object({ tenantCode: z.string().optional(), tunnelStatus: z.string().optional(), enrollmentStatus: z.string().optional() }).default({}),
-    selectAll: z.boolean().default(false)
+    excludeStoreIds: z.array(z.string().uuid()).max(5000).optional().describe("Store ids to exclude from an otherwise matching selectAll run"),
+    filters: z.object({
+      name: z.string().trim().min(1).max(160).optional().describe("Matches store display name or store code, applied when selectAll is true"),
+      nameMatch: z.enum(["exact", "ilike", "regex"]).default("ilike"),
+      tenantCode: z.string().optional(),
+      tunnelStatus: z.string().optional(),
+      enrollmentStatus: z.string().optional()
+    }).default({ nameMatch: "ilike" }),
+    selectAll: z.boolean().default(false),
+    argumentBindings: argumentBindingsSchema.optional().describe("Per-declared-argument mapping, keyed by argument name: { type: 'custom', value } for a literal value, or { type: 'variable', variable } to bind to a resolved environment variable - re-resolved per store, so a variable like a store-scoped one can legitimately carry a different value on each target. Arguments with no binding use their own declared default value.")
   }, (args) => {
     const { scriptId, ...body } = args;
     return callApi(app, token, "POST", `/api/scripts/${scriptId}/bulk-execute`, body);
@@ -423,6 +445,39 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
   registerApiTool(server, app, token, "cfman_update_public_base_url", "Update the public HTTPS origin used for enrollment URLs and the MCP endpoint.", {
     publicBaseUrl: z.string().min(1)
   }, (args) => callApi(app, token, "PUT", "/api/settings", args));
+  registerApiTool(server, app, token, "cfman_update_global_execution_variables", "Replace the global environment variables inherited by every script execution.", {
+    variables: executionVariablesSchema
+  }, (args) => callApi(app, token, "PUT", "/api/settings/execution-variables", args));
+  registerApiTool(server, app, token, "cfman_update_account_execution_variables", "Replace environment variables inherited by stores assigned to one Cloudflare account.", {
+    accountId: z.string().uuid(),
+    variables: executionVariablesSchema
+  }, (args) => {
+    const { accountId, ...body } = args;
+    return callApi(app, token, "PUT", `/api/accounts/${accountId}/execution-variables`, body);
+  });
+  registerApiTool(server, app, token, "cfman_update_zone_execution_variables", "Replace environment variables inherited by stores assigned to one zone.", {
+    accountId: z.string().uuid(),
+    zoneId: z.string().uuid(),
+    variables: executionVariablesSchema
+  }, (args) => {
+    const { accountId, zoneId, ...body } = args;
+    return callApi(app, token, "PUT", `/api/accounts/${accountId}/zones/${zoneId}/execution-variables`, body);
+  });
+  registerApiTool(server, app, token, "cfman_update_store_execution_variables", "Replace environment variables inherited by executions for one store.", {
+    storeId: z.string().uuid(),
+    variables: executionVariablesSchema
+  }, (args) => {
+    const { storeId, ...body } = args;
+    return callApi(app, token, "PUT", `/api/stores/${storeId}/execution-variables`, body);
+  });
+  registerApiTool(server, app, token, "cfman_update_computer_execution_variables", "Replace environment variables for the computer represented by one enrollment. These variables apply while that enrollment is the store's active computer.", {
+    storeId: z.string().uuid(),
+    enrollmentId: z.string().uuid(),
+    variables: executionVariablesSchema
+  }, (args) => {
+    const { storeId, enrollmentId, ...body } = args;
+    return callApi(app, token, "PUT", `/api/stores/${storeId}/enrollments/${enrollmentId}/execution-variables`, body);
+  });
 
   for (const [name, path] of [
     ["dashboard", "/api/dashboard"],

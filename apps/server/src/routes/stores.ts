@@ -16,6 +16,7 @@ import { synchronizeAccount } from "./accounts.js";
 import { createOpaqueToken, hashToken } from "../lib/security.js";
 import { selectZone, slugifyLabel } from "../lib/stores.js";
 import { automaticUnenrollmentScript, cancelCommandExecution, createCommandExecution, executeStoreScript, getCommandAgentConfig, ensureCommandAgentToken, COMMAND_AGENT_SERVICE_URL } from "../lib/command-agent.js";
+import { argumentBindingsSchema, applyScriptArguments, describeArgumentValueSources, executionVariablesSchema, resolveArgumentValues, resolveAvailableVariablesForStore, scriptArgumentsSchema, type ExecutionVariables, type ScriptArgument } from "../lib/execution-variables.js";
 
 const serviceUrlSchema = z.string().url().refine((value) => value.startsWith("http://") || value.startsWith("https://"), {
   message: "Service URL must use HTTP or HTTPS"
@@ -95,7 +96,7 @@ const listQuerySchema = z.object({
   tunnelStatus: z.string().trim().max(40).optional(),
   enrollmentStatus: z.string().trim().max(40).optional(),
   page: z.coerce.number().int().min(1).default(1),
-  pageSize: z.coerce.number().int().min(10).max(100).default(25)
+  pageSize: z.coerce.number().int().min(5).max(100).default(25)
 }).superRefine(validateNameFilter);
 
 const refreshStoresSchema = z.object({
@@ -131,7 +132,8 @@ const executeScriptSchema = z.object({
   inlineScript: z.string().min(1).max(262_144).refine((value) => value.trim().length > 0, "Inline script content is required").optional(),
   name: z.string().trim().min(1).max(120).optional(),
   language: z.enum(["powershell", "bash", "sh"]).optional(),
-  timeoutMs: z.number().int().min(1_000).max(300_000).optional()
+  timeoutMs: z.number().int().min(1_000).max(300_000).optional(),
+  argumentBindings: argumentBindingsSchema.default({})
 }).superRefine((data, context) => {
   if (Boolean(data.scriptVersionId) === Boolean(data.inlineScript)) {
     context.addIssue({ code: "custom", message: "Provide exactly one saved script version or inline script" });
@@ -139,6 +141,10 @@ const executeScriptSchema = z.object({
   if (data.scriptVersionId && (data.language || data.name)) {
     context.addIssue({ code: "custom", message: "Name and language are only accepted for inline scripts" });
   }
+});
+
+const resolveExecutionVariablesSchema = z.object({
+  scriptVersionId: z.string().uuid().optional()
 });
 
 const saveInlineExecutionSchema = z.object({
@@ -423,6 +429,7 @@ const enrollmentsJson = `COALESCE((
     'installedAt', e.installed_at,
     'lastError', e.last_error,
     'hostInfo', e.host_info,
+    'executionVariables', e.execution_variables,
     'unenrollStatus', CASE
       WHEN e.unenrolled_at IS NOT NULL THEN 'unenrolled'
       WHEN e.unenroll_last_error IS NOT NULL THEN 'failed'
@@ -508,7 +515,9 @@ const commandExecutionsJson = `COALESCE((
     'stdout', ce.stdout,
     'stderr', ce.stderr,
     'error', ce.error,
-    'requestedBy', ce.username
+    'requestedBy', ce.username,
+    'environmentVariables', ce.environment_variables,
+    'argumentSources', ce.argument_sources
   ) ORDER BY ce.created_at DESC)
   FROM LATERAL (
     SELECT ce.*, u.username, sv.version, ms.id AS script_id, ms.name, ms.platform, ms.language
@@ -539,11 +548,16 @@ function preparePublications(
 }
 
 export async function storeRoutes(app: FastifyInstance): Promise<void> {
+  app.get("/api/stores/tenant-codes", { preHandler: requireAuth }, async () => {
+    const result = await pool.query("SELECT DISTINCT tenant_code AS \"tenantCode\" FROM stores ORDER BY tenant_code");
+    return { tenantCodes: result.rows.map((row) => row.tenantCode as string) };
+  });
+
   app.get("/api/stores", { preHandler: requireAuth }, async (request) => {
     const query = listQuerySchema.parse(request.query);
     const values: unknown[] = [];
     const conditions: string[] = [];
-    appendNameFilter(conditions, values, "s.display_name", query);
+    appendNameFilter(conditions, values, ["s.display_name", "s.store_code"], query);
     if (query.search) {
       values.push(`%${query.search}%`);
       conditions.push(`(s.store_code ILIKE $${values.length} OR s.tenant_code ILIKE $${values.length} OR s.display_name ILIKE $${values.length} OR s.hostname ILIKE $${values.length} OR EXISTS (SELECT 1 FROM store_publications p WHERE p.store_id = s.id AND p.hostname ILIKE $${values.length}))`);
@@ -572,7 +586,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     const limitParameter = values.length + 1;
     const offsetParameter = values.length + 2;
     const result = await pool.query(`
-      SELECT s.id, s.tenant_code AS "tenantCode", s.store_code AS "storeCode", s.display_name AS "displayName",
+      SELECT s.id, s.tenant_code AS "tenantCode", s.store_code AS "storeCode", s.display_name AS "displayName", s.execution_variables AS "executionVariables",
              s.origin_url AS "originUrl", s.hostname, s.tunnel_id AS "tunnelId", s.tunnel_name AS "tunnelName",
              s.tunnel_status AS "tunnelStatus", ${onboardingStatusExpression} AS "onboardingStatus",
              latest_enrollment.status AS "latestEnrollmentStatus",
@@ -605,7 +619,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/stores/:id", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const result = await pool.query(`
-      SELECT s.id, s.tenant_code AS "tenantCode", s.store_code AS "storeCode", s.display_name AS "displayName",
+      SELECT s.id, s.tenant_code AS "tenantCode", s.store_code AS "storeCode", s.display_name AS "displayName", s.execution_variables AS "executionVariables",
              s.origin_url AS "originUrl", s.hostname, s.tunnel_id AS "tunnelId", s.tunnel_name AS "tunnelName",
              s.tunnel_status AS "tunnelStatus", ${onboardingStatusExpression} AS "onboardingStatus",
              latest_enrollment.status AS "latestEnrollmentStatus",
@@ -654,7 +668,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
                 CASE WHEN e.platform = 'windows' THEN 'windows' WHEN e.platform IS NOT NULL THEN 'unix' ELSE null END AS platform,
                 e.platform AS environment, e.created_at AS "createdAt", e.expires_at AS "expiresAt",
                 e.claimed_at AS "claimedAt", e.installed_at AS "installedAt", e.last_error AS "lastError",
-                e.host_info AS "hostInfo",
+                e.host_info AS "hostInfo", e.execution_variables AS "executionVariables",
                 CASE
                   WHEN e.unenrolled_at IS NOT NULL THEN 'unenrolled'
                   WHEN e.unenroll_last_error IS NOT NULL THEN 'failed'
@@ -830,6 +844,26 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       if (!enrollment) return { kind: "missing" as const };
       if (enrollment.is_current) return { kind: "current" as const };
       const deletedAt = new Date().toISOString();
+      // This enrollment may have superseded another still-active enrollment (marking it
+      // pending unenroll) before it was ever claimed/installed. Deleting it aborts that
+      // switchover, so revert the superseded enrollment back to its normal active state
+      // instead of leaving it stuck showing "unenroll pending" forever.
+      const reverted = await client.query(
+        `UPDATE enrollments
+            SET unenroll_token_hash = null, unenroll_token_encrypted = null,
+                unenroll_token_expires_at = null, unenroll_tunnel_id = null,
+                unenroll_requested_at = null, unenroll_last_error = null,
+                superseded_by_enrollment_id = null, updated_at = now()
+          WHERE store_id = $1 AND superseded_by_enrollment_id = $2 AND unenrolled_at IS NULL
+          RETURNING id`,
+        [storeId, enrollmentId]
+      );
+      if (reverted.rowCount) {
+        await client.query(
+          "DELETE FROM enrollment_scripts WHERE enrollment_id = ANY($1::uuid[]) AND script_kind = 'unenroll'",
+          [reverted.rows.map((row) => row.id)]
+        );
+      }
       await client.query("DELETE FROM enrollments WHERE store_id = $1 AND id = $2", [storeId, enrollmentId]);
       const activeEnrollment = await client.query(
         `SELECT 1
@@ -854,7 +888,12 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
         action: "enrollment.deleted",
         entityType: "enrollment",
         entityId: enrollmentId,
-        details: { storeId, hardDelete: true, logCount: enrollment.log_count }
+        details: {
+          storeId,
+          hardDelete: true,
+          logCount: enrollment.log_count,
+          revertedSupersededEnrollmentIds: reverted.rows.map((row) => row.id)
+        }
       }, client);
       return { kind: "deleted" as const, deletedAt, logCount: enrollment.log_count as number };
     });
@@ -1167,7 +1206,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
                 COALESCE(ce.script_version_number, sv.version) AS "scriptVersion",
                 COALESCE(ce.script_platform, ms.platform) AS platform,
                 COALESCE(ce.script_language, ms.language) AS language,
-                ce.script, ce.timeout_ms AS "timeoutMs", ce.status, ce.task_id AS "taskId", ce.process_id AS "processId",
+                ce.script, ce.environment_variables AS "environmentVariables", ce.argument_sources AS "argumentSources", ce.timeout_ms AS "timeoutMs", ce.status, ce.task_id AS "taskId", ce.process_id AS "processId",
                 ce.created_at AS "createdAt", ce.started_at AS "startedAt", ce.finished_at AS "finishedAt",
                 ce.elapsed_ms AS "elapsedMs", ce.exit_code AS "exitCode",
                 ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy"
@@ -1272,11 +1311,12 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     let scriptPlatform: "windows" | "unix";
     let scriptLanguage: "powershell" | "bash" | "sh";
     let scriptId: string | null;
+    let scriptArguments: ScriptArgument[] = [];
     let resolvedTimeoutMs = body.timeoutMs ?? 60_000;
     if (body.scriptVersionId) {
       const scriptVersionResult = await pool.query(
         `SELECT v.id, v.content, v.version, s.id AS script_id, s.name, s.platform, s.language,
-                s.default_timeout_ms AS "defaultTimeoutMs"
+                s.default_timeout_ms AS "defaultTimeoutMs", s.arguments
           FROM managed_script_versions v
            JOIN managed_scripts s ON s.id = v.script_id
           WHERE v.id = $1`,
@@ -1295,6 +1335,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       scriptVersion = managedScript.version;
       scriptPlatform = managedScript.platform;
       scriptLanguage = managedScript.language;
+      scriptArguments = scriptArgumentsSchema.parse(managedScript.arguments);
       resolvedTimeoutMs = body.timeoutMs ?? managedScript.defaultTimeoutMs;
     } else {
       const inlineLanguage = body.language ?? (enrollmentPlatform === "windows" ? "powershell" : "bash");
@@ -1315,6 +1356,16 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     }
     const agent = await getCommandAgentConfig(id);
     if (!agent) return reply.code(409).send({ error: "No command agent route is configured for this store" });
+    let argumentValues: ExecutionVariables;
+    let argumentSources: ReturnType<typeof describeArgumentValueSources>;
+    try {
+      const available = await resolveAvailableVariablesForStore(id);
+      argumentValues = resolveArgumentValues(scriptArguments, available.variables, body.argumentBindings);
+      argumentSources = describeArgumentValueSources(scriptArguments, available.sources, body.argumentBindings);
+    } catch (error) {
+      return reply.code(409).send({ error: error instanceof Error ? error.message : "Unable to resolve script arguments" });
+    }
+    const dispatchedScript = applyScriptArguments(executionScript, scriptLanguage, argumentValues);
     const executionHandle = await createCommandExecution({
       storeId: id,
       enrollmentId: enrollment.id,
@@ -1326,17 +1377,19 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       scriptName,
       scriptPlatform,
       scriptLanguage,
-      scriptVersion
+      scriptVersion,
+      environmentVariables: argumentValues,
+      argumentSources
     });
     try {
-      const result = await executeStoreScript(id, executionScript, resolvedTimeoutMs, executionHandle);
+      const result = await executeStoreScript(id, dispatchedScript, resolvedTimeoutMs, executionHandle);
       if (!result) return reply.code(409).send({ error: "No command agent route is configured for this store" });
       await writeAudit({
         actorUserId: request.authUser!.id,
         action: "store.command_executed",
         entityType: "store",
         entityId: id,
-        details: { endpoint: agent.endpoint, executionId: executionHandle.executionId, taskId: result.taskId, enrollmentId: enrollment.id, scriptType, scriptId, scriptVersionId, timeoutMs: resolvedTimeoutMs, status: result.status, success: result.result?.success ?? null, exitCode: result.result?.exitCode ?? null }
+        details: { endpoint: agent.endpoint, executionId: executionHandle.executionId, taskId: result.taskId, enrollmentId: enrollment.id, scriptType, scriptId, scriptVersionId, timeoutMs: resolvedTimeoutMs, argumentNames: Object.keys(argumentValues), status: result.status, success: result.result?.success ?? null, exitCode: result.result?.exitCode ?? null }
       });
       const response = { executionId: executionHandle.executionId, taskId: result.taskId, status: result.status, scheduled: result.scheduled, endpoint: agent.endpoint, enrollmentId: enrollment.id, scriptType, scriptId, scriptVersionId, scriptName, version: scriptVersion, platform: scriptPlatform, language: scriptLanguage, ...(result.result ?? {}) };
       return result.scheduled ? reply.code(202).send(response) : response;
@@ -1351,6 +1404,57 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       });
       return reply.code(502).send({ error: message, executionId: executionHandle.executionId });
     }
+  });
+
+  app.post("/api/stores/:id/execution-variables/resolve", { preHandler: requireAuth }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = resolveExecutionVariablesSchema.parse(request.body);
+    let argumentsList: ScriptArgument[] = [];
+    if (body.scriptVersionId) {
+      const result = await pool.query(
+        `SELECT s.arguments
+           FROM managed_script_versions v
+           JOIN managed_scripts s ON s.id = v.script_id
+          WHERE v.id = $1`,
+        [body.scriptVersionId]
+      );
+      if (!result.rowCount) return reply.code(404).send({ error: "Script version not found" });
+      argumentsList = scriptArgumentsSchema.parse(result.rows[0].arguments);
+    }
+    try {
+      const available = await resolveAvailableVariablesForStore(id);
+      return { arguments: argumentsList, availableVariables: available.variables, sources: available.sources };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to resolve available variables";
+      return reply.code(message === "Store not found" ? 404 : 409).send({ error: message });
+    }
+  });
+
+  app.put("/api/stores/:id/execution-variables", { preHandler: requireAuth }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = z.object({ variables: executionVariablesSchema }).parse(request.body);
+    const result = await pool.query(
+      "UPDATE stores SET execution_variables = $1, updated_at = now() WHERE id = $2 RETURNING display_name",
+      [body.variables, id]
+    );
+    if (!result.rowCount) return reply.code(404).send({ error: "Store not found" });
+    await writeAudit({ actorUserId: request.authUser!.id, action: "store.execution_variables_updated", entityType: "store", entityId: id, details: { variableNames: Object.keys(body.variables) } });
+    return { variables: body.variables };
+  });
+
+  app.put("/api/stores/:storeId/enrollments/:enrollmentId/execution-variables", { preHandler: requireAuth }, async (request, reply) => {
+    const { storeId, enrollmentId } = z.object({ storeId: z.string().uuid(), enrollmentId: z.string().uuid() }).parse(request.params);
+    const body = z.object({ variables: executionVariablesSchema }).parse(request.body);
+    const result = await pool.query(
+      `UPDATE enrollments
+          SET execution_variables = $1, updated_at = now()
+        WHERE id = $2 AND store_id = $3
+        RETURNING NULLIF(host_info->>'machineName', '') AS "computerName"`,
+      [body.variables, enrollmentId, storeId]
+    );
+    if (!result.rowCount) return reply.code(404).send({ error: "Enrollment not found" });
+    await writeAudit({ actorUserId: request.authUser!.id, action: "enrollment.execution_variables_updated", entityType: "enrollment", entityId: enrollmentId, details: { storeId, variableNames: Object.keys(body.variables) } });
+    return { variables: body.variables };
   });
 
   app.post("/api/stores/:storeId/commands/executions/:executionId/save-script", { preHandler: requireAuth }, async (request, reply) => {
@@ -1470,7 +1574,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       return result.rows[0].id as string;
     });
     const created = await pool.query(`
-      SELECT s.id, s.tenant_code AS "tenantCode", s.store_code AS "storeCode", s.display_name AS "displayName",
+      SELECT s.id, s.tenant_code AS "tenantCode", s.store_code AS "storeCode", s.display_name AS "displayName", s.execution_variables AS "executionVariables",
              s.origin_url AS "originUrl", s.hostname, s.tunnel_id AS "tunnelId", s.tunnel_name AS "tunnelName",
              s.tunnel_status AS "tunnelStatus", s.onboarding_status AS "onboardingStatus",
              s.rdp_status AS "rdpStatus", s.rdp_target_ip::text AS "rdpTargetIp",
@@ -1700,9 +1804,10 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
           `UPDATE enrollments
               SET unenroll_token_hash = $1, unenroll_token_encrypted = $2,
                   unenroll_token_expires_at = $3, unenroll_tunnel_id = (SELECT tunnel_id FROM stores WHERE id = $4),
-                  unenroll_requested_at = now(), unenroll_last_error = null, updated_at = now()
-            WHERE id = $5`,
-          [hashToken(unenrollToken), encryptSecret(unenrollToken), expiresAt, id, previous.id]
+                  unenroll_requested_at = now(), unenroll_last_error = null,
+                  superseded_by_enrollment_id = $5, updated_at = now()
+            WHERE id = $6`,
+          [hashToken(unenrollToken), encryptSecret(unenrollToken), expiresAt, id, result.rows[0].id, previous.id]
         );
         await client.query(
           `INSERT INTO enrollment_scripts(enrollment_id, script_kind, platform, status)

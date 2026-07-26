@@ -1,20 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Check, CheckCircle2, CircleAlert, CloudCog, ExternalLink, KeyRound, LoaderCircle, MonitorCog, Plus, RefreshCw, Trash2 } from "lucide-react";
+import { Braces, Check, CheckCircle2, CircleAlert, CloudCog, ExternalLink, KeyRound, LoaderCircle, MonitorCog, Plus, RefreshCw, Trash2 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 import { ApiError, api } from "../api";
 import { CapacityBar } from "../components/CapacityBar";
 import { FieldHelp } from "../components/FieldHelp";
+import { AddVariableButton, ExecutionVariablesEditor } from "../components/ExecutionVariablesEditor";
 import { Modal } from "../components/Modal";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
-import type { CloudflareAccount } from "../types";
+import type { CloudflareAccount, ExecutionVariables, Zone } from "../types";
+
+type VariableTarget = { kind: "account"; account: CloudflareAccount } | { kind: "zone"; account: CloudflareAccount; zone: Zone };
 
 export function AccountsPage() {
   const queryClient = useQueryClient();
   const [accountModal, setAccountModal] = useState(false);
   const [zoneAccount, setZoneAccount] = useState<CloudflareAccount | null>(null);
   const [rdpAccount, setRdpAccount] = useState<CloudflareAccount | null>(null);
+  const [variableTarget, setVariableTarget] = useState<VariableTarget | null>(null);
   const [deleteAccount, setDeleteAccount] = useState<CloudflareAccount | null>(null);
   const { data, isLoading } = useQuery({ queryKey: ["accounts"], queryFn: () => api.get<{ accounts: CloudflareAccount[] }>("/api/accounts") });
   const sync = useMutation({
@@ -47,14 +51,15 @@ export function AccountsPage() {
                 <div className="account-actions">
                   <button className="button button-secondary" onClick={() => sync.mutate(account.id)} disabled={sync.isPending}><RefreshCw size={15} />Sync</button>
                   <button className="button button-secondary" onClick={() => setRdpAccount(account)}><MonitorCog size={15} />Support emails</button>
+                  <button className="button button-secondary" onClick={() => setVariableTarget({ kind: "account", account })}><Braces size={15} />Variables</button>
                   <button className="button button-secondary" onClick={() => setZoneAccount(account)}><Plus size={15} />Zone</button>
                   <button className="icon-button account-delete" onClick={() => setDeleteAccount(account)} aria-label={`Delete ${account.name}`} title="Delete account"><Trash2 size={16} /></button>
                 </div>
               </header>
               {account.lastError && <div className="inline-alert">{account.lastError}</div>}
-              <div className="table-scroll"><table className="zone-table"><thead><tr><th>Zone</th><th>Zone ID</th><th>DNS allocation</th><th>Status</th></tr></thead><tbody>
-                {account.zones.length === 0 ? <tr><td colSpan={4}><div className="quiet-empty">No zones synchronized</div></td></tr> : account.zones.map((zone) => (
-                  <tr key={zone.id}><td><div className="primary-cell"><strong>{zone.name}</strong><span>{zone.dnsRecordLimit.toLocaleString()} record limit</span></div></td><td className="mono subdued">{zone.cfZoneId ?? "mock"}</td><td><CapacityBar value={zone.storeCount} limit={zone.softStoreLimit} compact /></td><td><StatusBadge status={zone.status} /></td></tr>
+              <div className="table-scroll"><table className="zone-table"><thead><tr><th>Zone</th><th>Zone ID</th><th>DNS allocation</th><th>Status</th><th aria-label="Zone variables" /></tr></thead><tbody>
+                {account.zones.length === 0 ? <tr><td colSpan={5}><div className="quiet-empty">No zones synchronized</div></td></tr> : account.zones.map((zone) => (
+                  <tr key={zone.id}><td><div className="primary-cell"><strong>{zone.name}</strong><span>{zone.dnsRecordLimit.toLocaleString()} record limit</span></div></td><td className="mono subdued">{zone.cfZoneId ?? "mock"}</td><td><CapacityBar value={zone.storeCount} limit={zone.softStoreLimit} compact /></td><td><StatusBadge status={zone.status} /></td><td><button className="icon-button" type="button" title={`Manage variables for ${zone.name}`} aria-label={`Manage variables for ${zone.name}`} onClick={() => setVariableTarget({ kind: "zone", account, zone })}><Braces size={15} /></button></td></tr>
                 ))}
               </tbody></table></div>
             </section>
@@ -64,9 +69,37 @@ export function AccountsPage() {
       <AddAccountModal open={accountModal} onClose={() => setAccountModal(false)} />
       <AddZoneModal account={zoneAccount} onClose={() => setZoneAccount(null)} />
       <RdpSettingsModal account={rdpAccount} onClose={() => setRdpAccount(null)} />
+      <ScopeVariablesModal target={variableTarget} onClose={() => setVariableTarget(null)} />
       <DeleteAccountModal account={deleteAccount} onClose={() => setDeleteAccount(null)} />
     </div>
   );
+}
+
+function ScopeVariablesModal({ target, onClose }: { target: VariableTarget | null; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [variables, setVariables] = useState<ExecutionVariables>({});
+  useEffect(() => {
+    setVariables(target?.kind === "account" ? target.account.executionVariables : target?.zone.executionVariables ?? {});
+  }, [target]);
+  const mutation = useMutation({
+    mutationFn: () => {
+      if (!target) throw new Error("No variable scope selected");
+      const path = target.kind === "account"
+        ? `/api/accounts/${target.account.id}/execution-variables`
+        : `/api/accounts/${target.account.id}/zones/${target.zone.id}/execution-variables`;
+      return api.put(path, { variables });
+    },
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["accounts"] });
+      toast.success(`${target?.kind === "account" ? "Account" : "Zone"} variables updated`);
+      onClose();
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to update variables")
+  });
+  const name = target?.kind === "account" ? target.account.name : target?.zone.name;
+  const scopeLabel = target?.kind === "account" ? "Account" : "Zone";
+  const savedVariables = target?.kind === "account" ? target.account.executionVariables : target?.zone.executionVariables ?? {};
+  return <Modal open={Boolean(target)} title={<>Environment variables · <span className="scope-badge">{scopeLabel}</span> · {name ?? "scope"}</>} onClose={onClose}><div className="form-stack"><ExecutionVariablesEditor variables={variables} savedVariables={savedVariables} onChange={setVariables} /><div className="form-actions"><button className="button button-secondary cancel-button-left" type="button" onClick={onClose}>Cancel</button><AddVariableButton variables={variables} onChange={setVariables} /><button className="button button-primary" type="button" disabled={mutation.isPending} onClick={() => mutation.mutate()}>{mutation.isPending ? "Saving..." : "Save variables"}</button></div></div></Modal>;
 }
 
 function AddAccountModal({ open, onClose }: { open: boolean; onClose: () => void }) {

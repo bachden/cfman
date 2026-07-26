@@ -3,8 +3,24 @@ import { Ban, RefreshCw } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { api } from "../api";
-import type { StoreCommandExecution } from "../types";
+import type { ArgumentValueSource, StoreCommandExecution } from "../types";
 import { CopyButton } from "./CopyButton";
+
+const SCOPE_LABELS: Record<ArgumentValueSource extends { scope: infer S } ? S : never, string> = {
+  global: "Global",
+  account: "Account",
+  zone: "Zone",
+  store: "Store",
+  "built-in": "Built-in",
+  computer: "Computer"
+};
+
+function formatArgumentSource(source: ArgumentValueSource | undefined): string {
+  if (!source) return "—";
+  if (source.origin === "custom") return "Custom";
+  if (source.origin === "default") return "Default";
+  return `Variable · ${SCOPE_LABELS[source.scope]}`;
+}
 
 type ExecutionLogResponse = {
   execution: Pick<StoreCommandExecution, "status" | "taskId" | "processId" | "stdout" | "stderr" | "error">;
@@ -50,10 +66,19 @@ export function ExecutionLog({ storeId, execution }: { storeId: string; executio
       ? [current.stdout && `[stdout]\n${current.stdout}`, current.stderr && `[stderr]\n${current.stderr}`].filter(Boolean).join("\n")
       : (streamFilter === "stdout" ? current.stdout : current.stderr) ?? "";
   const noOutputMessage = streamFilter === "all" ? "The script produced no output." : `The script produced no ${streamFilter} output.`;
+  const appliedVariables = Object.entries(execution.environmentVariables ?? {}).sort(([left], [right]) => left.localeCompare(right));
 
   return <>
+    {appliedVariables.length > 0 && <details className="execution-applied-variables"><summary>Applied arguments ({appliedVariables.length})</summary>
+      <div className="execution-applied-variable-row execution-applied-variable-row-header" aria-hidden="true"><span>Name</span><span>Value</span><span>Source</span></div>
+      <div className="execution-applied-variable-list">{appliedVariables.map(([name, value]) => <div className="execution-applied-variable-row" key={name}>
+        <code className="execution-applied-variable-name">{name}</code>
+        <code className="execution-applied-variable-value">{value}</code>
+        <span className="execution-applied-variable-source">{formatArgumentSource(execution.argumentSources?.[name])}</span>
+      </div>)}</div>
+    </details>}
     <div className="execution-log-actions">
-      <span>{current.taskId ? <>Task <code>{current.taskId}</code>{current.processId ? <> · PID <code>{current.processId}</code></> : null}</> : "No task metadata reported yet"}</span>
+      <span><code>{Math.round(execution.timeoutMs / 1000)}s timeout</code>{current.taskId ? <> · Task <code>{current.taskId}</code>{current.processId ? <> · PID <code>{current.processId}</code></> : null}</> : " · No task metadata reported yet"}</span>
       <div className="execution-log-filter" role="radiogroup" aria-label="Execution log stream">
         <span className="execution-log-filter-label">Filter</span>
         {(["stdout", "stderr", "all"] as const).map((stream) => <label key={stream}>

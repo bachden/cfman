@@ -1,11 +1,12 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { ChevronLeft, ChevronRight, Plus, RefreshCw, Search, TerminalSquare } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { api } from "../api";
 import { useDrawers, type StoreDrawerTab } from "../components/DrawerContext";
 import { PageHeader } from "../components/PageHeader";
+import { SearchableSelect } from "../components/SearchableSelect";
 import { StatusBadge, storeNeedsFastPolling, tunnelOnlineStatus } from "../components/StatusBadge";
 import type { Store } from "../types";
 
@@ -42,6 +43,11 @@ export function StoresPage() {
     queryFn: () => api.get<StoreListResponse>(`/api/stores?${params.toString()}`),
     refetchInterval: (query) => query.state.data?.stores.some((store) => storeNeedsFastPolling(store)) ? 2000 : false
   });
+  const { data: tenantCodesData } = useQuery({
+    queryKey: ["tenant-codes"],
+    queryFn: () => api.get<{ tenantCodes: string[] }>("/api/stores/tenant-codes")
+  });
+  const tenantCodeOptions = useMemo(() => [{ value: "", label: "Any tenant" }, ...(tenantCodesData?.tenantCodes ?? []).map((code) => ({ value: code, label: code }))], [tenantCodesData]);
   const refreshStores = async (storeIds: string[]) => {
     try {
       await api.post<StoreRefreshResponse>("/api/stores/refresh", { storeIds });
@@ -75,7 +81,7 @@ export function StoresPage() {
       <PageHeader title="Stores" eyebrow="Tunnel inventory" actions={<><button className="button button-secondary" onClick={refreshAll} disabled={refreshingIds.size > 0 || !data?.stores.length}><RefreshCw size={15} className={refreshingIds.size > 0 ? "spin-icon" : undefined} />{refreshingIds.size > 0 ? "Refreshing..." : "Refresh"}</button><Link className="button button-primary" to="/onboarding"><Plus size={16} />Onboard store</Link></>} />
       <div className="toolbar">
         <label className="search-box"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search stores or hostnames" /></label>
-        <input className="toolbar-filter-input" value={tenantCode} onChange={(event) => setTenantCode(event.target.value)} placeholder="Tenant code" aria-label="Filter by tenant code" />
+        <div className="toolbar-tenant-filter"><SearchableSelect name="tenantCodeFilter" options={tenantCodeOptions} value={tenantCode} ariaLabel="Filter by tenant code" emptyMessage="No matching tenant" onValueChange={setTenantCode} /></div>
         <select value={tunnelStatus} onChange={(event) => setTunnelStatus(event.target.value)} aria-label="Filter tunnel status"><option value="">All tunnel statuses</option><option value="not_created">Not created</option><option value="inactive">Inactive</option><option value="healthy">Healthy</option><option value="degraded">Degraded</option><option value="down">Down</option><option value="unknown">Unknown</option></select>
         <select value={enrollmentStatus} onChange={(event) => setEnrollmentStatus(event.target.value)} aria-label="Filter enrollment status"><option value="">All enrollment statuses</option><option value="active">Active</option><option value="verified">Verified</option><option value="waiting_for_new_enrollment">Waiting for new enrollment</option><option value="url_issued">URL issued</option><option value="claimed">Claimed</option><option value="provisioning">Provisioning</option><option value="connector_online">Connector online</option><option value="unenrolled">Unenrolled</option><option value="expired">Expired</option><option value="failed">Failed</option><option value="revoked">Revoked</option></select>
         <span className="result-count">{pagination?.total ?? 0} stores</span>
