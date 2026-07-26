@@ -28,8 +28,21 @@ export async function verifyStoreEndpoints(
   storeId: string,
   options: VerificationOptions = {}
 ): Promise<StoreVerificationResult | null> {
-  const store = await pool.query("SELECT id, hostname FROM stores WHERE id = $1", [storeId]);
+  const store = await pool.query(
+    `SELECT s.id, s.hostname, s.tunnel_status, a.provider_mode
+       FROM stores s LEFT JOIN cloudflare_accounts a ON a.id = s.account_id
+      WHERE s.id = $1`,
+    [storeId]
+  );
   if (!store.rowCount) return null;
+  const tunnelStatus = store.rows[0].tunnel_status as string;
+  // Cloudflare's own tunnel connector status is authoritative for "is the
+  // tunnel up at all" on live accounts. When it already says the tunnel has
+  // no connector, probing the published hostname is guaranteed to time out,
+  // so skip it. Mock accounts have no real tunnel and never update this
+  // column, so this only applies to live accounts.
+  const tunnelDisconnected = store.rows[0].provider_mode === "live"
+    && (tunnelStatus === "not_created" || tunnelStatus === "inactive" || tunnelStatus === "down");
 
   const publications = options.routeId
     ? await pool.query("SELECT p.id, p.hostname, r.id AS route_id, r.path FROM store_publications p JOIN store_routes r ON r.publication_id = p.id WHERE p.store_id = $1 AND r.id = $2", [storeId, options.routeId])
@@ -43,11 +56,19 @@ export async function verifyStoreEndpoints(
     routeId: target.route_id as string | null,
     hostname: target.hostname as string,
     path: target.path as string,
-    check: await checkStoreEndpoint(target.hostname, {
-      path: target.path as string,
-      attempts: options.attempts,
-      retryDelayMs: options.retryDelayMs
-    })
+    check: tunnelDisconnected
+      ? {
+          reachable: false,
+          statusCode: null,
+          latencyMs: 0,
+          attempts: 0,
+          error: `Cloudflare reports the tunnel is ${tunnelStatus}`
+        }
+      : await checkStoreEndpoint(target.hostname, {
+          path: target.path as string,
+          attempts: options.attempts,
+          retryDelayMs: options.retryDelayMs
+        })
   })));
 
   await Promise.all(checks.filter((item) => item.publicationId).map((item) => pool.query(

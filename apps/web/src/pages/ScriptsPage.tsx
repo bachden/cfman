@@ -11,9 +11,7 @@ import { HostPlatformIcon } from "../components/HostPlatformIcon";
 import { Modal } from "../components/Modal";
 import { PageHeader } from "../components/PageHeader";
 import { ScriptEditor } from "../components/ScriptEditor";
-import { scriptRunStatus } from "../components/ScriptDrawer";
 import { SearchableSelect } from "../components/SearchableSelect";
-import { StatusBadge } from "../components/StatusBadge";
 import type { ManagedScriptSummary } from "../types";
 
 const defaultContent = {
@@ -44,6 +42,7 @@ export function ScriptsPage() {
   const [createPlatform, setCreatePlatform] = useState<"windows" | "unix">("windows");
   const [createLanguage, setCreateLanguage] = useState<"powershell" | "bash" | "sh">("powershell");
   const [createDescription, setCreateDescription] = useState("");
+  const [createTimeoutSeconds, setCreateTimeoutSeconds] = useState(60);
   const [createContent, setCreateContent] = useState(defaultContent.windows);
   const scriptPageSize = 12;
   const scriptParams = new URLSearchParams({ page: String(scriptPage), pageSize: String(scriptPageSize) });
@@ -76,6 +75,7 @@ export function ScriptsPage() {
     setCreatePlatform("windows");
     setCreateLanguage("powershell");
     setCreateDescription("");
+    setCreateTimeoutSeconds(60);
     setCreateContent(defaultContent.windows);
     setCreateOpen(true);
   };
@@ -85,7 +85,7 @@ export function ScriptsPage() {
     setCreateContent(defaultContent[platform]);
   };
   const create = useMutation({
-    mutationFn: () => api.post<{ id: string }>("/api/scripts", { name: createName, platform: createPlatform, language: createLanguage, description: createDescription, content: createContent }),
+    mutationFn: () => api.post<{ id: string }>("/api/scripts", { name: createName, platform: createPlatform, language: createLanguage, description: createDescription, defaultTimeoutMs: createTimeoutSeconds * 1000, content: createContent }),
     onSuccess: async (result) => {
       setCreateOpen(false);
       await queryClient.invalidateQueries({ queryKey: ["scripts"] });
@@ -106,17 +106,15 @@ export function ScriptsPage() {
     <div className="toolbar">
       <label className="search-box"><Search size={15} /><input value={nameFilter} onChange={(event) => setNameFilter(event.target.value)} placeholder="Search script names" /></label>
       <div className="script-platform-filter"><SearchableSelect name="platformFilter" options={platformFilterOptions} ariaLabel="Filter scripts by platform" emptyMessage="No matching platforms" onValueChange={(value) => setPlatformFilter(value as typeof platformFilter)} /></div>
-      <span className="result-count">{scriptPagination?.total ?? 0} script{scriptPagination?.total === 1 ? "" : "s"}</span>
     </div>
     <section className="panel table-panel script-table-panel">
-      <div className="table-scroll"><table><thead><tr><th>Script</th><th>Language</th><th>Versions</th><th>Executions</th><th>Last status</th></tr></thead><tbody>
-        {isLoading ? <tr><td colSpan={5}><div className="quiet-empty">Loading scripts...</div></td></tr> : scripts.length === 0 ? <tr><td colSpan={5}><div className="quiet-empty">No scripts saved yet.</div></td></tr> : scripts.map((script) => (
+      <div className="table-scroll"><table><thead><tr><th>Script</th><th>Language</th><th>Versions</th><th>Executions</th></tr></thead><tbody>
+        {isLoading ? <tr><td colSpan={4}><div className="quiet-empty">Loading scripts...</div></td></tr> : scripts.length === 0 ? <tr><td colSpan={4}><div className="quiet-empty">No scripts saved yet.</div></td></tr> : scripts.map((script) => (
           <tr key={script.id} className="data-row" onClick={() => openScript(script)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openScript(script); } }} tabIndex={0}>
             <td><div className="primary-cell"><strong className="script-name-cell"><HostPlatformIcon platform={script.platform} size={15} />{script.name}</strong><span>{script.description || "No description"}</span></div></td>
             <td>{script.language}</td>
             <td>{script.versionCount} version{script.versionCount === 1 ? "" : "s"}</td>
-            <td><ExecutionStatsSummary stats={script.executionStats} compact /></td>
-            <td><StatusBadge status={scriptRunStatus(script.executionStats)} /></td>
+            <td><ExecutionStatsSummary stats={script.executionStats} /></td>
           </tr>
         ))}
       </tbody></table></div>
@@ -129,6 +127,7 @@ export function ScriptsPage() {
           <label className="field"><span className="field-label">Platform <FieldHelp text="The host family this script can run on. Windows scripts use PowerShell; Unix scripts can use Bash or POSIX sh. The platform cannot change after creation." /></span><select value={createPlatform} onChange={(event) => changeCreatePlatform(event.target.value as "windows" | "unix")}><option value="windows">Windows</option><option value="unix">Unix</option></select></label>
           <label className="field"><span className="field-label">Language</span><select value={createLanguage} onChange={(event) => setCreateLanguage(event.target.value as typeof createLanguage)}>{createPlatform === "windows" ? <option value="powershell">PowerShell</option> : <><option value="bash">Bash</option><option value="sh">POSIX sh</option></>}</select></label>
           <label className="field"><span className="field-label">Description</span><input value={createDescription} onChange={(event) => setCreateDescription(event.target.value)} placeholder="Optional description" /></label>
+          <label className="field"><span className="field-label">Default timeout (seconds)</span><input type="number" min={1} max={300} value={createTimeoutSeconds} onChange={(event) => setCreateTimeoutSeconds(Math.min(300, Math.max(1, Number(event.target.value) || 1)))} /></label>
         </div>
         <ScriptEditor value={createContent} language={createLanguage} height="300px" onChange={setCreateContent} />
         <div className="form-actions"><span className="script-editor-hint">Creates version 1</span><button className="button button-primary" type="button" disabled={!createName.trim() || !createContent.trim() || create.isPending} onClick={() => create.mutate()}><Save size={15} />{create.isPending ? "Saving..." : "Create script"}</button></div>

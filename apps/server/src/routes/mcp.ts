@@ -145,17 +145,23 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     cfAccountId: z.string().min(1),
     apiToken: z.string().min(1)
   }, (args) => callApi(app, token, "POST", "/api/accounts/validate-token", args));
-  registerApiTool(server, app, token, "cfman_list_stores", "List stores with a display-name filter, broad search, onboarding status filter, and pagination.", {
+  registerApiTool(server, app, token, "cfman_list_stores", "List stores with display-name, tenant-code, tunnel-status, enrollment-status, broad search, and pagination filters.", {
     ...mcpNameFilterFields,
     search: z.string().optional(),
-    status: z.string().optional(),
+    tenantCode: z.string().optional().describe("Case-insensitive tenant code substring"),
+    status: z.string().optional().describe("Backward-compatible alias for enrollment status"),
+    tunnelStatus: z.string().optional(),
+    enrollmentStatus: z.string().optional(),
     page: z.number().int().min(1).default(1),
     pageSize: z.number().int().min(10).max(100).default(25)
   }, (args) => {
     const params = new URLSearchParams();
     setNameFilterParams(params, args);
     if (args.search) params.set("search", args.search);
+    if (args.tenantCode) params.set("tenantCode", args.tenantCode);
     if (args.status) params.set("status", args.status);
+    if (args.tunnelStatus) params.set("tunnelStatus", args.tunnelStatus);
+    if (args.enrollmentStatus) params.set("enrollmentStatus", args.enrollmentStatus);
     params.set("page", String(args.page));
     params.set("pageSize", String(args.pageSize));
     return callApi(app, token, "GET", `/api/stores?${params}`);
@@ -163,13 +169,21 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
   registerApiTool(server, app, token, "cfman_get_store", "Read a complete store detail including connectivity, enrollments, command agent, and script execution history.", {
     storeId: z.string().uuid()
   }, (args) => callApi(app, token, "GET", `/api/stores/${args.storeId}`));
+  registerApiTool(server, app, token, "cfman_get_store_enrollment_history", "Read paginated enrollment history for one store, including machine identity, lifecycle status, installer state, unenrollment state, and log counts.", {
+    storeId: z.string().uuid(),
+    page: z.number().int().min(1).default(1),
+    pageSize: z.number().int().min(5).max(50).default(10)
+  }, (args) => callApi(app, token, "GET", `/api/stores/${args.storeId}/enrollments?page=${args.page}&pageSize=${args.pageSize}`));
   registerApiTool(server, app, token, "cfman_get_store_delete_preflight", "Check every condition that must be resolved before deleting a store.", {
     storeId: z.string().uuid()
   }, (args) => callApi(app, token, "GET", `/api/stores/${args.storeId}/delete-preflight`));
-  registerApiTool(server, app, token, "cfman_get_enrollment_logs", "Read installer or unenrollment logs for one enrollment.", {
+  registerApiTool(server, app, token, "cfman_get_enrollment_logs", "Read enrollment, unenrollment, and grouped diagnostic-run logs for one enrollment, including active diagnostic status.", {
     storeId: z.string().uuid(),
     enrollmentId: z.string().uuid()
   }, (args) => callApi(app, token, "GET", `/api/stores/${args.storeId}/enrollments/${args.enrollmentId}/logs`));
+  registerApiTool(server, app, token, "cfman_issue_store_diagnostic", "Create a tracked diagnostic run for the store's active enrollment and return platform-specific commands. The run appears as a separate section in enrollment logs.", {
+    storeId: z.string().uuid()
+  }, (args) => callApi(app, token, "POST", `/api/stores/${args.storeId}/diagnose`));
   registerApiTool(server, app, token, "cfman_list_scripts", "List saved scripts with pagination, execution statistics, and optional platform and case-insensitive name filters.", {
     ...mcpNameFilterFields,
     platform: z.enum(["windows", "unix"]).optional(),
@@ -194,11 +208,37 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     if (args.version) params.set("version", String(args.version));
     return callApi(app, token, "GET", `/api/scripts/${args.scriptId}/executions?${params}`);
   });
+  registerApiTool(server, app, token, "cfman_get_bulk_script_executions", "Read grouped bulk executions for a saved script, including run-level statistics and filtered per-store logs.", {
+    scriptId: z.string().uuid(),
+    runId: z.string().uuid().optional(),
+    status: z.enum(["scheduled", "running", "succeeded", "failed", "timed_out", "cancelled"]).optional(),
+    storeId: z.string().uuid().optional(),
+    storeSearch: z.string().trim().max(120).optional().describe("Case-insensitive substring across store display name, tenant code, and store code"),
+    page: z.number().int().min(1).default(1),
+    pageSize: z.number().int().min(5).max(100).default(25)
+  }, (args) => {
+    const { scriptId, runId, ...query } = args;
+    const params = new URLSearchParams({ page: String(query.page), pageSize: String(query.pageSize) });
+    if (query.status) params.set("status", query.status);
+    if (query.storeId) params.set("storeId", query.storeId);
+    if (query.storeSearch) params.set("storeSearch", query.storeSearch);
+    return callApi(app, token, "GET", `/api/scripts/${scriptId}/bulk-executions${runId ? `/${runId}` : ""}?${params}`);
+  });
   registerApiTool(server, app, token, "cfman_get_store_execution_history", "Read paginated command execution history for one store, including saved and inline script snapshots.", {
     storeId: z.string().uuid(),
     page: z.number().int().min(1).default(1),
     pageSize: z.number().int().min(5).max(50).default(10)
   }, (args) => callApi(app, token, "GET", `/api/stores/${args.storeId}/command-executions?page=${args.page}&pageSize=${args.pageSize}`));
+  registerApiTool(server, app, token, "cfman_get_execution_logs", "Read streamed stdout and stderr lines for one store command execution. Use after to incrementally poll without replaying prior lines.", {
+    storeId: z.string().uuid(),
+    executionId: z.string().uuid(),
+    after: z.number().int().min(0).default(0),
+    limit: z.number().int().min(1).max(1000).default(500)
+  }, (args) => callApi(app, token, "GET", `/api/stores/${args.storeId}/command-executions/${args.executionId}/logs?after=${args.after}&limit=${args.limit}`));
+  registerApiTool(server, app, token, "cfman_cancel_execution", "Cancel one scheduled or running store command execution by its stable execution identifier.", {
+    storeId: z.string().uuid(),
+    executionId: z.string().uuid()
+  }, (args) => callApi(app, token, "POST", `/api/stores/${args.storeId}/command-executions/${args.executionId}/cancel`));
   registerApiTool(server, app, token, "cfman_list_audit_logs", "Read the audit trail shown by the Audit page, optionally filtering action names case-insensitively.", {
     ...mcpNameFilterFields
   }, (args) => {
@@ -218,7 +258,6 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     apiToken: z.string().optional(),
     softTunnelLimit: z.number().int().min(1).max(1000).default(750),
     initialZoneName: z.string().optional(),
-    supportEmail: z.string().email().nullable().default(null),
     rdpAllowedEmails: z.array(z.string().email()).default([])
   }, (args) => callApi(app, token, "POST", "/api/accounts", args));
   registerApiTool(server, app, token, "cfman_delete_account", "Delete an unused account pool entry; the API rejects accounts still assigned to stores.", {
@@ -234,19 +273,12 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     const { accountId, ...body } = args;
     return callApi(app, token, "POST", `/api/accounts/${accountId}/zones`, body);
   });
-  registerApiTool(server, app, token, "cfman_update_account_rdp_settings", "Update the Cloudflare Access operator email allow-list for browser RDP.", {
+  registerApiTool(server, app, token, "cfman_update_account_rdp_settings", "Update the account's support emails: the operator email allow-list granted Cloudflare Access to browser-RDP into this account's stores.", {
     accountId: z.string().uuid(),
     rdpAllowedEmails: z.array(z.string().email()).min(1)
   }, (args) => {
     const { accountId, ...body } = args;
     return callApi(app, token, "PATCH", `/api/accounts/${accountId}/rdp-settings`, body);
-  });
-  registerApiTool(server, app, token, "cfman_update_account_support_email", "Set or clear the operator-facing support email shown for one Cloudflare account.", {
-    accountId: z.string().uuid(),
-    supportEmail: z.string().email().nullable()
-  }, (args) => {
-    const { accountId, ...body } = args;
-    return callApi(app, token, "PATCH", `/api/accounts/${accountId}/support`, body);
   });
   registerApiTool(server, app, token, "cfman_sync_account", "Synchronize one Cloudflare account's zones, tunnels, and statuses.", {
     accountId: z.string().uuid()
@@ -313,20 +345,20 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
   registerApiTool(server, app, token, "cfman_retry_rdp", "Retry browser RDP provisioning for a store with a reported Windows target.", {
     storeId: z.string().uuid()
   }, (args) => callApi(app, token, "POST", `/api/stores/${args.storeId}/rdp/retry`));
-  registerApiTool(server, app, token, "cfman_execute_script", "Execute a saved script version on the store's command agent and return stdout, stderr, timing, and status.", {
+  registerApiTool(server, app, token, "cfman_execute_script", "Schedule a saved script version on the store's command agent. Returns a stable execution/task identifier and scheduled status; poll execution history or logs for running and terminal results.", {
     storeId: z.string().uuid(),
     scriptVersionId: z.string().uuid(),
-    timeoutMs: z.number().int().min(1000).max(300000).default(60000)
+    timeoutMs: z.number().int().min(1000).max(300000).optional().describe("Optional override; omitted uses the saved script default timeout")
   }, (args) => {
     const { storeId, ...body } = args;
     return callApi(app, token, "POST", `/api/stores/${storeId}/commands/execute`, body);
   });
-  registerApiTool(server, app, token, "cfman_execute_inline_script", "Execute one named inline script without adding it to the script library. The source, name, output, timing, and active enrollment are persisted in execution history with an inline tag and no version.", {
+  registerApiTool(server, app, token, "cfman_execute_inline_script", "Schedule one named inline script without adding it to the script library. Returns a stable execution/task identifier; source, output, timing, status, and active enrollment are persisted in execution history with an inline tag and no version.", {
     storeId: z.string().uuid(),
     inlineScript: z.string().min(1).max(262144),
     name: z.string().trim().min(1).max(120).optional().describe("Operator-facing name shown beside the inline tag in execution history"),
     language: z.enum(["powershell", "bash", "sh"]).optional().describe("Optional for inline scripts; defaults to PowerShell on Windows and Bash on Unix"),
-    timeoutMs: z.number().int().min(1000).max(300000).default(60000)
+    timeoutMs: z.number().int().min(1000).max(300000).optional().default(60000)
   }, (args) => {
     const { storeId, ...body } = args;
     return callApi(app, token, "POST", `/api/stores/${storeId}/commands/execute`, body);
@@ -352,16 +384,31 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     platform: z.enum(["windows", "unix"]),
     language: z.enum(["powershell", "bash", "sh"]),
     description: z.string().default(""),
+    defaultTimeoutMs: z.number().int().min(1000).max(300000).default(60000),
     content: z.string().min(1)
   }, (args) => callApi(app, token, "POST", "/api/scripts", args));
   registerApiTool(server, app, token, "cfman_update_script", "Update saved script metadata without changing its immutable versions.", {
     scriptId: z.string().uuid(),
     name: z.string().min(1).optional(),
     language: z.enum(["powershell", "bash", "sh"]).optional(),
-    description: z.string().optional()
+    description: z.string().optional(),
+    defaultTimeoutMs: z.number().int().min(1000).max(300000).optional()
   }, (args) => {
     const { scriptId, ...body } = args;
     return callApi(app, token, "PATCH", `/api/scripts/${scriptId}`, body);
+  });
+  registerApiTool(server, app, token, "cfman_bulk_execute_script", "Schedule a named, described bulk execution of one saved script version concurrently across selected stores or all stores matching tenant/tunnel/enrollment filters. Each per-store execution starts as scheduled and can be polled or cancelled independently; the description is versioned per name.", {
+    scriptId: z.string().uuid(),
+    scriptVersionId: z.string().uuid(),
+    name: z.string().trim().min(1).max(120),
+    description: z.string().trim().max(1000).default(""),
+    timeoutMs: z.number().int().min(1000).max(300000).optional(),
+    storeIds: z.array(z.string().uuid()).max(5000).optional(),
+    filters: z.object({ tenantCode: z.string().optional(), tunnelStatus: z.string().optional(), enrollmentStatus: z.string().optional() }).default({}),
+    selectAll: z.boolean().default(false)
+  }, (args) => {
+    const { scriptId, ...body } = args;
+    return callApi(app, token, "POST", `/api/scripts/${scriptId}/bulk-execute`, body);
   });
   registerApiTool(server, app, token, "cfman_delete_script", "Permanently delete a saved script, all of its versions, and every related execution history record.", {
     scriptId: z.string().uuid()

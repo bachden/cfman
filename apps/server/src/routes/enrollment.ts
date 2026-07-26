@@ -6,11 +6,12 @@ import { config } from "../config.js";
 import { getPublicBaseUrl } from "../lib/app-settings.js";
 import { writeAudit } from "../lib/audit.js";
 import { pool, withTransaction } from "../lib/database.js";
-import { deprovisionStore, provisionStore, withStoreCloudflareLock } from "../lib/provisioning.js";
+import { deprovisionStore, isStoreTunnelActive, provisionStore, withStoreCloudflareLock } from "../lib/provisioning.js";
 import { provisionBrowserRdp } from "../lib/rdp.js";
+import { ensureCommandAgentWafAllowsCloudflareMan } from "../lib/route-waf.js";
 import { decryptSecret, hashToken } from "../lib/security.js";
 import { scheduleStoreVerification, verifyStoreEndpoints } from "../lib/store-verification.js";
-import { ensureCommandAgentToken } from "../lib/command-agent.js";
+import { automaticUnenrollmentScript, createCommandExecution, ensureCommandAgentToken, executeStoreScript, getCommandAgentConfig, recordCommandExecutionLog, recordCommandExecutionReport, recordCommandExecutionStarted } from "../lib/command-agent.js";
 import { synchronizeAccount } from "./accounts.js";
 
 const tokenParams = z.object({ token: z.string().min(30).max(200) });
@@ -23,11 +24,15 @@ const claimSchema = z.object({
   osVersion: z.string().max(100).optional(),
   osBuild: z.string().max(100).optional(),
   installId: z.string().max(200).optional(),
+  scriptId: z.string().uuid().optional(),
   overrideExisting: z.boolean().default(false),
-  previousHostname: z.string().max(253).optional()
+  previousHostname: z.string().max(253).optional(),
+  previousInstallId: z.string().max(200).optional(),
+  previousTunnelId: z.string().max(200).optional()
 });
 const reportSchema = z.object({
   token: z.string().min(30).max(200),
+  scriptId: z.string().uuid().optional(),
   platform: z.enum(["windows", "unix"]).optional(),
   status: z.enum(["installed", "failed"]),
   version: z.string().max(80).optional(),
@@ -46,6 +51,7 @@ const reportSchema = z.object({
 });
 const logSchema = z.object({
   token: z.string().min(30).max(200),
+  scriptId: z.string().uuid().optional(),
   events: z.array(z.object({
     level: z.enum(["debug", "info", "warn", "error"]),
     step: z.string().trim().min(1).max(100).optional(),
@@ -56,15 +62,37 @@ const logSchema = z.object({
 });
 const unenrollReportSchema = z.object({
   token: z.string().min(30).max(200),
+  scriptId: z.string().uuid().optional(),
   platform: z.enum(["windows", "unix"]),
   status: z.enum(["unenrolled", "failed"]),
   error: z.string().max(2000).optional()
 });
+const commandExecutionReportSchema = z.object({
+  token: z.string().min(30).max(200),
+  success: z.boolean(),
+  exitCode: z.number().int().nullable(),
+  stdout: z.string().max(20_000).default(""),
+  stderr: z.string().max(20_000).default(""),
+  durationMs: z.number().int().min(0).max(600_000),
+  error: z.string().max(2000).optional(),
+  status: z.enum(["succeeded", "failed", "timed_out", "cancelled"]).optional()
+});
+const commandExecutionStartedSchema = z.object({
+  token: z.string().min(30).max(200),
+  taskId: z.string().min(1).max(200),
+  processId: z.number().int().positive()
+});
+const commandExecutionLogSchema = z.object({
+  token: z.string().min(30).max(200),
+  stream: z.enum(["stdout", "stderr"]),
+  line: z.string().max(4000),
+  sequence: z.number().int().min(0).optional()
+});
 
 async function findEnrollment(token: string) {
   const result = await pool.query(
-    `SELECT e.id, e.store_id, e.status, e.expires_at, e.install_id, e.claimed_at, e.claimed_by, e.platform,
-            e.deleted_at,
+    `SELECT e.id, e.store_id, e.status, e.expires_at, e.install_id, e.claimed_at, e.claimed_by, e.created_by, e.platform,
+            e.deleted_at, e.unenrolled_at,
             e.host_info, s.hostname
        FROM enrollments e JOIN stores s ON s.id = e.store_id
       WHERE e.token_hash = $1 AND e.deleted_at IS NULL`,
@@ -75,7 +103,8 @@ async function findEnrollment(token: string) {
 
 async function findUnenrollment(token: string) {
   const result = await pool.query(
-    `SELECT e.id, e.store_id, e.status, e.unenroll_token_expires_at, e.unenrolled_at, e.deleted_at, s.hostname
+    `SELECT e.id, e.store_id, e.status, e.unenroll_token_expires_at, e.unenroll_tunnel_id,
+            e.unenroll_reason, e.unenrolled_at, e.deleted_at, s.hostname
        FROM enrollments e JOIN stores s ON s.id = e.store_id
       WHERE e.unenroll_token_hash = $1 AND e.deleted_at IS NULL`,
     [hashToken(token)]
@@ -85,22 +114,61 @@ async function findUnenrollment(token: string) {
 
 async function findDiagnose(token: string) {
   const result = await pool.query(
-    `SELECT e.id, e.store_id, e.diagnose_token_expires_at, e.deleted_at, s.hostname
-       FROM enrollments e JOIN stores s ON s.id = e.store_id
-      WHERE e.diagnose_token_hash = $1 AND e.deleted_at IS NULL`,
+    `SELECT dr.id AS diagnostic_run_id, dr.status AS diagnostic_run_status,
+            dr.expires_at AS diagnose_token_expires_at,
+            e.id AS enrollment_id, e.store_id, e.deleted_at, s.hostname
+       FROM enrollment_diagnostic_runs dr
+       JOIN enrollments e ON e.id = dr.enrollment_id
+       JOIN stores s ON s.id = e.store_id
+      WHERE dr.token_hash = $1 AND dr.status IN ('pending', 'running') AND e.deleted_at IS NULL`,
     [hashToken(token)]
   );
   return result.rows[0];
 }
 
+async function startDiagnosticRun(runId: string, platform: "windows" | "unix"): Promise<void> {
+  const started = await pool.query(
+    `UPDATE enrollment_diagnostic_runs
+        SET status = 'running', platform = $2, started_at = COALESCE(started_at, now())
+      WHERE id = $1 AND status = 'pending' AND expires_at > now()
+      RETURNING enrollment_id`,
+    [runId, platform]
+  );
+  if (!started.rowCount) return;
+  await pool.query(
+    `INSERT INTO enrollment_logs(enrollment_id, level, step, message, metadata, phase, diagnostic_run_id)
+     VALUES ($1, 'info', 'started', $2, $3::jsonb, 'diagnostic', $4)`,
+    [started.rows[0].enrollment_id, `Diagnostic script started on ${platform}`, JSON.stringify({ platform }), runId]
+  );
+}
+
 async function findEnrollmentScript(enrollmentId: string, scriptKind: "install" | "unenroll", platform: "windows" | "unix") {
   const result = await pool.query(
-    `SELECT status, started_at, finished_at, last_error
+    `SELECT id, status, started_at, finished_at, last_error
        FROM enrollment_scripts
       WHERE enrollment_id = $1 AND script_kind = $2 AND platform = $3`,
     [enrollmentId, scriptKind, platform]
   );
   return result.rows[0];
+}
+
+async function resolveEnrollmentScriptId(
+  enrollmentId: string,
+  scriptKind: "install" | "unenroll",
+  scriptId?: string,
+  platform?: "windows" | "unix" | null
+): Promise<string | null> {
+  const result = await pool.query(
+    `SELECT id
+       FROM enrollment_scripts
+      WHERE enrollment_id = $1 AND script_kind = $2
+        AND ($3::uuid IS NULL OR id = $3)
+        AND ($4::text IS NULL OR platform = $4)
+      ORDER BY created_at
+      LIMIT 1`,
+    [enrollmentId, scriptKind, scriptId ?? null, platform ?? null]
+  );
+  return (result.rows[0]?.id as string | undefined) ?? null;
 }
 
 function normalizeScriptPlatform(platform: string | null | undefined): "windows" | "unix" | null {
@@ -118,57 +186,318 @@ async function commandAgentToken(storeId: string): Promise<string> {
   return ensureCommandAgentToken(pool, storeId);
 }
 
-async function reconcilePriorEnrollments(storeId: string, keepEnrollmentId: string, lockClient?: PoolClient): Promise<void> {
+type PreviousMachineIdentity = {
+  hostname: string | undefined;
+  installId: string | undefined;
+  tunnelId: string | undefined;
+};
+
+async function reconcileTargetPriorEnrollments(
+  storeId: string,
+  keepEnrollmentId: string,
+  requestedBy: string | null,
+  previousMachine: PreviousMachineIdentity,
+  lockClient?: PoolClient
+): Promise<void> {
   const previous = await pool.query(
-    `SELECT id
-       FROM enrollments
+    `SELECT e.id, e.platform, e.install_id, e.unenroll_token_encrypted,
+            e.unenroll_token_expires_at, s.hostname, s.tunnel_id
+       FROM enrollments e
+       JOIN stores s ON s.id = e.store_id
       WHERE store_id = $1
-        AND id <> $2
-        AND status IN ('claimed', 'provisioning', 'ready', 'installed')
-        AND unenrolled_at IS NULL
-        AND deleted_at IS NULL`,
+        AND e.id <> $2
+        AND e.status IN ('claimed', 'provisioning', 'ready', 'installed')
+        AND e.unenrolled_at IS NULL
+        AND e.deleted_at IS NULL
+      ORDER BY COALESCE(e.installed_at, e.claimed_at, e.created_at) DESC`,
     [storeId, keepEnrollmentId]
   );
   if (!previous.rowCount) return;
-  // Hold the store lock until the replacement tunnel is provisioned,
-  // preventing a late cleanup report from deleting the new tunnel.
+
+  const localMatch = previous.rows.find((enrollment) =>
+    previousMachine.hostname === enrollment.hostname
+    && previousMachine.installId === enrollment.install_id
+    && previousMachine.tunnelId === enrollment.tunnel_id
+  );
+  const localCleanupVerified = localMatch && previousMachine.tunnelId
+    ? await isStoreTunnelActive(storeId, previousMachine.tunnelId).catch(() => false)
+    : false;
+
+  for (const enrollment of previous.rows) {
+    if (localCleanupVerified && enrollment.id === localMatch.id) continue;
+    const platform = normalizeScriptPlatform(enrollment.platform);
+    const token = enrollment.unenroll_token_encrypted
+      && enrollment.unenroll_token_expires_at
+      && new Date(enrollment.unenroll_token_expires_at) > new Date()
+      ? decryptSecret(enrollment.unenroll_token_encrypted)
+      : null;
+    const agent = await getCommandAgentConfig(storeId);
+    if (!platform || !token || !agent || agent.status !== "ready") {
+      await pool.query(
+        "UPDATE enrollments SET unenroll_last_error = $1, unenroll_reason = 'override', updated_at = now() WHERE id = $2",
+        ["Automatic cleanup could not be scheduled before this enrollment was replaced", enrollment.id]
+      );
+      continue;
+    }
+    const scriptId = await resolveEnrollmentScriptId(enrollment.id, "unenroll", undefined, platform);
+    if (!scriptId) continue;
+    const baseUrl = await getPublicBaseUrl();
+    const cleanupUrl = `${baseUrl}/e/${token}/${platform === "windows" ? "unenroll.ps1" : "unenroll.sh"}`;
+    const script = automaticUnenrollmentScript(platform, cleanupUrl);
+    const executionHandle = await createCommandExecution({
+      storeId,
+      enrollmentId: enrollment.id,
+      scriptVersionId: null,
+      requestedBy,
+      script,
+      timeoutMs: 30_000,
+      scriptType: "inline",
+      scriptName: "Automatic enrollment replacement cleanup",
+      scriptPlatform: platform,
+      scriptLanguage: platform === "windows" ? "powershell" : "sh",
+      scriptVersion: null
+    });
+    try {
+      const result = await executeStoreScript(storeId, script, 30_000, executionHandle);
+      await pool.query(
+        `UPDATE enrollments
+            SET unenroll_reason = 'override', unenroll_last_error = $1, updated_at = now()
+          WHERE id = $2`,
+        [result?.scheduled || result?.result?.success ? null : result?.result?.stderr || "The command agent did not schedule cleanup", enrollment.id]
+      );
+    } catch (error) {
+      await pool.query(
+        "UPDATE enrollments SET unenroll_reason = 'override', unenroll_last_error = $1, updated_at = now() WHERE id = $2",
+        [error instanceof Error ? error.message : "Automatic cleanup failed", enrollment.id]
+      );
+    }
+  }
+
   await deprovisionStore(storeId, "override", lockClient);
-  await pool.query(
-    `UPDATE enrollments
-        SET status = 'unenrolled', unenrolled_at = COALESCE(unenrolled_at, now()),
-            unenroll_reason = 'override', unenroll_token_hash = null,
-            unenroll_token_expires_at = null, unenroll_requested_at = null,
-            unenroll_last_error = null, updated_at = now()
-      WHERE store_id = $1
-        AND id <> $2
-        AND status IN ('claimed', 'provisioning', 'ready', 'installed')
-        AND unenrolled_at IS NULL
-        AND deleted_at IS NULL`,
-    [storeId, keepEnrollmentId]
+  if (localCleanupVerified) {
+    await pool.query(
+      `UPDATE enrollments
+          SET status = 'unenrolled', unenrolled_at = COALESCE(unenrolled_at, now()),
+              unenroll_reason = 'override', unenroll_last_error = null, updated_at = now()
+        WHERE id = $1`,
+      [localMatch.id]
+    );
+  }
+}
+
+async function reconcilePreviousMachineStore(
+  targetStoreId: string,
+  keepEnrollmentId: string,
+  previousMachine: PreviousMachineIdentity
+): Promise<void> {
+  if (!previousMachine.hostname || !previousMachine.installId || !previousMachine.tunnelId) return;
+  const match = await pool.query(
+    `SELECT s.id AS store_id, e.id AS enrollment_id
+       FROM stores s
+       JOIN enrollments e ON e.store_id = s.id
+      WHERE s.hostname = $1 AND s.id <> $2 AND s.tunnel_id = $3
+        AND e.install_id = $4
+        AND e.status IN ('claimed', 'provisioning', 'ready', 'installed')
+        AND e.unenrolled_at IS NULL AND e.deleted_at IS NULL
+      ORDER BY COALESCE(e.installed_at, e.claimed_at, e.created_at) DESC
+      LIMIT 1`,
+    [previousMachine.hostname, targetStoreId, previousMachine.tunnelId, previousMachine.installId]
   );
-  await pool.query(
-    `UPDATE enrollment_scripts
-        SET status = 'staled_ignored', finished_at = COALESCE(finished_at, now()),
-            last_error = 'Skipped because a new enrollment overrode this instance', updated_at = now()
-      WHERE script_kind = 'unenroll'
-        AND enrollment_id IN (
-          SELECT id FROM enrollments
-           WHERE store_id = $1 AND id <> $2 AND unenroll_reason = 'override'
-        )`,
-    [storeId, keepEnrollmentId]
-  );
+  const previous = match.rows[0] as { store_id: string; enrollment_id: string } | undefined;
+  if (!previous) return;
+  const active = await isStoreTunnelActive(previous.store_id, previousMachine.tunnelId).catch(() => false);
+  if (!active) return;
+  await withStoreCloudflareLock(previous.store_id, async (lockClient) => {
+    const stillMatches = await pool.query(
+      `SELECT 1 FROM stores s JOIN enrollments e ON e.store_id = s.id
+        WHERE s.id = $1 AND s.tunnel_id = $2 AND e.id = $3 AND e.install_id = $4
+          AND e.unenrolled_at IS NULL AND e.deleted_at IS NULL`,
+      [previous.store_id, previousMachine.tunnelId, previous.enrollment_id, previousMachine.installId]
+    );
+    if (!stillMatches.rowCount) return;
+    await deprovisionStore(previous.store_id, "override", lockClient);
+    await pool.query(
+      `UPDATE enrollments
+          SET status = 'unenrolled', unenrolled_at = COALESCE(unenrolled_at, now()),
+              unenroll_reason = 'override', unenroll_last_error = null, updated_at = now()
+        WHERE id = $1`,
+      [previous.enrollment_id]
+    );
+    await writeAudit({
+      action: "store.enrollment_replaced_from_local_identity",
+      entityType: "store",
+      entityId: previous.store_id,
+      details: { keepEnrollmentId, previousEnrollmentId: previous.enrollment_id, previousTunnelId: previousMachine.tunnelId }
+    });
+  });
 }
 
 export function unixAgentProgram(agentToken: string): string {
   return `#!/usr/bin/env python3
 import json
+import os
+import queue
+import signal
 import subprocess
+import threading
 import time
+import urllib.request
+import uuid
+from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 TOKEN = "${agentToken}"
 MAX_SCRIPT_BYTES = 65536
 PORT = 47831
+TASK_DIRECTORY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "command-executions")
+TASKS = {}
+TASKS_LOCK = threading.Lock()
+os.makedirs(TASK_DIRECTORY, exist_ok=True)
+
+def task_path(task_id):
+    return os.path.join(TASK_DIRECTORY, task_id + ".json")
+
+def write_task_state(task, status, process_id=None):
+    payload = {
+        "taskId": task["task_id"],
+        "executionId": task["execution_id"],
+        "processId": process_id,
+        "status": status,
+        "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    }
+    temporary = task_path(task["task_id"]) + ".tmp"
+    with open(temporary, "w", encoding="utf-8") as handle:
+        json.dump(payload, handle)
+    os.replace(temporary, task_path(task["task_id"]))
+
+def post_json(url, payload, timeout=10, attempts=3):
+    if not isinstance(url, str) or not url:
+        return
+    body = json.dumps(payload).encode("utf-8")
+    for attempt in range(attempts):
+        try:
+            callback = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(callback, timeout=timeout) as response:
+                response.read()
+            return
+        except Exception:
+            if attempt + 1 < attempts:
+                time.sleep(1 if timeout <= 5 else 2)
+
+def run_execution(request_payload, task):
+    started = time.monotonic()
+    process = None
+    report_token = request_payload.get("reportToken")
+    timeout_ms = max(1000, min(int(request_payload.get("timeoutMs", 60000)), 300000))
+    stdout_lines = deque(maxlen=2000)
+    stderr_lines = deque(maxlen=2000)
+    sequence_lock = threading.Lock()
+    sequence = [0]
+    log_queue = queue.Queue(maxsize=10000)
+
+    def next_sequence():
+        with sequence_lock:
+            value = sequence[0]
+            sequence[0] += 1
+            return value
+
+    def report_worker():
+        while True:
+            item = log_queue.get()
+            if item is None:
+                log_queue.task_done()
+                return
+            stream_name, line, item_sequence = item
+            post_json(request_payload.get("logUrl"), {
+                "token": report_token,
+                "stream": stream_name,
+                "line": line[:4000],
+                "sequence": item_sequence
+            }, timeout=5)
+            log_queue.task_done()
+
+    def read_stream(pipe, stream_name, collected):
+        try:
+            for raw_line in iter(pipe.readline, ""):
+                line = raw_line.rstrip("\\r\\n")
+                collected.append(line)
+                log_queue.put((stream_name, line, next_sequence()))
+        finally:
+            pipe.close()
+
+    reporter = threading.Thread(target=report_worker, daemon=True)
+    reporter.start()
+    cancelled = task["cancelled"].is_set()
+    timed_out = False
+    try:
+        if not cancelled:
+            process = subprocess.Popen(
+                ["/bin/sh", "-lc", request_payload["script"]],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                start_new_session=True
+            )
+            with TASKS_LOCK:
+                task["process"] = process
+                task["process_id"] = process.pid
+                task["status"] = "running"
+                cancelled = task["cancelled"].is_set()
+                write_task_state(task, "running", process.pid)
+            post_json(request_payload.get("startUrl"), {
+                "token": report_token,
+                "taskId": task["task_id"],
+                "processId": process.pid
+            })
+            if cancelled:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except Exception:
+                    process.kill()
+            stdout_reader = threading.Thread(target=read_stream, args=(process.stdout, "stdout", stdout_lines), daemon=True)
+            stderr_reader = threading.Thread(target=read_stream, args=(process.stderr, "stderr", stderr_lines), daemon=True)
+            stdout_reader.start()
+            stderr_reader.start()
+            try:
+                process.wait(timeout=timeout_ms / 1000)
+            except subprocess.TimeoutExpired:
+                timed_out = True
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except Exception:
+                    process.kill()
+                process.wait()
+            stdout_reader.join(timeout=10)
+            stderr_reader.join(timeout=10)
+            cancelled = task["cancelled"].is_set()
+    except Exception as error:
+        stderr_lines.append(str(error)[:2000])
+
+    log_queue.put(None)
+    reporter.join(timeout=30)
+    stdout = "\\n".join(stdout_lines)[-20000:]
+    stderr = "\\n".join(stderr_lines)[-20000:]
+    status = "cancelled" if cancelled else "timed_out" if timed_out else "succeeded" if process is not None and process.returncode == 0 else "failed"
+    result_payload = {
+        "token": report_token,
+        "status": status,
+        "success": status == "succeeded",
+        "exitCode": None if process is None or status in ("cancelled", "timed_out") else process.returncode,
+        "stdout": stdout,
+        "stderr": stderr,
+        "durationMs": round((time.monotonic() - started) * 1000)
+    }
+    if status == "cancelled":
+        result_payload["error"] = "Script cancelled"
+    elif status == "timed_out":
+        result_payload["error"] = "Script timed out"
+    elif process is None:
+        result_payload["error"] = stderr or "Unable to start script"
+    post_json(request_payload.get("reportUrl"), result_payload)
+    write_task_state(task, status, process.pid if process is not None else None)
+    with TASKS_LOCK:
+        TASKS.pop(task["task_id"], None)
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -195,46 +524,79 @@ class Handler(BaseHTTPRequestHandler):
             self.respond(401, {"error": "Invalid command agent token"})
             return
         try:
+            path = self.path.split("?", 1)[0].rstrip("/")
+            if path.endswith("/cancel") and "/executions/" in path:
+                task_id = path.split("/")[-2]
+                try:
+                    uuid.UUID(task_id)
+                except ValueError:
+                    self.respond(400, {"error": "Invalid execution task ID"})
+                    return
+                with TASKS_LOCK:
+                    task = TASKS.get(task_id)
+                    if task is not None:
+                        task["cancelled"].set()
+                        task["status"] = "cancelling"
+                        process = task.get("process")
+                        write_task_state(task, "cancelling", task.get("process_id"))
+                    else:
+                        process = None
+                if task is None:
+                    try:
+                        with open(task_path(task_id), "r", encoding="utf-8") as handle:
+                            previous = json.load(handle)
+                        if previous.get("status") in ("succeeded", "failed", "timed_out", "cancelled"):
+                            self.respond(409, {"error": "Execution already finished", "taskId": task_id})
+                            return
+                    except (FileNotFoundError, ValueError):
+                        pass
+                    self.respond(404, {"error": "Execution task not found"})
+                    return
+                if process is not None:
+                    try:
+                        os.killpg(process.pid, signal.SIGKILL)
+                    except Exception:
+                        try:
+                            process.kill()
+                        except Exception:
+                            pass
+                self.respond(202, {"accepted": True, "taskId": task_id, "status": "cancelling"})
+                return
             length = int(self.headers.get("Content-Length", "0"))
             if length <= 0 or length > MAX_SCRIPT_BYTES + 4096:
                 self.respond(413, {"error": "Request is too large"})
                 return
-            payload = json.loads(self.rfile.read(length).decode("utf-8"))
-            script = payload.get("script")
-            timeout_ms = int(payload.get("timeoutMs", 60000))
+            request_payload = json.loads(self.rfile.read(length).decode("utf-8"))
+            script = request_payload.get("script")
+            execution_id = request_payload.get("executionId")
             if not isinstance(script, str) or not script.strip():
                 self.respond(400, {"error": "A script is required"})
                 return
             if len(script.encode("utf-8")) > MAX_SCRIPT_BYTES:
                 self.respond(413, {"error": "Script is too large"})
                 return
-            timeout_ms = max(1000, min(timeout_ms, 300000))
-            started = time.monotonic()
             try:
-                process = subprocess.run(
-                    ["/bin/sh", "-lc", script],
-                    capture_output=True,
-                    text=True,
-                    timeout=timeout_ms / 1000,
-                    check=False
-                )
-                payload = {
-                    "success": process.returncode == 0,
-                    "exitCode": process.returncode,
-                    "stdout": process.stdout[-20000:],
-                    "stderr": process.stderr[-20000:],
-                    "durationMs": round((time.monotonic() - started) * 1000)
-                }
-            except subprocess.TimeoutExpired as error:
-                payload = {
-                    "success": False,
-                    "exitCode": None,
-                    "stdout": (error.stdout or "")[-20000:] if isinstance(error.stdout, str) else "",
-                    "stderr": (error.stderr or "")[-20000:] if isinstance(error.stderr, str) else "",
-                    "durationMs": round((time.monotonic() - started) * 1000),
-                    "error": "Script timed out"
-                }
-            self.respond(200, payload)
+                task_id = str(uuid.UUID(str(execution_id)))
+            except ValueError:
+                self.respond(400, {"error": "A valid executionId is required"})
+                return
+            task = {
+                "task_id": task_id,
+                "execution_id": task_id,
+                "process": None,
+                "process_id": None,
+                "status": "scheduled",
+                "cancelled": threading.Event()
+            }
+            with TASKS_LOCK:
+                if task_id in TASKS or os.path.exists(task_path(task_id)):
+                    self.respond(409, {"error": "Execution task is already scheduled", "taskId": task_id})
+                    return
+                TASKS[task_id] = task
+                write_task_state(task, "scheduled")
+            worker = threading.Thread(target=run_execution, args=(request_payload, task), daemon=True)
+            worker.start()
+            self.respond(202, {"scheduled": True, "executionId": task_id, "taskId": task_id})
         except Exception as error:
             self.respond(400, {"error": str(error)[:2000]})
 
@@ -243,12 +605,46 @@ ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
 }
 
 export function windowsAgentProgram(agentToken: string): string {
-  return `$ErrorActionPreference = "Stop"
+  return `param([string]$WorkerPayloadPath)
+$ErrorActionPreference = "Stop"
 $Token = "${agentToken}"
 $Port = 47831
-$Listener = New-Object System.Net.HttpListener
-$Listener.Prefixes.Add("http://127.0.0.1:$Port/")
-$Listener.Start()
+$TaskDirectory = Join-Path (Split-Path -Parent $PSCommandPath) "command-executions"
+New-Item -ItemType Directory -Path $TaskDirectory -Force | Out-Null
+
+function Get-TaskStatePath([string]$TaskId) {
+  return Join-Path $TaskDirectory "$TaskId.json"
+}
+
+function Get-WorkerProcessPath([string]$TaskId) {
+  return Join-Path $TaskDirectory "$TaskId.worker.pid"
+}
+
+function Write-TaskState([string]$TaskId, [string]$ExecutionId, [string]$Status, $WorkerProcessId, $ProcessId) {
+  $path = Get-TaskStatePath $TaskId
+  $temporary = "$path.$PID.tmp"
+  @{
+    taskId = $TaskId
+    executionId = $ExecutionId
+    workerProcessId = $WorkerProcessId
+    processId = $ProcessId
+    status = $Status
+    updatedAt = [DateTimeOffset]::UtcNow.ToString("o")
+  } | ConvertTo-Json -Compress | Set-Content -Path $temporary -Encoding UTF8
+  Move-Item -Path $temporary -Destination $path -Force
+}
+
+function Send-JsonCallback([string]$Url, $Payload, [int]$TimeoutSeconds = 10) {
+  if ([string]::IsNullOrWhiteSpace($Url)) { return }
+  for ($attempt = 1; $attempt -le 3; $attempt++) {
+    try {
+      Invoke-RestMethod -Method Post -Uri $Url -ContentType "application/json" -Body ($Payload | ConvertTo-Json -Compress -Depth 5) -TimeoutSec $TimeoutSeconds | Out-Null
+      return
+    } catch {
+      if ($attempt -lt 3) { Start-Sleep -Seconds $(if ($TimeoutSeconds -le 5) { 1 } else { 2 }) }
+    }
+  }
+}
 
 function Send-JsonResponse($Context, [int]$StatusCode, $Payload) {
   $json = $Payload | ConvertTo-Json -Compress -Depth 5
@@ -259,6 +655,115 @@ function Send-JsonResponse($Context, [int]$StatusCode, $Payload) {
   $Context.Response.OutputStream.Write($bytes, 0, $bytes.Length)
   $Context.Response.Close()
 }
+
+function Send-ExecutionLogLine([string]$Url, [string]$ReportToken, [string]$Stream, [string]$Line, [int]$Sequence) {
+  if ([string]::IsNullOrWhiteSpace($Url) -or [string]::IsNullOrWhiteSpace($ReportToken)) { return }
+  $payload = @{ token = $ReportToken; stream = $Stream; line = $Line.Substring(0, [Math]::Min($Line.Length, 4000)); sequence = $Sequence } | ConvertTo-Json -Compress
+  for ($attempt = 1; $attempt -le 3; $attempt++) {
+    try {
+      Invoke-RestMethod -Method Post -Uri $Url -ContentType "application/json" -Body $payload -TimeoutSec 5 | Out-Null
+      return
+    } catch {
+      if ($attempt -lt 3) { Start-Sleep -Seconds 1 }
+    }
+  }
+}
+
+function Invoke-ExecutionWorker([string]$PayloadPath) {
+  $request = Get-Content -Path $PayloadPath -Raw | ConvertFrom-Json
+  $taskId = ([Guid]([string]$request.executionId)).ToString()
+  Write-TaskState $taskId $taskId "scheduled" $PID $null
+  $started = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
+  $timeoutMs = [Math]::Min([Math]::Max([int]$request.timeoutMs, 1000), 300000)
+  $script = [string]$request.script
+  $executionLogUrl = [string]$request.logUrl
+  $executionReportToken = [string]$request.reportToken
+  $process = $null
+  $stdoutBuilder = New-Object Text.StringBuilder
+  $stderrBuilder = New-Object Text.StringBuilder
+  $timedOut = $false
+  try {
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+    $psi = New-Object Diagnostics.ProcessStartInfo
+    $psi.FileName = "powershell.exe"
+    $psi.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded"
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $psi
+    [void]$process.Start()
+    Write-TaskState $taskId $taskId "running" $PID $process.Id
+    Send-JsonCallback ([string]$request.startUrl) @{ token = $executionReportToken; taskId = $taskId; processId = $process.Id }
+
+    $stdoutTask = $process.StandardOutput.ReadLineAsync()
+    $stderrTask = $process.StandardError.ReadLineAsync()
+    $stdoutDone = $false
+    $stderrDone = $false
+    $sequence = 0
+    while (-not ($process.HasExited -and $stdoutDone -and $stderrDone)) {
+      if (-not $stdoutDone -and $stdoutTask.IsCompleted) {
+        $line = $stdoutTask.Result
+        if ($null -eq $line) { $stdoutDone = $true } else {
+          if ($stdoutBuilder.Length -gt 0) { [void]$stdoutBuilder.Append("\`n") }
+          [void]$stdoutBuilder.Append($line)
+          Send-ExecutionLogLine $executionLogUrl $executionReportToken "stdout" $line $sequence
+          $sequence++
+          $stdoutTask = $process.StandardOutput.ReadLineAsync()
+        }
+      }
+      if (-not $stderrDone -and $stderrTask.IsCompleted) {
+        $line = $stderrTask.Result
+        if ($null -eq $line) { $stderrDone = $true } else {
+          if ($stderrBuilder.Length -gt 0) { [void]$stderrBuilder.Append("\`n") }
+          [void]$stderrBuilder.Append($line)
+          Send-ExecutionLogLine $executionLogUrl $executionReportToken "stderr" $line $sequence
+          $sequence++
+          $stderrTask = $process.StandardError.ReadLineAsync()
+        }
+      }
+      if (-not $process.HasExited -and ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $started) -ge $timeoutMs) {
+        $timedOut = $true
+        & taskkill.exe /PID $process.Id /T /F 2>&1 | Out-Null
+      }
+      Start-Sleep -Milliseconds 25
+    }
+    $process.WaitForExit()
+  } catch {
+    [void]$stderrBuilder.Append($_.Exception.Message)
+  }
+
+  $stdout = $stdoutBuilder.ToString()
+  $stderr = $stderrBuilder.ToString()
+  if ($stdout.Length -gt 20000) { $stdout = $stdout.Substring($stdout.Length - 20000) }
+  if ($stderr.Length -gt 20000) { $stderr = $stderr.Substring($stderr.Length - 20000) }
+  $status = if ($timedOut) { "timed_out" } elseif ($process -and $process.ExitCode -eq 0) { "succeeded" } else { "failed" }
+  $result = @{
+    token = $executionReportToken
+    status = $status
+    success = ($status -eq "succeeded")
+    exitCode = if ($timedOut -or -not $process) { $null } else { $process.ExitCode }
+    stdout = $stdout
+    stderr = $stderr
+    durationMs = ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $started)
+  }
+  if ($timedOut) { $result.error = "Script timed out" }
+  elseif (-not $process) { $result.error = if ($stderr) { $stderr } else { "Unable to start script" } }
+  Write-TaskState $taskId $taskId $status $PID $(if ($process) { $process.Id } else { $null })
+  Send-JsonCallback ([string]$request.reportUrl) $result
+  Remove-Item -Path $PayloadPath -Force -ErrorAction SilentlyContinue
+  Remove-Item -Path (Get-WorkerProcessPath $taskId) -Force -ErrorAction SilentlyContinue
+}
+
+if (-not [string]::IsNullOrWhiteSpace($WorkerPayloadPath)) {
+  try { Invoke-ExecutionWorker $WorkerPayloadPath } catch { }
+  exit
+}
+
+$Listener = New-Object System.Net.HttpListener
+$Listener.Prefixes.Add("http://127.0.0.1:$Port/")
+$Listener.Start()
 
 while ($true) {
   $context = $Listener.GetContext()
@@ -280,6 +785,35 @@ while ($true) {
       Send-JsonResponse $context 401 @{ error = "Invalid command agent token" }
       continue
     }
+    $cancelMatch = [regex]::Match($path, "/executions/([0-9a-fA-F-]{36})/cancel/?$")
+    if ($cancelMatch.Success) {
+      $taskId = ([Guid]$cancelMatch.Groups[1].Value).ToString()
+      $statePath = Get-TaskStatePath $taskId
+      if (-not (Test-Path $statePath)) {
+        Send-JsonResponse $context 404 @{ error = "Execution task not found" }
+        continue
+      }
+      $state = Get-Content -Path $statePath -Raw | ConvertFrom-Json
+      if (@("succeeded", "failed", "timed_out", "cancelled") -contains [string]$state.status) {
+        Send-JsonResponse $context 409 @{ error = "Execution already finished"; taskId = $taskId }
+        continue
+      }
+      $workerProcessId = $state.workerProcessId
+      $workerProcessPath = Get-WorkerProcessPath $taskId
+      if (-not $workerProcessId -and (Test-Path $workerProcessPath)) {
+        $workerProcessId = [int](Get-Content -Path $workerProcessPath -Raw)
+      }
+      Write-TaskState $taskId $taskId "cancelling" $workerProcessId $state.processId
+      if ($workerProcessId) {
+        $workerProcessId = [int]$workerProcessId
+        & taskkill.exe /PID $workerProcessId /T /F 2>&1 | Out-Null
+      }
+      Remove-Item -Path (Join-Path $TaskDirectory "$taskId.payload.json") -Force -ErrorAction SilentlyContinue
+      Remove-Item -Path $workerProcessPath -Force -ErrorAction SilentlyContinue
+      Write-TaskState $taskId $taskId "cancelled" $workerProcessId $state.processId
+      Send-JsonResponse $context 202 @{ accepted = $true; taskId = $taskId; status = "cancelling" }
+      continue
+    }
     $reader = New-Object IO.StreamReader($context.Request.InputStream, $context.Request.ContentEncoding)
     $body = $reader.ReadToEnd()
     $reader.Close()
@@ -288,32 +822,26 @@ while ($true) {
     $script = [string]$request.script
     if ([string]::IsNullOrWhiteSpace($script)) { Send-JsonResponse $context 400 @{ error = "A script is required" }; continue }
     if ($script.Length -gt 65536) { Send-JsonResponse $context 413 @{ error = "Script is too large" }; continue }
-    $timeoutMs = [Math]::Min([Math]::Max([int]$request.timeoutMs, 1000), 300000)
-    $started = [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds()
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
-    $psi = New-Object Diagnostics.ProcessStartInfo
-    $psi.FileName = "powershell.exe"
-    $psi.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded"
-    $psi.UseShellExecute = $false
-    $psi.CreateNoWindow = $true
-    $psi.RedirectStandardOutput = $true
-    $psi.RedirectStandardError = $true
-    $process = New-Object Diagnostics.Process
-    $process.StartInfo = $psi
-    [void]$process.Start()
-    $stdoutTask = $process.StandardOutput.ReadToEndAsync()
-    $stderrTask = $process.StandardError.ReadToEndAsync()
-    if (-not $process.WaitForExit($timeoutMs)) {
-      $process.Kill()
-      $process.WaitForExit()
-      $stdout = $stdoutTask.Result
-      $stderr = $stderrTask.Result
-      Send-JsonResponse $context 200 @{ success = $false; exitCode = $null; stdout = $stdout.Substring(0, [Math]::Min($stdout.Length, 20000)); stderr = $stderr.Substring(0, [Math]::Min($stderr.Length, 20000)); durationMs = ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $started); error = "Script timed out" }
-      continue
+    try { $taskId = ([Guid]([string]$request.executionId)).ToString() } catch { Send-JsonResponse $context 400 @{ error = "A valid executionId is required" }; continue }
+    $statePath = Get-TaskStatePath $taskId
+    if (Test-Path $statePath) {
+      $existing = Get-Content -Path $statePath -Raw | ConvertFrom-Json
+      if (@("scheduled", "running", "cancelling") -contains [string]$existing.status) {
+        Send-JsonResponse $context 409 @{ error = "Execution task is already scheduled"; taskId = $taskId }
+        continue
+      }
     }
-    $stdout = $stdoutTask.Result
-    $stderr = $stderrTask.Result
-    Send-JsonResponse $context 200 @{ success = ($process.ExitCode -eq 0); exitCode = $process.ExitCode; stdout = $stdout.Substring(0, [Math]::Min($stdout.Length, 20000)); stderr = $stderr.Substring(0, [Math]::Min($stderr.Length, 20000)); durationMs = ([DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() - $started) }
+    $payloadPath = Join-Path $TaskDirectory "$taskId.payload.json"
+    $body | Set-Content -Path $payloadPath -Encoding UTF8
+    Write-TaskState $taskId $taskId "scheduled" $null $null
+    $worker = Start-Process -FilePath "powershell.exe" -ArgumentList @("-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "\`"$PSCommandPath\`"", "-WorkerPayloadPath", "\`"$payloadPath\`"") -WindowStyle Hidden -PassThru
+    $workerProcessPath = Get-WorkerProcessPath $taskId
+    [string]$worker.Id | Set-Content -Path $workerProcessPath -Encoding ASCII
+    $latestState = Get-Content -Path $statePath -Raw | ConvertFrom-Json
+    if (@("succeeded", "failed", "timed_out", "cancelled") -contains [string]$latestState.status) {
+      Remove-Item -Path $workerProcessPath -Force -ErrorAction SilentlyContinue
+    }
+    Send-JsonResponse $context 202 @{ scheduled = $true; executionId = $taskId; taskId = $taskId }
   } catch {
     try { Send-JsonResponse $context 400 @{ error = $_.Exception.Message } } catch { }
   }
@@ -321,13 +849,14 @@ while ($true) {
 `;
 }
 
-export function shellScript(token: string, hostname: string, publicBaseUrl: string, agentToken: string): string {
+export function shellScript(token: string, hostname: string, publicBaseUrl: string, agentToken: string, scriptId: string): string {
   const claimUrl = `${publicBaseUrl}/api/public/enrollments/claim`;
   const reportUrl = `${publicBaseUrl}/api/public/enrollments/report`;
   return `#!/usr/bin/env bash
 set -euo pipefail
 
 ENROLLMENT_TOKEN='${token}'
+SCRIPT_ID='${scriptId}'
 CLOUDFLARED_VERSION='${config.CLOUDFLARED_VERSION}'
 CLAIM_URL='${claimUrl}'
 REPORT_URL='${reportUrl}'
@@ -348,7 +877,7 @@ send_log() {
   step="$2"
   message="$(printf '%s' "$3" | cut -c1-3500)"
   encoded_message="$(printf '%s' "$message" | base64 | tr -d '\r\n')"
-  curl --silent --show-error --fail --max-time 10 -X POST "$LOG_URL" -H 'Content-Type: application/json' --data "{\\"token\\":\\"$ENROLLMENT_TOKEN\\",\\"events\\":[{\\"level\\":\\"$level\\",\\"step\\":\\"$step\\",\\"messageBase64\\":\\"$encoded_message\\"}]}" >/dev/null 2>&1 || true
+  curl --silent --show-error --fail --max-time 10 -X POST "$LOG_URL" -H 'Content-Type: application/json' --data "{\\"token\\":\\"$ENROLLMENT_TOKEN\\",\\"scriptId\\":\\"$SCRIPT_ID\\",\\"events\\":[{\\"level\\":\\"$level\\",\\"step\\":\\"$step\\",\\"messageBase64\\":\\"$encoded_message\\"}]}" >/dev/null 2>&1 || true
 }
 
 log_message() {
@@ -363,7 +892,7 @@ report_failure() {
     send_log "error" "installer" "Installer exited with code $exit_code"
     curl --silent --show-error --fail --retry 2 --retry-all-errors -X POST "$REPORT_URL" \\
       -H 'Content-Type: application/json' \\
-      --data "{\\"token\\":\\"$ENROLLMENT_TOKEN\\",\\"status\\":\\"failed\\",\\"platform\\":\\"unix\\",\\"error\\":\\"installer exited with code $exit_code\\",\\"osName\\":\\"$OS_DISPLAY_NAME\\",\\"osVersion\\":\\"$OS_VERSION\\",\\"osBuild\\":\\"$OS_BUILD\\",\\"architecture\\":\\"$MACHINE_ARCH\\",\\"machineName\\":\\"$MACHINE_NAME\\"}" >/dev/null || true
+      --data "{\\"token\\":\\"$ENROLLMENT_TOKEN\\",\\"scriptId\\":\\"$SCRIPT_ID\\",\\"status\\":\\"failed\\",\\"platform\\":\\"unix\\",\\"error\\":\\"installer exited with code $exit_code\\",\\"osName\\":\\"$OS_DISPLAY_NAME\\",\\"osVersion\\":\\"$OS_VERSION\\",\\"osBuild\\":\\"$OS_BUILD\\",\\"architecture\\":\\"$MACHINE_ARCH\\",\\"machineName\\":\\"$MACHINE_NAME\\"}" >/dev/null || true
   fi
   exit "$exit_code"
 }
@@ -410,7 +939,10 @@ else
 fi
 INSTALL_ID_FILE="$STATE_DIR/install-id"
 HOSTNAME_FILE="$STATE_DIR/assigned-hostname"
+TUNNEL_ID_FILE="$STATE_DIR/tunnel-id"
 OVERRIDE_EXISTING=false
+PREVIOUS_INSTALL_ID=""
+PREVIOUS_TUNNEL_ID=""
 EXISTING_ENROLLMENT=0
 if [ -s "$INSTALL_ID_FILE" ] || pgrep -x cloudflared >/dev/null 2>&1 \\
   || [ -f /etc/systemd/system/cloudflared.service ] \\
@@ -420,6 +952,8 @@ fi
 if [ "$EXISTING_ENROLLMENT" -eq 1 ]; then
   PREVIOUS_HOSTNAME=""
   if [ -s "$HOSTNAME_FILE" ]; then PREVIOUS_HOSTNAME="$(cat "$HOSTNAME_FILE")"; fi
+  if [ -s "$INSTALL_ID_FILE" ]; then PREVIOUS_INSTALL_ID="$(cat "$INSTALL_ID_FILE")"; fi
+  if [ -s "$TUNNEL_ID_FILE" ]; then PREVIOUS_TUNNEL_ID="$(cat "$TUNNEL_ID_FILE")"; fi
   if [ -n "$PREVIOUS_HOSTNAME" ]; then
     log_message "warn" "existing-enrollment" "Existing enrollment detected for $PREVIOUS_HOSTNAME"
   else
@@ -485,7 +1019,7 @@ if ! command -v cloudflared >/dev/null 2>&1; then
 fi
 
 log_message "info" "claim" "Claiming enrollment and provisioning the Cloudflare tunnel"
-CLAIM_BODY="$(printf '{\\"token\\":\\"%s\\",\\"platform\\":\\"%s\\",\\"architecture\\":\\"%s\\",\\"machineName\\":\\"%s\\",\\"osName\\":\\"%s\\",\\"osVersion\\":\\"%s\\",\\"osBuild\\":\\"%s\\",\\"installId\\":\\"%s\\",\\"overrideExisting\\":%s,\\"previousHostname\\":\\"%s\\"}' "$ENROLLMENT_TOKEN" "$OS_NAME" "$MACHINE_ARCH" "$MACHINE_NAME" "$OS_DISPLAY_NAME" "$OS_VERSION" "$OS_BUILD" "$INSTALL_ID" "$OVERRIDE_EXISTING" "$PREVIOUS_HOSTNAME")"
+CLAIM_BODY="$(printf '{\\"token\\":\\"%s\\",\\"scriptId\\":\\"%s\\",\\"platform\\":\\"%s\\",\\"architecture\\":\\"%s\\",\\"machineName\\":\\"%s\\",\\"osName\\":\\"%s\\",\\"osVersion\\":\\"%s\\",\\"osBuild\\":\\"%s\\",\\"installId\\":\\"%s\\",\\"overrideExisting\\":%s,\\"previousHostname\\":\\"%s\\",\\"previousInstallId\\":\\"%s\\",\\"previousTunnelId\\":\\"%s\\"}' "$ENROLLMENT_TOKEN" "$SCRIPT_ID" "$OS_NAME" "$MACHINE_ARCH" "$MACHINE_NAME" "$OS_DISPLAY_NAME" "$OS_VERSION" "$OS_BUILD" "$INSTALL_ID" "$OVERRIDE_EXISTING" "$PREVIOUS_HOSTNAME" "$PREVIOUS_INSTALL_ID" "$PREVIOUS_TUNNEL_ID")"
 CLAIM_RESPONSE_FILE="$(mktemp)"
 CLAIM_CURL_ERROR=0
 CLAIM_STATUS="$(curl --silent --show-error --retry 3 --retry-all-errors --output "$CLAIM_RESPONSE_FILE" --write-out '%{http_code}' -X POST "$CLAIM_URL" -H 'Content-Type: application/json' -H 'Accept: text/plain' --data "$CLAIM_BODY")" || CLAIM_CURL_ERROR=$?
@@ -499,6 +1033,7 @@ if [ "$CLAIM_CURL_ERROR" -ne 0 ] || [ "$CLAIM_STATUS" -lt 200 ] || [ "$CLAIM_STA
 fi
 TUNNEL_TOKEN="$(printf '%s\\n' "$CLAIM_RESPONSE" | sed -n '1p')"
 CLAIM_AGENT_TOKEN="$(printf '%s\\n' "$CLAIM_RESPONSE" | sed -n '2p')"
+CLAIM_TUNNEL_ID="$(printf '%s\\n' "$CLAIM_RESPONSE" | sed -n '3p')"
 [ -n "$CLAIM_AGENT_TOKEN" ] && AGENT_TOKEN="$CLAIM_AGENT_TOKEN"
 log_message "info" "claim" "Enrollment claimed successfully"
 log_message "info" "service" "Installing the cloudflared service"
@@ -595,19 +1130,22 @@ if [ "$AGENT_READY" != true ]; then
 fi
 log_message "info" "command-agent" "Local command agent is ready"
 log_message "info" "report" "Reporting successful installation"
-curl --silent --show-error --fail --retry 3 --retry-all-errors -X POST "$REPORT_URL" -H 'Content-Type: application/json' --data "{\\"token\\":\\"$ENROLLMENT_TOKEN\\",\\"status\\":\\"installed\\",\\"platform\\":\\"unix\\",\\"version\\":\\"$VERSION\\",\\"agentReady\\":$AGENT_READY,\\"osName\\":\\"$OS_DISPLAY_NAME\\",\\"osVersion\\":\\"$OS_VERSION\\",\\"osBuild\\":\\"$OS_BUILD\\",\\"architecture\\":\\"$MACHINE_ARCH\\",\\"machineName\\":\\"$MACHINE_NAME\\"}" >/dev/null
+curl --silent --show-error --fail --retry 3 --retry-all-errors -X POST "$REPORT_URL" -H 'Content-Type: application/json' --data "{\\"token\\":\\"$ENROLLMENT_TOKEN\\",\\"scriptId\\":\\"$SCRIPT_ID\\",\\"status\\":\\"installed\\",\\"platform\\":\\"unix\\",\\"version\\":\\"$VERSION\\",\\"agentReady\\":$AGENT_READY,\\"osName\\":\\"$OS_DISPLAY_NAME\\",\\"osVersion\\":\\"$OS_VERSION\\",\\"osBuild\\":\\"$OS_BUILD\\",\\"architecture\\":\\"$MACHINE_ARCH\\",\\"machineName\\":\\"$MACHINE_NAME\\"}" >/dev/null
 REPORT_SENT=1
 printf '%s' "$ASSIGNED_HOSTNAME" > "$HOSTNAME_FILE"
 chmod 600 "$HOSTNAME_FILE"
+printf '%s' "$CLAIM_TUNNEL_ID" > "$TUNNEL_ID_FILE"
+chmod 600 "$TUNNEL_ID_FILE"
 log_message "info" "complete" "Store tunnel installed successfully for $ASSIGNED_HOSTNAME"
 
 echo "Store tunnel installed: $ASSIGNED_HOSTNAME"
 `;
 }
 
-export function powerShellScript(token: string, hostname: string, publicBaseUrl: string, agentToken: string): string {
+export function powerShellScript(token: string, hostname: string, publicBaseUrl: string, agentToken: string, scriptId: string): string {
   return `$ErrorActionPreference = "Stop"
 $EnrollmentToken = "${token}"
+$ScriptId = "${scriptId}"
 $CloudflaredVersion = "${config.CLOUDFLARED_VERSION}"
 $ClaimUrl = "${publicBaseUrl}/api/public/enrollments/claim"
 $ReportUrl = "${publicBaseUrl}/api/public/enrollments/report"
@@ -633,6 +1171,7 @@ function Send-InstallLog {
     $encodedMessage = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($Message))
     $logBody = @{
       token = $EnrollmentToken
+      scriptId = $ScriptId
       events = @(@{ level = $Level; step = $Step; messageBase64 = $encodedMessage })
     } | ConvertTo-Json -Depth 5
     Invoke-RestMethod -Method Post -Uri $LogUrl -ContentType "application/json" -Body $logBody -TimeoutSec 10 | Out-Null
@@ -684,8 +1223,11 @@ $binary = Join-Path $installDirectory "cloudflared.exe"
 $stateDirectory = Join-Path $env:ProgramData "cloudflare-man"
 $installIdFile = Join-Path $stateDirectory "install-id"
 $hostnameFile = Join-Path $stateDirectory "assigned-hostname"
+$tunnelIdFile = Join-Path $stateDirectory "tunnel-id"
 $overrideExisting = $false
 $previousHostname = ""
+$previousInstallId = ""
+$previousTunnelId = ""
 $existingService = Get-Service -Name "cloudflared" -ErrorAction SilentlyContinue
 $existingEnrollment = (Test-Path $installIdFile) -or ($null -ne $existingService)
 if ($existingEnrollment) {
@@ -694,6 +1236,8 @@ if ($existingEnrollment) {
     $previousHostname = (Get-Content $hostnameFile -Raw).Trim()
     if ($previousHostname) { $existingLabel = "the existing enrollment for $previousHostname" }
   }
+  if (Test-Path $installIdFile) { $previousInstallId = (Get-Content $installIdFile -Raw).Trim() }
+  if (Test-Path $tunnelIdFile) { $previousTunnelId = (Get-Content $tunnelIdFile -Raw).Trim() }
   Send-InstallLog -Level "warn" -Step "existing-enrollment" -Message "Detected $existingLabel"
   $confirmation = Read-Host "Cleanup and override $existingLabel? [y/N]"
   if ($confirmation -notmatch "^(y|yes)$") {
@@ -756,6 +1300,7 @@ if (-not (Test-Path $binary)) {
 Send-InstallLog -Level "info" -Step "claim" -Message "Claiming enrollment and provisioning the Cloudflare tunnel"
 $claimBody = @{
   token = $EnrollmentToken
+  scriptId = $ScriptId
   platform = "windows"
   architecture = $architecture
   machineName = $machineName
@@ -765,6 +1310,8 @@ $claimBody = @{
   installId = $installId
   overrideExisting = $overrideExisting
   previousHostname = $previousHostname
+  previousInstallId = $previousInstallId
+  previousTunnelId = $previousTunnelId
 } | ConvertTo-Json
 try {
   $claim = Invoke-RestMethod -Method Post -Uri $ClaimUrl -ContentType "application/json" -Body $claimBody
@@ -776,8 +1323,16 @@ try {
 Send-InstallLog -Level "info" -Step "claim" -Message "Enrollment claimed successfully"
 
 Send-InstallLog -Level "info" -Step "service" -Message "Installing the cloudflared service"
-$serviceOutput = & $binary service install $claim.tunnelToken 2>&1
-$serviceExitCode = $LASTEXITCODE
+$previousErrorActionPreference = $ErrorActionPreference
+try {
+  # cloudflared writes informational messages to stderr. PowerShell 5.1
+  # turns native stderr into ErrorRecord objects when the global policy is Stop.
+  $ErrorActionPreference = "Continue"
+  $serviceOutput = @(& $binary service install $claim.tunnelToken 2>&1)
+  $serviceExitCode = $LASTEXITCODE
+} finally {
+  $ErrorActionPreference = $previousErrorActionPreference
+}
 foreach ($line in $serviceOutput) { Send-InstallLog -Level "info" -Step "service" -Message $line.ToString() }
 if ($serviceExitCode -ne 0) { throw "cloudflared service installation failed with exit code $serviceExitCode." }
 Set-Service -Name "cloudflared" -StartupType Automatic
@@ -849,6 +1404,7 @@ ${windowsAgentProgram(agentToken)}
 
 $reportPayload = @{
   token = $EnrollmentToken
+  scriptId = $ScriptId
   platform = "windows"
   status = "installed"
   version = (& $binary --version | Select-Object -First 1)
@@ -873,13 +1429,14 @@ if ($report.rdp -and -not $report.rdp.ready) {
   Write-Warning "Browser RDP provisioning failed: $($report.rdp.error)"
 }
 Set-Content -Path $hostnameFile -Value $AssignedHostname -NoNewline
+Set-Content -Path $tunnelIdFile -Value ([string]$claim.tunnelId) -NoNewline
 Send-InstallLog -Level "info" -Step "complete" -Message "Store tunnel installed successfully for $AssignedHostname"
 Write-Host "Store tunnel installed: $AssignedHostname"
 } catch {
   Send-InstallLog -Level "error" -Step "installer" -Message $_.Exception.Message
   if (-not $ReportSent) {
     try {
-      $failureBody = @{ token = $EnrollmentToken; platform = "windows"; status = "failed"; error = $_.Exception.Message; osName = $osName; osVersion = $osVersion; osBuild = $osBuild; architecture = $architecture; machineName = $machineName } | ConvertTo-Json
+      $failureBody = @{ token = $EnrollmentToken; scriptId = $ScriptId; platform = "windows"; status = "failed"; error = $_.Exception.Message; osName = $osName; osVersion = $osVersion; osBuild = $osBuild; architecture = $architecture; machineName = $machineName } | ConvertTo-Json
       Invoke-RestMethod -Method Post -Uri $ReportUrl -ContentType "application/json" -Body $failureBody | Out-Null
     } catch { }
   }
@@ -888,7 +1445,7 @@ Write-Host "Store tunnel installed: $AssignedHostname"
 `;
 }
 
-function shellUnenrollScript(token: string, hostname: string, publicBaseUrl: string): string {
+function shellUnenrollScript(token: string, hostname: string, publicBaseUrl: string, scriptId: string): string {
   const claimUrl = `${publicBaseUrl}/api/public/enrollments/unenroll/claim`;
   const reportUrl = `${publicBaseUrl}/api/public/enrollments/unenroll/report`;
   const logUrl = `${publicBaseUrl}/api/public/enrollments/unenroll/logs`;
@@ -896,6 +1453,7 @@ function shellUnenrollScript(token: string, hostname: string, publicBaseUrl: str
 set -euo pipefail
 
 UNENROLL_TOKEN='${token}'
+SCRIPT_ID='${scriptId}'
 CLAIM_URL='${claimUrl}'
 REPORT_URL='${reportUrl}'
 LOG_URL='${logUrl}'
@@ -905,7 +1463,7 @@ send_log() {
   level="$1"
   message="$(printf '%s' "$3" | cut -c1-3500)"
   encoded_message="$(printf '%s' "$message" | base64 | tr -d '\\r\\n')"
-  curl --silent --show-error --fail --max-time 10 -X POST "$LOG_URL" -H 'Content-Type: application/json' --data "{\\"token\\":\\"$UNENROLL_TOKEN\\",\\"events\\":[{\\"level\\":\\"$level\\",\\"step\\":\\"cleanup\\",\\"messageBase64\\":\\"$encoded_message\\"}]}" >/dev/null 2>&1 || true
+  curl --silent --show-error --fail --max-time 10 -X POST "$LOG_URL" -H 'Content-Type: application/json' --data "{\\"token\\":\\"$UNENROLL_TOKEN\\",\\"scriptId\\":\\"$SCRIPT_ID\\",\\"events\\":[{\\"level\\":\\"$level\\",\\"step\\":\\"cleanup\\",\\"messageBase64\\":\\"$encoded_message\\"}]}" >/dev/null 2>&1 || true
 }
 
 report_failure() {
@@ -913,7 +1471,7 @@ report_failure() {
   if [ "$exit_code" -ne 0 ] && [ "$REPORT_SENT" -eq 0 ]; then
     curl --silent --show-error --fail --retry 2 --retry-all-errors -X POST "$REPORT_URL" \\
       -H 'Content-Type: application/json' \\
-      --data "{\\"token\\":\\"$UNENROLL_TOKEN\\",\\"platform\\":\\"unix\\",\\"status\\":\\"failed\\",\\"error\\":\\"cleanup exited with code $exit_code\\"}" >/dev/null || true
+      --data "{\\"token\\":\\"$UNENROLL_TOKEN\\",\\"scriptId\\":\\"$SCRIPT_ID\\",\\"platform\\":\\"unix\\",\\"status\\":\\"failed\\",\\"error\\":\\"cleanup exited with code $exit_code\\"}" >/dev/null || true
   fi
   exit "$exit_code"
 }
@@ -925,7 +1483,7 @@ if [ "$(id -u)" -ne 0 ]; then
 fi
 curl --silent --show-error --fail --retry 2 --retry-all-errors -X POST "$CLAIM_URL" \\
   -H 'Content-Type: application/json' \\
-  --data "{\\"token\\":\\"$UNENROLL_TOKEN\\",\\"platform\\":\\"unix\\"}" >/dev/null
+  --data "{\\"token\\":\\"$UNENROLL_TOKEN\\",\\"scriptId\\":\\"$SCRIPT_ID\\",\\"platform\\":\\"unix\\"}" >/dev/null
 send_log "info" "cleanup" "Unenrollment script claimed for unix"
 send_log "info" "cleanup" "Stopping and removing the cloudflared service"
 if command -v cloudflared >/dev/null 2>&1; then
@@ -943,18 +1501,19 @@ fi
 rm -rf "/var/lib/cloudflare-man" "/Library/Application Support/cloudflare-man"
 curl --silent --show-error --fail --retry 3 --retry-all-errors -X POST "$REPORT_URL" \\
   -H 'Content-Type: application/json' \\
-  --data "{\\"token\\":\\"$UNENROLL_TOKEN\\",\\"platform\\":\\"unix\\",\\"status\\":\\"unenrolled\\"}" >/dev/null
+  --data "{\\"token\\":\\"$UNENROLL_TOKEN\\",\\"scriptId\\":\\"$SCRIPT_ID\\",\\"platform\\":\\"unix\\",\\"status\\":\\"unenrolled\\"}" >/dev/null
 REPORT_SENT=1
 echo "Cloudflare tunnel instance unenrolled successfully."
 `;
 }
 
-function powerShellUnenrollScript(token: string, hostname: string, publicBaseUrl: string): string {
+function powerShellUnenrollScript(token: string, hostname: string, publicBaseUrl: string, scriptId: string): string {
   const claimUrl = `${publicBaseUrl}/api/public/enrollments/unenroll/claim`;
   const reportUrl = `${publicBaseUrl}/api/public/enrollments/unenroll/report`;
   const logUrl = `${publicBaseUrl}/api/public/enrollments/unenroll/logs`;
   return `$ErrorActionPreference = "Stop"
 $UnenrollToken = "${token}"
+$ScriptId = "${scriptId}"
 $ClaimUrl = "${claimUrl}"
 $ReportUrl = "${reportUrl}"
 $LogUrl = "${logUrl}"
@@ -964,15 +1523,30 @@ function Send-CleanupLog {
   param([string]$Level, [string]$Message)
   Write-Host "[cleanup] $Message"
   try {
-    $body = @{ token = $UnenrollToken; events = @(@{ level = $Level; step = "cleanup"; message = $Message }) } | ConvertTo-Json -Depth 5
+    $body = @{ token = $UnenrollToken; scriptId = $ScriptId; events = @(@{ level = $Level; step = "cleanup"; message = $Message }) } | ConvertTo-Json -Depth 5
     Invoke-RestMethod -Method Post -Uri $LogUrl -ContentType "application/json" -Body $body -TimeoutSec 10 | Out-Null
   } catch { }
+}
+
+function Invoke-WithRetry {
+  # Matches the unix script's "curl --retry" resilience: a transient network
+  # blip here must not leave local cleanup done with the server never told,
+  # since that produces a store that looks installed but has nothing running.
+  param([scriptblock]$Action, [int]$MaxAttempts = 3, [int]$DelaySeconds = 2)
+  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+    try {
+      return & $Action
+    } catch {
+      if ($attempt -ge $MaxAttempts) { throw }
+      Start-Sleep -Seconds $DelaySeconds
+    }
+  }
 }
 
 try {
   $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
   if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw "Run PowerShell as Administrator." }
-  Invoke-RestMethod -Method Post -Uri $ClaimUrl -ContentType "application/json" -Body (@{ token = $UnenrollToken; platform = "windows" } | ConvertTo-Json) | Out-Null
+  Invoke-WithRetry { Invoke-RestMethod -Method Post -Uri $ClaimUrl -ContentType "application/json" -Body (@{ token = $UnenrollToken; scriptId = $ScriptId; platform = "windows" } | ConvertTo-Json) | Out-Null }
   Send-CleanupLog -Level "info" -Message "Unenrollment script claimed for windows"
   Send-CleanupLog -Level "info" -Message "Stopping and removing the cloudflared service for ${hostname}"
   $binary = Join-Path $env:ProgramFiles "cloudflared\\cloudflared.exe"
@@ -1011,16 +1585,16 @@ try {
   }
   $stateDirectory = Join-Path $env:ProgramData "cloudflare-man"
   if (Test-Path $stateDirectory) { Remove-Item $stateDirectory -Recurse -Force }
-  $body = @{ token = $UnenrollToken; platform = "windows"; status = "unenrolled" } | ConvertTo-Json
-  Invoke-RestMethod -Method Post -Uri $ReportUrl -ContentType "application/json" -Body $body | Out-Null
+  $body = @{ token = $UnenrollToken; scriptId = $ScriptId; platform = "windows"; status = "unenrolled" } | ConvertTo-Json
+  Invoke-WithRetry { Invoke-RestMethod -Method Post -Uri $ReportUrl -ContentType "application/json" -Body $body | Out-Null }
   $ReportSent = $true
   Write-Host "Cloudflare tunnel instance unenrolled successfully."
 } catch {
   Send-CleanupLog -Level "error" -Message $_.Exception.Message
   if (-not $ReportSent) {
     try {
-      $body = @{ token = $UnenrollToken; platform = "windows"; status = "failed"; error = $_.Exception.Message } | ConvertTo-Json
-      Invoke-RestMethod -Method Post -Uri $ReportUrl -ContentType "application/json" -Body $body | Out-Null
+      $body = @{ token = $UnenrollToken; scriptId = $ScriptId; platform = "windows"; status = "failed"; error = $_.Exception.Message } | ConvertTo-Json
+      Invoke-WithRetry { Invoke-RestMethod -Method Post -Uri $ReportUrl -ContentType "application/json" -Body $body | Out-Null }
     } catch { }
   }
   throw
@@ -1028,13 +1602,14 @@ try {
 `;
 }
 
-function diagnosticShellScript(hostname: string, publicBaseUrl: string, agentToken: string, storeId: string): string {
+function diagnosticShellScript(hostname: string, publicBaseUrl: string, agentToken: string, storeId: string, diagnosticRunId: string): string {
   const reportUrl = `${publicBaseUrl}/api/public/stores/diagnose/report`;
   return `#!/usr/bin/env bash
 set -uo pipefail
 
 ASSIGNED_HOSTNAME='${hostname}'
 STORE_ID='${storeId}'
+DIAGNOSTIC_RUN_ID='${diagnosticRunId}'
 AGENT_TOKEN='${agentToken}'
 REPORT_URL='${reportUrl}'
 
@@ -1080,18 +1655,19 @@ fi
 
 echo "----------------------------------------"
 echo "Reporting results to cloudflare-man..."
-REPORT_BODY="$(printf '{"storeId":"%s","agentToken":"%s","cloudflaredRunning":%s,"hostnameMatch":%s,"localHostname":"%s","agentHealthy":%s}' "$STORE_ID" "$AGENT_TOKEN" "$CLOUDFLARED_RUNNING" "$HOSTNAME_MATCH" "$LOCAL_HOSTNAME" "$AGENT_HEALTHY")"
+REPORT_BODY="$(printf '{"storeId":"%s","diagnosticRunId":"%s","agentToken":"%s","cloudflaredRunning":%s,"hostnameMatch":%s,"localHostname":"%s","agentHealthy":%s}' "$STORE_ID" "$DIAGNOSTIC_RUN_ID" "$AGENT_TOKEN" "$CLOUDFLARED_RUNNING" "$HOSTNAME_MATCH" "$LOCAL_HOSTNAME" "$AGENT_HEALTHY")"
 RESPONSE="$(curl --silent --show-error --max-time 15 -X POST "$REPORT_URL" -H 'Content-Type: application/json' --data "$REPORT_BODY")"
 MESSAGE="$(printf '%s' "$RESPONSE" | grep -o '"message":"[^"]*"' | sed 's/"message":"//;s/"$//')"
 if [ -n "$MESSAGE" ]; then echo "$MESSAGE"; else echo "$RESPONSE"; fi
 `;
 }
 
-function diagnosticPowerShellScript(hostname: string, publicBaseUrl: string, agentToken: string, storeId: string): string {
+function diagnosticPowerShellScript(hostname: string, publicBaseUrl: string, agentToken: string, storeId: string, diagnosticRunId: string): string {
   const reportUrl = `${publicBaseUrl}/api/public/stores/diagnose/report`;
   return `$ErrorActionPreference = "Continue"
 $AssignedHostname = "${hostname}"
 $StoreId = "${storeId}"
+$DiagnosticRunId = "${diagnosticRunId}"
 $AgentToken = "${agentToken}"
 $ReportUrl = "${reportUrl}"
 $stateDirectory = Join-Path $env:ProgramData "cloudflare-man"
@@ -1142,6 +1718,7 @@ Write-Host "----------------------------------------"
 Write-Host "Reporting results to cloudflare-man..."
 $reportBody = @{
   storeId = $StoreId
+  diagnosticRunId = $DiagnosticRunId
   agentToken = $AgentToken
   cloudflaredRunning = $cloudflaredRunning
   hostnameMatch = $hostnameMatch
@@ -1158,6 +1735,42 @@ try {
 }
 
 export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
+  app.post("/api/public/command-executions/:executionId/started", {
+    config: { rateLimit: { max: 300, timeWindow: "1 minute" } }
+  }, async (request, reply) => {
+    const { executionId } = z.object({ executionId: z.string().uuid() }).parse(request.params);
+    const body = commandExecutionStartedSchema.parse(request.body);
+    const recorded = await recordCommandExecutionStarted(executionId, body.token, body.taskId, body.processId);
+    if (!recorded) return reply.code(404).send({ error: "Command execution not found or no longer active" });
+    return reply.code(202).send({ accepted: true, executionId, taskId: body.taskId });
+  });
+  app.post("/api/public/command-executions/:executionId/report", {
+    config: { rateLimit: { max: 100, timeWindow: "1 minute" } }
+  }, async (request, reply) => {
+    const { executionId } = z.object({ executionId: z.string().uuid() }).parse(request.params);
+    const body = commandExecutionReportSchema.parse(request.body);
+    const recorded = await recordCommandExecutionReport(executionId, body.token, {
+      success: body.success,
+      exitCode: body.exitCode,
+      stdout: body.stdout,
+      stderr: body.stderr,
+      durationMs: body.durationMs,
+      ...(body.error !== undefined ? { error: body.error } : {}),
+      ...(body.status !== undefined ? { status: body.status } : {})
+    });
+    if (!recorded) return reply.code(404).send({ error: "Command execution not found" });
+    return reply.code(202).send({ accepted: true, executionId });
+  });
+  app.post("/api/public/command-executions/:executionId/log", {
+    config: { rateLimit: { max: 1200, timeWindow: "1 minute" } }
+  }, async (request, reply) => {
+    const { executionId } = z.object({ executionId: z.string().uuid() }).parse(request.params);
+    const body = commandExecutionLogSchema.parse(request.body);
+    const recorded = await recordCommandExecutionLog(executionId, body.token, body.stream, body.line, body.sequence ?? null);
+    if (!recorded) return reply.code(404).send({ error: "Command execution not found" });
+    return reply.code(202).send({ accepted: true, executionId });
+  });
+
   app.get("/e/:token/install.sh", async (request, reply) => {
     const { token } = tokenParams.parse(request.params);
     const enrollment = await findEnrollment(token);
@@ -1169,7 +1782,7 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(404).type("text/plain").send("Enrollment URL is invalid or expired.\n");
     }
     noStore(reply);
-    return reply.type("text/x-shellscript; charset=utf-8").send(shellScript(token, enrollment.hostname, await getPublicBaseUrl(), await commandAgentToken(enrollment.store_id)));
+    return reply.type("text/x-shellscript; charset=utf-8").send(shellScript(token, enrollment.hostname, await getPublicBaseUrl(), await commandAgentToken(enrollment.store_id), script.id));
   });
 
   app.get("/e/:token/install.ps1", async (request, reply) => {
@@ -1183,7 +1796,7 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(404).type("text/plain").send("Enrollment URL is invalid or expired.\n");
     }
     noStore(reply);
-    return reply.type("text/plain; charset=utf-8").send(powerShellScript(token, enrollment.hostname, await getPublicBaseUrl(), await commandAgentToken(enrollment.store_id)));
+    return reply.type("text/plain; charset=utf-8").send(powerShellScript(token, enrollment.hostname, await getPublicBaseUrl(), await commandAgentToken(enrollment.store_id), script.id));
   });
 
   app.get("/e/:token/unenroll.sh", async (request, reply) => {
@@ -1197,7 +1810,7 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(404).type("text/plain").send("Unenrollment URL is invalid or expired.\n");
     }
     noStore(reply);
-    return reply.type("text/x-shellscript; charset=utf-8").send(shellUnenrollScript(token, enrollment.hostname, await getPublicBaseUrl()));
+    return reply.type("text/x-shellscript; charset=utf-8").send(shellUnenrollScript(token, enrollment.hostname, await getPublicBaseUrl(), script.id));
   });
 
   app.get("/e/:token/unenroll.ps1", async (request, reply) => {
@@ -1211,7 +1824,7 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(404).type("text/plain").send("Unenrollment URL is invalid or expired.\n");
     }
     noStore(reply);
-    return reply.type("text/plain; charset=utf-8").send(powerShellUnenrollScript(token, enrollment.hostname, await getPublicBaseUrl()));
+    return reply.type("text/plain; charset=utf-8").send(powerShellUnenrollScript(token, enrollment.hostname, await getPublicBaseUrl(), script.id));
   });
 
   app.get("/d/:token/diagnose.sh", async (request, reply) => {
@@ -1220,8 +1833,9 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
     if (!diagnose || !diagnose.diagnose_token_expires_at || new Date(diagnose.diagnose_token_expires_at) <= new Date()) {
       return reply.code(404).type("text/plain").send("Diagnostic link is invalid or expired.\n");
     }
+    await startDiagnosticRun(diagnose.diagnostic_run_id, "unix");
     noStore(reply);
-    return reply.type("text/x-shellscript; charset=utf-8").send(diagnosticShellScript(diagnose.hostname, await getPublicBaseUrl(), await commandAgentToken(diagnose.store_id), diagnose.store_id));
+    return reply.type("text/x-shellscript; charset=utf-8").send(diagnosticShellScript(diagnose.hostname, await getPublicBaseUrl(), await commandAgentToken(diagnose.store_id), diagnose.store_id, diagnose.diagnostic_run_id));
   });
 
   app.get("/d/:token/diagnose.ps1", async (request, reply) => {
@@ -1230,8 +1844,9 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
     if (!diagnose || !diagnose.diagnose_token_expires_at || new Date(diagnose.diagnose_token_expires_at) <= new Date()) {
       return reply.code(404).type("text/plain").send("Diagnostic link is invalid or expired.\n");
     }
+    await startDiagnosticRun(diagnose.diagnostic_run_id, "windows");
     noStore(reply);
-    return reply.type("text/plain; charset=utf-8").send(diagnosticPowerShellScript(diagnose.hostname, await getPublicBaseUrl(), await commandAgentToken(diagnose.store_id), diagnose.store_id));
+    return reply.type("text/plain; charset=utf-8").send(diagnosticPowerShellScript(diagnose.hostname, await getPublicBaseUrl(), await commandAgentToken(diagnose.store_id), diagnose.store_id, diagnose.diagnostic_run_id));
   });
 
   app.post("/api/public/enrollments/claim", {
@@ -1253,7 +1868,7 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
           AND deleted_at IS NULL
           AND expires_at > now()
           AND (claimed_at IS NULL OR install_id = $3 OR $5 = true)
-      RETURNING id, store_id`,
+      RETURNING id, store_id, created_by`,
       [body.platform, body.machineName ?? request.ip, body.installId ?? null, tokenHash, body.overrideExisting, body.osName ?? null, body.osVersion ?? null, body.osBuild ?? null, body.architecture ?? null, body.machineName ?? null]
     );
     let enrollment = claimed.rows[0];
@@ -1280,6 +1895,8 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
     }
 
     const scriptPlatform = normalizeScriptPlatform(body.platform)!;
+    const claimedScriptId = await resolveEnrollmentScriptId(enrollment.id, "install", body.scriptId, scriptPlatform);
+    if (body.scriptId && !claimedScriptId) return reply.code(409).send({ error: "The installer script ID does not match this enrollment" });
     await pool.query(
       `UPDATE enrollment_scripts
           SET status = CASE WHEN platform = $1 THEN 'running' ELSE 'staled_ignored' END,
@@ -1292,29 +1909,23 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
     );
 
     try {
+      const previousMachine = {
+        hostname: body.previousHostname,
+        installId: body.previousInstallId,
+        tunnelId: body.previousTunnelId
+      };
+      try {
+        await reconcilePreviousMachineStore(enrollment.store_id, enrollment.id, previousMachine);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Unable to reconcile the previous store";
+        await pool.query(
+          `INSERT INTO enrollment_logs(enrollment_id, enrollment_script_id, level, step, message, metadata, phase)
+           VALUES ($1, $2, 'warn', 'claim', $3, $4::jsonb, 'enroll')`,
+          [enrollment.id, claimedScriptId, message.slice(0, 4000), JSON.stringify({ source: "server", previousHostname: body.previousHostname })]
+        );
+      }
       const provision = async (lockClient?: PoolClient) => {
-        await reconcilePriorEnrollments(enrollment.store_id, enrollment.id, lockClient);
-        if (body.previousHostname) {
-          const previousStore = await pool.query(
-            "SELECT id FROM stores WHERE hostname = $1 AND id <> $2",
-            [body.previousHostname, enrollment.store_id]
-          );
-          const previousStoreId = previousStore.rows[0]?.id as string | undefined;
-          if (previousStoreId) {
-            // Cleanup of an unrelated store must not block this store's own
-            // provisioning, so isolate failures instead of rethrowing.
-            try {
-              await reconcilePriorEnrollments(previousStoreId, enrollment.id);
-            } catch (error) {
-              const message = error instanceof Error ? error.message : "Unable to reconcile the previous store";
-              await pool.query(
-                `INSERT INTO enrollment_logs(enrollment_id, level, step, message, metadata)
-                 VALUES ($1, 'warn', 'claim', $2, $3::jsonb)`,
-                [enrollment.id, message.slice(0, 4000), JSON.stringify({ source: "server", previousStoreId })]
-              );
-            }
-          }
-        }
+        await reconcileTargetPriorEnrollments(enrollment.store_id, enrollment.id, enrollment.created_by ?? null, previousMachine, lockClient);
         return provisionStore(enrollment.store_id);
       };
       const provisioned = await withStoreCloudflareLock(enrollment.store_id, provision);
@@ -1322,7 +1933,7 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
       await pool.query("UPDATE enrollments SET status = 'ready', last_error = null, updated_at = now() WHERE id = $1", [enrollment.id]);
       if (request.headers.accept?.includes("text/plain")) {
         noStore(reply);
-        return reply.type("text/plain").send(`${provisioned.tunnelToken}\n${agentToken}`);
+        return reply.type("text/plain").send(`${provisioned.tunnelToken}\n${agentToken}\n${provisioned.tunnelId}`);
       }
       noStore(reply);
       return { ...provisioned, agentToken };
@@ -1330,9 +1941,9 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
       const message = error instanceof Error ? error.message : "Provisioning failed";
       await pool.query("UPDATE enrollments SET status = 'failed', last_error = $1, updated_at = now() WHERE id = $2", [message, enrollment.id]);
       await pool.query(
-        `INSERT INTO enrollment_logs(enrollment_id, level, step, message, metadata)
-         VALUES ($1, 'error', 'claim', $2, '{"source":"server"}'::jsonb)`,
-        [enrollment.id, message.slice(0, 4000)]
+        `INSERT INTO enrollment_logs(enrollment_id, enrollment_script_id, level, step, message, metadata, phase)
+         VALUES ($1, $2, 'error', 'claim', $3, '{"source":"server"}'::jsonb, 'enroll')`,
+        [enrollment.id, claimedScriptId, message.slice(0, 4000)]
       );
       await pool.query(
         `UPDATE enrollment_scripts
@@ -1349,16 +1960,18 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
   }, async (request, reply) => {
     const body = logSchema.parse(request.body);
     const enrollment = await findEnrollment(body.token);
-    if (!enrollment || enrollment.status === "revoked") return reply.code(404).send({ error: "Enrollment not found" });
+    if (!enrollment) return reply.code(404).send({ error: "Enrollment not found" });
+    const scriptId = await resolveEnrollmentScriptId(enrollment.id, "install", body.scriptId);
+    if (body.scriptId && !scriptId) return reply.code(404).send({ error: "Enrollment script not found" });
     await withTransaction(async (client) => {
       for (const event of body.events) {
         const decodedMessage = event.messageBase64
           ? Buffer.from(event.messageBase64, "base64").toString("utf8").slice(0, 4000)
           : event.message!;
         await client.query(
-          `INSERT INTO enrollment_logs(enrollment_id, level, step, message, metadata)
-           VALUES ($1, $2, $3, $4, $5::jsonb)`,
-          [enrollment.id, event.level, event.step ?? null, decodedMessage, JSON.stringify(event.metadata ?? {})]
+          `INSERT INTO enrollment_logs(enrollment_id, enrollment_script_id, level, step, message, metadata, phase)
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'enroll')`,
+          [enrollment.id, scriptId, event.level, event.step ?? null, decodedMessage, JSON.stringify(event.metadata ?? {})]
         );
       }
     });
@@ -1370,16 +1983,18 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
   }, async (request, reply) => {
     const body = logSchema.parse(request.body);
     const enrollment = await findUnenrollment(body.token);
-    if (!enrollment || enrollment.unenrolled_at) return reply.code(404).send({ error: "Unenrollment not found" });
+    if (!enrollment) return reply.code(404).send({ error: "Unenrollment not found" });
+    const scriptId = await resolveEnrollmentScriptId(enrollment.id, "unenroll", body.scriptId);
+    if (body.scriptId && !scriptId) return reply.code(404).send({ error: "Unenrollment script not found" });
     await withTransaction(async (client) => {
       for (const event of body.events) {
         const decodedMessage = event.messageBase64
           ? Buffer.from(event.messageBase64, "base64").toString("utf8").slice(0, 4000)
           : event.message!;
         await client.query(
-          `INSERT INTO enrollment_logs(enrollment_id, level, step, message, metadata)
-           VALUES ($1, $2, $3, $4, $5::jsonb)`,
-          [enrollment.id, event.level, event.step ?? "cleanup", decodedMessage, JSON.stringify(event.metadata ?? {})]
+          `INSERT INTO enrollment_logs(enrollment_id, enrollment_script_id, level, step, message, metadata, phase)
+           VALUES ($1, $2, $3, $4, $5, $6::jsonb, 'unenroll')`,
+          [enrollment.id, scriptId, event.level, event.step ?? "cleanup", decodedMessage, JSON.stringify(event.metadata ?? {})]
         );
       }
     });
@@ -1391,6 +2006,7 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
   }, async (request, reply) => {
     const body = z.object({
       token: z.string().min(30).max(200),
+      scriptId: z.string().uuid().optional(),
       platform: z.enum(["windows", "unix"])
     }).parse(request.body);
     const result = await withTransaction(async (client) => {
@@ -1403,6 +2019,8 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
       );
       const enrollment = enrollmentResult.rows[0];
       if (!enrollment || enrollment.unenrolled_at || !enrollment.unenroll_token_expires_at || new Date(enrollment.unenroll_token_expires_at) <= new Date()) return null;
+      const scriptId = await resolveEnrollmentScriptId(enrollment.id, "unenroll", body.scriptId, body.platform);
+      if (body.scriptId && !scriptId) return null;
       await client.query(
         `UPDATE enrollment_scripts
             SET status = CASE WHEN platform = $1 THEN 'running' ELSE 'staled_ignored' END,
@@ -1413,10 +2031,10 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
           WHERE enrollment_id = $2 AND script_kind = 'unenroll'`,
         [body.platform, enrollment.id]
       );
-      return enrollment.id as string;
+      return { enrollmentId: enrollment.id as string, scriptId };
     });
     if (!result) return reply.code(409).send({ error: "Unenrollment URL is invalid, expired, or already completed" });
-    return { success: true, enrollmentId: result, platform: body.platform };
+    return { success: true, enrollmentId: result.enrollmentId, scriptId: result.scriptId, platform: body.platform };
   });
 
   app.post("/api/public/enrollments/unenroll/report", {
@@ -1425,6 +2043,8 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
     const body = unenrollReportSchema.parse(request.body);
     const enrollment = await findUnenrollment(body.token);
     if (!enrollment) return reply.code(404).send({ error: "Unenrollment not found" });
+    const scriptId = await resolveEnrollmentScriptId(enrollment.id, "unenroll", body.scriptId, body.platform);
+    if (body.scriptId && !scriptId) return reply.code(404).send({ error: "Unenrollment script not found" });
     if (body.status === "failed") {
       await withTransaction(async (client) => {
         await client.query(
@@ -1434,60 +2054,45 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
         await client.query(
           `UPDATE enrollment_scripts
               SET status = 'failed', finished_at = now(), last_error = $1, updated_at = now()
-            WHERE enrollment_id = $2 AND script_kind = 'unenroll' AND platform = $3`,
-          [body.error ?? "Unenrollment failed", enrollment.id, body.platform]
+            WHERE enrollment_id = $2 AND script_kind = 'unenroll' AND platform = $3
+              AND ($4::uuid IS NULL OR id = $4)`,
+          [body.error ?? "Unenrollment failed", enrollment.id, body.platform, scriptId]
         );
       });
       return { success: false };
     }
+    await pool.query(
+      `UPDATE enrollment_scripts
+          SET status = 'completed', finished_at = COALESCE(finished_at, now()), last_error = null, updated_at = now()
+        WHERE enrollment_id = $1 AND script_kind = 'unenroll' AND platform = $2
+          AND ($3::uuid IS NULL OR id = $3)`,
+      [enrollment.id, body.platform, scriptId]
+    );
     try {
-      const completed = await withStoreCloudflareLock(enrollment.store_id, async (lockClient) => {
-        const stillCurrent = await pool.query(
-          `SELECT 1
-             FROM enrollments
-            WHERE id = $1 AND store_id = $2 AND unenroll_token_hash = $3
-              AND unenrolled_at IS NULL AND deleted_at IS NULL
-              AND unenroll_token_expires_at > now()`,
-          [enrollment.id, enrollment.store_id, hashToken(body.token)]
-        );
-        if (!stillCurrent.rowCount) return false;
-        // The local script has already stopped its services. The server now
-        // removes DNS, WAF, RDP and tunnel resources before success is stored.
-        await deprovisionStore(enrollment.store_id, "unenroll", lockClient);
+      const cloudflareDeprovisioned = await withStoreCloudflareLock(enrollment.store_id, async (lockClient) => {
+        const store = await pool.query("SELECT tunnel_id FROM stores WHERE id = $1", [enrollment.store_id]);
+        const currentTunnelId = store.rows[0]?.tunnel_id as string | null | undefined;
+        const shouldDeprovision = enrollment.unenroll_tunnel_id
+          ? currentTunnelId === enrollment.unenroll_tunnel_id
+          : Boolean(currentTunnelId && !enrollment.unenrolled_at);
+        if (shouldDeprovision) await deprovisionStore(enrollment.store_id, "unenroll", lockClient);
         await withTransaction(async (client) => {
           await client.query(
             `UPDATE enrollments
-                SET status = 'unenrolled', unenrolled_at = COALESCE(unenrolled_at, now()), unenroll_reason = 'script', unenroll_last_error = null, updated_at = now()
+                SET status = 'unenrolled', unenrolled_at = COALESCE(unenrolled_at, now()),
+                    unenroll_reason = COALESCE(unenroll_reason, 'script'), unenroll_last_error = null, updated_at = now()
               WHERE id = $1`,
             [enrollment.id]
           );
-          await client.query(
-            `UPDATE enrollment_scripts
-                SET status = 'completed', finished_at = now(), last_error = null, updated_at = now()
-              WHERE enrollment_id = $1 AND script_kind = 'unenroll' AND platform = $2`,
-            [enrollment.id, body.platform]
-          );
         });
-        return true;
+        return shouldDeprovision;
       });
-      if (!completed) return reply.code(409).send({ success: false, error: "Unenrollment was superseded by a newer enrollment" });
+      return { success: true, cloudflareDeprovisioned };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Cloudflare cleanup failed";
-      await withTransaction(async (client) => {
-        await client.query(
-          `UPDATE enrollments SET unenroll_last_error = $1, updated_at = now() WHERE id = $2`,
-          [message, enrollment.id]
-        );
-        await client.query(
-          `UPDATE enrollment_scripts
-              SET status = 'failed', finished_at = now(), last_error = $1, updated_at = now()
-            WHERE enrollment_id = $2 AND script_kind = 'unenroll' AND platform = $3`,
-          [message, enrollment.id, body.platform]
-        );
-      });
+      await pool.query("UPDATE enrollments SET unenroll_last_error = $1, updated_at = now() WHERE id = $2", [message, enrollment.id]);
       return reply.code(502).send({ success: false, error: message });
     }
-    return { success: true };
   });
 
   app.post("/api/public/enrollments/report", {
@@ -1495,15 +2100,46 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
   }, async (request, reply) => {
     const body = reportSchema.parse(request.body);
     const enrollment = await findEnrollment(body.token);
-    if (!enrollment || enrollment.status === "revoked") return reply.code(404).send({ error: "Enrollment not found" });
+    if (!enrollment) return reply.code(404).send({ error: "Enrollment not found" });
     const success = body.status === "installed";
     const reportPlatform = body.platform ?? normalizeScriptPlatform(enrollment.platform);
     if (body.platform && enrollment.platform && reportPlatform !== normalizeScriptPlatform(enrollment.platform)) {
       return reply.code(409).send({ error: "The report platform does not match the claimed installer" });
     }
-    if (success && !["provisioning", "ready", "installed"].includes(enrollment.status)) {
-      return reply.code(409).send({ error: "Enrollment has not been provisioned" });
+    const scriptId = await resolveEnrollmentScriptId(enrollment.id, "install", body.scriptId, reportPlatform);
+    if (body.scriptId && !scriptId) return reply.code(404).send({ error: "Enrollment script not found" });
+    if (reportPlatform) {
+      await pool.query(
+        `UPDATE enrollment_scripts
+            SET status = $1, finished_at = COALESCE(finished_at, now()), last_error = $2, updated_at = now()
+          WHERE enrollment_id = $3 AND script_kind = 'install' AND platform = $4
+            AND ($5::uuid IS NULL OR id = $5)`,
+        [success ? "completed" : "failed", body.error ?? null, enrollment.id, reportPlatform, scriptId]
+      );
     }
+    await pool.query(
+      `UPDATE enrollments
+          SET host_info = host_info || $1::jsonb, updated_at = now()
+        WHERE id = $2`,
+      [JSON.stringify(Object.fromEntries(Object.entries({
+        osName: body.osName,
+        osVersion: body.osVersion,
+        osBuild: body.osBuild,
+        architecture: body.architecture,
+        machineName: body.machineName
+      }).filter(([, value]) => value !== undefined))), enrollment.id]
+    );
+    const latest = await pool.query(
+      `SELECT id FROM enrollments
+        WHERE store_id = $1 AND deleted_at IS NULL
+        ORDER BY created_at DESC, id DESC LIMIT 1`,
+      [enrollment.store_id]
+    );
+    const stateApplicable = !enrollment.unenrolled_at
+      && enrollment.status !== "revoked"
+      && latest.rows[0]?.id === enrollment.id
+      && (!success || ["provisioning", "ready", "installed"].includes(enrollment.status));
+    if (!stateApplicable) return reply.code(202).send({ success: true, stateApplied: false });
     const retryablePreflightFailure = !success && enrollment.status === "url_issued" && !enrollment.claimed_at;
     let scheduleVerification = false;
     let accountId: string | undefined;
@@ -1586,12 +2222,14 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
     if (scheduleVerification) {
       scheduleStoreVerification(enrollment.store_id);
       if (accountId) void synchronizeAccount(accountId).catch(() => undefined);
+      void ensureCommandAgentWafAllowsCloudflareMan(enrollment.store_id).catch(() => undefined);
     }
-    return { success: true, ...(rdp ? { rdp } : {}) };
+    return { success: true, stateApplied: true, ...(rdp ? { rdp } : {}) };
   });
 
   const diagnoseReportSchema = z.object({
     storeId: z.string().uuid(),
+    diagnosticRunId: z.string().uuid(),
     agentToken: z.string().min(1).max(500),
     cloudflaredRunning: z.boolean(),
     hostnameMatch: z.boolean(),
@@ -1610,6 +2248,16 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
     }
     const store = await pool.query("SELECT account_id, hostname FROM stores WHERE id = $1", [body.storeId]);
     if (!store.rowCount) return reply.code(404).send({ error: "Store not found" });
+
+    const diagnosticRun = await pool.query(
+      `SELECT dr.id, dr.enrollment_id, dr.status
+         FROM enrollment_diagnostic_runs dr
+         JOIN enrollments e ON e.id = dr.enrollment_id
+        WHERE dr.id = $1 AND e.store_id = $2 AND e.deleted_at IS NULL
+          AND dr.status IN ('pending', 'running') AND dr.expires_at > now()`,
+      [body.diagnosticRunId, body.storeId]
+    );
+    if (!diagnosticRun.rowCount) return reply.code(404).send({ error: "Diagnostic run not found" });
 
     const currentEnrollment = await pool.query(
       `SELECT id, status FROM enrollments
@@ -1646,13 +2294,29 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
             details: { supersededByStoreId: supersededBy.rows[0].id, supersededByStoreName: supersededBy.rows[0].display_name, localHostname: body.localHostname }
           });
         }
+        const message = `This machine now belongs to store "${supersededBy.rows[0].display_name}" - this enrollment has been marked unenrolled.`;
+        await withTransaction(async (client) => {
+          await client.query(
+            `INSERT INTO enrollment_logs(enrollment_id, level, step, message, metadata, phase, diagnostic_run_id)
+             VALUES ($1, 'error', 'local-enrollment', $2, $3::jsonb, 'diagnostic', $4),
+                    ($1, 'error', 'summary', $5, $6::jsonb, 'diagnostic', $4)`,
+            [diagnosticRun.rows[0].enrollment_id, `Local enrollment reports ${body.localHostname}`, JSON.stringify({ passed: false }), body.diagnosticRunId, message, JSON.stringify({ allHealthy: false, reconciled: false })]
+          );
+          await client.query(
+            `UPDATE enrollment_diagnostic_runs
+                SET status = 'failed', started_at = COALESCE(started_at, created_at), finished_at = now()
+              WHERE id = $1`,
+            [body.diagnosticRunId]
+          );
+        });
         return {
+          diagnosticRunId: body.diagnosticRunId,
           tunnelOnline: false,
           hostnameMatch: false,
           agentHealthy: body.agentHealthy,
           endpointOk: false,
           reconciled: false,
-          message: `This machine now belongs to store "${supersededBy.rows[0].display_name}" - this enrollment has been marked unenrolled.`
+          message
         };
       }
     }
@@ -1710,6 +2374,39 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
               ? "Found a problem: Cloudflare reports the tunnel as offline."
               : "Found a problem: the published endpoint is not reachable.";
 
-    return { tunnelOnline, hostnameMatch: body.hostnameMatch, agentHealthy: body.agentHealthy, endpointOk, reconciled, message };
+    const checks = [
+      { step: "cloudflared", passed: body.cloudflaredRunning, message: body.cloudflaredRunning ? "cloudflared is running on the machine" : "cloudflared is not running on the machine" },
+      { step: "local-enrollment", passed: body.hostnameMatch, message: body.hostnameMatch ? `Local enrollment matches ${store.rows[0].hostname}` : `Local enrollment reports ${body.localHostname || "no assigned hostname"}` },
+      { step: "command-agent", passed: body.agentHealthy, message: body.agentHealthy ? "Command agent is responding locally" : "Command agent is not responding locally" },
+      { step: "cloudflare-tunnel", passed: tunnelOnline, message: tunnelOnline ? "Cloudflare reports the tunnel online" : "Cloudflare reports the tunnel offline" },
+      { step: "published-endpoints", passed: endpointOk, message: endpointOk ? "Published endpoints are reachable" : "One or more published endpoints are not reachable" }
+    ];
+    await withTransaction(async (client) => {
+      const locked = await client.query(
+        "SELECT status FROM enrollment_diagnostic_runs WHERE id = $1 FOR UPDATE",
+        [body.diagnosticRunId]
+      );
+      if (!locked.rowCount || ["completed", "failed"].includes(locked.rows[0].status)) return;
+      for (const check of checks) {
+        await client.query(
+          `INSERT INTO enrollment_logs(enrollment_id, level, step, message, metadata, phase, diagnostic_run_id)
+           VALUES ($1, $2, $3, $4, $5::jsonb, 'diagnostic', $6)`,
+          [diagnosticRun.rows[0].enrollment_id, check.passed ? "info" : "error", check.step, check.message, JSON.stringify({ passed: check.passed }), body.diagnosticRunId]
+        );
+      }
+      await client.query(
+        `INSERT INTO enrollment_logs(enrollment_id, level, step, message, metadata, phase, diagnostic_run_id)
+         VALUES ($1, $2, 'summary', $3, $4::jsonb, 'diagnostic', $5)`,
+        [diagnosticRun.rows[0].enrollment_id, allHealthy ? "info" : "error", message, JSON.stringify({ allHealthy, reconciled }), body.diagnosticRunId]
+      );
+      await client.query(
+        `UPDATE enrollment_diagnostic_runs
+            SET status = $2, started_at = COALESCE(started_at, created_at), finished_at = now()
+          WHERE id = $1`,
+        [body.diagnosticRunId, allHealthy ? "completed" : "failed"]
+      );
+    });
+
+    return { diagnosticRunId: body.diagnosticRunId, tunnelOnline, hostnameMatch: body.hostnameMatch, agentHealthy: body.agentHealthy, endpointOk, reconciled, message };
   });
 }

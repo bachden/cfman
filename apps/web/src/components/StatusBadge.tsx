@@ -1,6 +1,6 @@
 const healthy = new Set(["active", "healthy", "verified", "installed", "enabled", "ready", "completed", "success", "succeeded", "connected", "waiting_for_new_enrollment", "online"]);
-const warning = new Set(["url_issued", "claimed", "provisioning", "connector_online", "inactive", "pending", "running", "timed_out", "staled", "unenroll_pending", "unenroll_failed", "unverified", "degraded"]);
-const danger = new Set(["failed", "unenroll_failed", "down", "invalid", "expired", "revoked", "offline"]);
+const warning = new Set(["url_issued", "claimed", "provisioning", "connector_online", "inactive", "pending", "scheduled", "running", "timed_out", "staled", "unenroll_pending", "unenroll_failed", "unverified", "degraded"]);
+const danger = new Set(["failed", "cancelled", "unenroll_failed", "down", "invalid", "expired", "revoked", "offline"]);
 
 export function StatusBadge({ status, label: customLabel }: { status: string; label?: string }) {
   const tone = healthy.has(status) ? "success" : warning.has(status) ? "warning" : danger.has(status) ? "danger" : "neutral";
@@ -26,4 +26,13 @@ export function isPendingOnboardingStatus(status: string): boolean {
 
 export function isPendingEnrollmentStatus(status: string): boolean {
   return pendingEnrollmentStatuses.has(status);
+}
+
+// Single source of truth for "should this store keep polling for updates" -
+// shared by the store list and the drawer so both refresh on the same signal
+// instead of two conditions silently drifting apart.
+export function storeNeedsFastPolling(store: { onboardingStatus: string; latestEnrollmentStatus?: string | null; hasPendingActivity?: boolean }): boolean {
+  return isPendingOnboardingStatus(store.onboardingStatus)
+    || Boolean(store.latestEnrollmentStatus && isPendingEnrollmentStatus(store.latestEnrollmentStatus))
+    || Boolean(store.hasPendingActivity);
 }

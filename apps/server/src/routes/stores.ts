@@ -7,15 +7,15 @@ import { requireAuth } from "../lib/auth.js";
 import { CloudflareClient } from "../lib/cloudflare.js";
 import { pool, withTransaction } from "../lib/database.js";
 import { appendNameFilter, nameFilterFields, validateNameFilter } from "../lib/name-filter.js";
-import { decryptSecret } from "../lib/security.js";
+import { decryptSecret, encryptSecret } from "../lib/security.js";
 import { reconfigureStore } from "../lib/provisioning.js";
-import { isValidIpOrCidr, resolveWafAllowedIps } from "../lib/route-waf.js";
+import { defaultWafAllowedIps, isValidIpOrCidr, resolveWafAllowedIps } from "../lib/route-waf.js";
 import { provisionBrowserRdp } from "../lib/rdp.js";
 import { verifyStoreEndpoints } from "../lib/store-verification.js";
 import { synchronizeAccount } from "./accounts.js";
 import { createOpaqueToken, hashToken } from "../lib/security.js";
 import { selectZone, slugifyLabel } from "../lib/stores.js";
-import { createCommandExecution, executeStoreScript, getCommandAgentConfig, ensureCommandAgentToken, COMMAND_AGENT_SERVICE_URL } from "../lib/command-agent.js";
+import { automaticUnenrollmentScript, cancelCommandExecution, createCommandExecution, executeStoreScript, getCommandAgentConfig, ensureCommandAgentToken, COMMAND_AGENT_SERVICE_URL } from "../lib/command-agent.js";
 
 const serviceUrlSchema = z.string().url().refine((value) => value.startsWith("http://") || value.startsWith("https://"), {
   message: "Service URL must use HTTP or HTTPS"
@@ -90,7 +90,10 @@ const routeWafSchema = z.object({
 const listQuerySchema = z.object({
   ...nameFilterFields,
   search: z.string().trim().max(120).optional(),
+  tenantCode: z.string().trim().max(80).optional(),
   status: z.string().trim().max(40).optional(),
+  tunnelStatus: z.string().trim().max(40).optional(),
+  enrollmentStatus: z.string().trim().max(40).optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(10).max(100).default(25)
 }).superRefine(validateNameFilter);
@@ -100,8 +103,19 @@ const refreshStoresSchema = z.object({
 });
 
 const commandExecutionListSchema = z.object({
+  search: z.string().trim().max(120).optional(),
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/, "Timestamp must use ISO 8601 format").optional(),
+  to: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/, "Timestamp must use ISO 8601 format").optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(5).max(50).default(10)
+});
+const enrollmentListSchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(5).max(50).default(10)
+});
+const commandExecutionLogListSchema = z.object({
+  after: z.coerce.number().int().min(0).default(0),
+  limit: z.coerce.number().int().min(1).max(1000).default(500)
 });
 
 const enrollmentSchema = z.object({
@@ -117,7 +131,7 @@ const executeScriptSchema = z.object({
   inlineScript: z.string().min(1).max(262_144).refine((value) => value.trim().length > 0, "Inline script content is required").optional(),
   name: z.string().trim().min(1).max(120).optional(),
   language: z.enum(["powershell", "bash", "sh"]).optional(),
-  timeoutMs: z.number().int().min(1_000).max(300_000).default(60_000)
+  timeoutMs: z.number().int().min(1_000).max(300_000).optional()
 }).superRefine((data, context) => {
   if (Boolean(data.scriptVersionId) === Boolean(data.inlineScript)) {
     context.addIssue({ code: "custom", message: "Provide exactly one saved script version or inline script" });
@@ -197,22 +211,6 @@ async function unenrollmentUrls(token: string) {
   };
 }
 
-function automaticUnenrollmentScript(platform: "windows" | "unix", url: string): string {
-  if (platform === "windows") {
-    const escapedUrl = url.replaceAll("'", "''");
-    const delayedCleanup = `$ErrorActionPreference = "Stop"; Start-Sleep -Seconds 2; irm '${escapedUrl}' | iex`;
-    const encodedCommand = Buffer.from(delayedCleanup, "utf16le").toString("base64");
-    return `$ErrorActionPreference = "Stop"
-Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-EncodedCommand","${encodedCommand}" -WindowStyle Hidden
-Write-Output "Automatic unenrollment scheduled. The command agent and cloudflared services will stop shortly."
-`;
-  }
-  const delayedCleanup = `sleep 2; curl -fsSL '${url.replaceAll("'", `'\"'\"'`)}' | /bin/sh`;
-  return `nohup /bin/sh -c '${delayedCleanup.replaceAll("'", `'\"'\"'`)}' >/tmp/cloudflare-man-unenroll.log 2>&1 &
-printf '%s\n' 'Automatic unenrollment scheduled. The command agent and cloudflared services will stop shortly.'
-`;
-}
-
 async function loadStoreDeleteContext(executor: StoreDeleteExecutor, storeId: string): Promise<StoreDeleteContext | null> {
   const storeResult = await executor.query(
     `SELECT s.id, s.display_name AS "displayName", s.store_code AS "storeCode",
@@ -232,7 +230,7 @@ async function loadStoreDeleteContext(executor: StoreDeleteExecutor, storeId: st
                 AND e.unenrolled_at IS NULL
                 AND e.deleted_at IS NULL) AS "activeEnrollmentPlatforms",
             (SELECT count(*)::int FROM store_command_executions ce
-              WHERE ce.store_id = s.id AND ce.status = 'running') AS "runningCommandCount",
+              WHERE ce.store_id = s.id AND ce.status IN ('scheduled', 'running')) AS "runningCommandCount",
             ca.status AS "commandAgentStatus", ca.last_seen_at AS "commandAgentLastSeenAt"
        FROM stores s
        JOIN cloudflare_accounts a ON a.id = s.account_id
@@ -367,7 +365,7 @@ const publicationsJson = `COALESCE((
 // A revoked/expired link that was never claimed is a dead end - if an older
 // enrollment is still active (or otherwise live), prefer it so a store
 // doesn't display "revoked" while it's actually still enrolled.
-const latestEnrollmentJoin = `LEFT JOIN LATERAL (
+export const latestEnrollmentJoin = `LEFT JOIN LATERAL (
   SELECT e.status, e.expires_at, e.unenrolled_at,
          EXISTS (
            SELECT 1
@@ -390,7 +388,7 @@ const latestEnrollmentJoin = `LEFT JOIN LATERAL (
 // apps/web/src/components/StoreDrawer.tsx): a ready/installed enrollment that
 // hasn't been unenrolled is displayed as "active" everywhere, not the raw
 // workflow status, so the store list and the enrollment history never disagree.
-const onboardingStatusExpression = `CASE
+export const onboardingStatusExpression = `CASE
   WHEN latest_enrollment.status IS NULL THEN s.onboarding_status
   WHEN latest_enrollment.status = 'url_issued' AND latest_enrollment.expires_at <= now() THEN 'expired'
   WHEN latest_enrollment.status = 'url_issued' AND latest_enrollment.has_active_previous THEN 'waiting_for_new_enrollment'
@@ -433,6 +431,8 @@ const enrollmentsJson = `COALESCE((
     END,
     'unenrollReason', e.unenroll_reason,
     'unenrollRequestedAt', e.unenroll_requested_at,
+    'unenrollTokenExpiresAt', e.unenroll_token_expires_at,
+    'unenrollLastError', e.unenroll_last_error,
     'unenrolledAt', e.unenrolled_at,
     'logCount', (SELECT count(*)::int FROM enrollment_logs l WHERE l.enrollment_id = e.id),
     'scripts', COALESCE((
@@ -449,6 +449,18 @@ const enrollmentsJson = `COALESCE((
   ) ORDER BY e.created_at DESC)
   FROM enrollments e WHERE e.store_id = s.id
 ), '[]'::jsonb)`;
+
+// Shared with the drawer's own polling condition (StoreDrawer.tsx,
+// storeNeedsFastPolling) so the store list and an open drawer refresh on the
+// exact same signal instead of two conditions silently drifting apart.
+const hasPendingActivityExpression = `(
+  EXISTS (SELECT 1 FROM store_command_executions ce WHERE ce.store_id = s.id AND ce.status IN ('scheduled', 'running'))
+  OR EXISTS (
+    SELECT 1 FROM enrollments e
+     WHERE e.store_id = s.id AND e.deleted_at IS NULL
+       AND e.unenroll_token_hash IS NOT NULL AND e.unenrolled_at IS NULL AND e.unenroll_last_error IS NULL
+  )
+)`;
 
 const commandAgentJson = `(
   SELECT jsonb_build_object(
@@ -478,6 +490,7 @@ const commandExecutionsJson = `COALESCE((
     'savedScriptId', ce.saved_script_id,
     'savedScriptVersionId', ce.saved_script_version_id,
     'savedAt', ce.saved_at,
+    'bulkExecutionId', ce.bulk_execution_id,
     'scriptName', COALESCE(ce.script_name, ce.name, 'inline'),
     'scriptVersion', COALESCE(ce.script_version_number, ce.version),
     'platform', COALESCE(ce.script_platform, ce.platform),
@@ -485,6 +498,9 @@ const commandExecutionsJson = `COALESCE((
     'script', ce.script,
     'timeoutMs', ce.timeout_ms,
     'status', ce.status,
+    'taskId', ce.task_id,
+    'processId', ce.process_id,
+    'createdAt', ce.created_at,
     'startedAt', ce.started_at,
     'finishedAt', ce.finished_at,
     'elapsedMs', ce.elapsed_ms,
@@ -532,8 +548,20 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       values.push(`%${query.search}%`);
       conditions.push(`(s.store_code ILIKE $${values.length} OR s.tenant_code ILIKE $${values.length} OR s.display_name ILIKE $${values.length} OR s.hostname ILIKE $${values.length} OR EXISTS (SELECT 1 FROM store_publications p WHERE p.store_id = s.id AND p.hostname ILIKE $${values.length}))`);
     }
+    if (query.tenantCode) {
+      values.push(`%${query.tenantCode}%`);
+      conditions.push(`s.tenant_code ILIKE $${values.length}`);
+    }
     if (query.status) {
       values.push(query.status);
+      conditions.push(`${onboardingStatusExpression} = $${values.length}`);
+    }
+    if (query.tunnelStatus) {
+      values.push(query.tunnelStatus);
+      conditions.push(`s.tunnel_status = $${values.length}`);
+    }
+    if (query.enrollmentStatus) {
+      values.push(query.enrollmentStatus);
       conditions.push(`${onboardingStatusExpression} = $${values.length}`);
     }
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
@@ -553,7 +581,8 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
              s.last_connected_at AS "lastConnectedAt", s.last_verified_at AS "lastVerifiedAt", s.last_error AS "lastError",
              s.created_at AS "createdAt", a.id AS "accountId", a.cf_account_id AS "cfAccountId", a.name AS "accountName", z.id AS "zoneId", z.name AS "zoneName",
              ${publicationsJson} AS publications,
-             ${commandAgentJson} AS "commandAgent"
+             ${commandAgentJson} AS "commandAgent",
+             ${hasPendingActivityExpression} AS "hasPendingActivity"
         FROM stores s
         JOIN cloudflare_accounts a ON a.id = s.account_id
         JOIN zones z ON z.id = s.zone_id
@@ -587,7 +616,8 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
              ${publicationsJson} AS publications,
              ${enrollmentsJson} AS enrollments,
              ${commandAgentJson} AS "commandAgent",
-             ${commandExecutionsJson} AS "commandExecutions"
+             ${commandExecutionsJson} AS "commandExecutions",
+             ${hasPendingActivityExpression} AS "hasPendingActivity"
         FROM stores s
         JOIN cloudflare_accounts a ON a.id = s.account_id
         JOIN zones z ON z.id = s.zone_id
@@ -596,6 +626,75 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     `, [id]);
     if (!result.rowCount) return reply.code(404).send({ error: "Store not found" });
     return { store: result.rows[0] };
+  });
+
+  app.get("/api/stores/:id/enrollments", { preHandler: requireAuth }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const query = enrollmentListSchema.parse(request.query);
+    const offset = (query.page - 1) * query.pageSize;
+    const [storeResult, enrollmentResult, countResult] = await Promise.all([
+      pool.query("SELECT 1 FROM stores WHERE id = $1", [id]),
+      pool.query(
+        `SELECT e.id,
+                NULLIF(e.host_info->>'machineName', '') AS "computerName",
+                e.deleted_at IS NULL
+                  AND e.unenrolled_at IS NULL
+                  AND e.status IN ('ready', 'installed')
+                  AND e.id = (
+                    SELECT current_enrollment.id
+                      FROM enrollments current_enrollment
+                     WHERE current_enrollment.store_id = $1
+                       AND current_enrollment.deleted_at IS NULL
+                       AND current_enrollment.unenrolled_at IS NULL
+                       AND current_enrollment.status IN ('ready', 'installed')
+                     ORDER BY COALESCE(current_enrollment.installed_at, current_enrollment.claimed_at, current_enrollment.created_at) DESC
+                     LIMIT 1
+                  ) AS "isCurrent",
+                e.deleted_at AS "deletedAt", e.status,
+                CASE WHEN e.platform = 'windows' THEN 'windows' WHEN e.platform IS NOT NULL THEN 'unix' ELSE null END AS platform,
+                e.platform AS environment, e.created_at AS "createdAt", e.expires_at AS "expiresAt",
+                e.claimed_at AS "claimedAt", e.installed_at AS "installedAt", e.last_error AS "lastError",
+                e.host_info AS "hostInfo",
+                CASE
+                  WHEN e.unenrolled_at IS NOT NULL THEN 'unenrolled'
+                  WHEN e.unenroll_last_error IS NOT NULL THEN 'failed'
+                  WHEN e.unenroll_token_hash IS NOT NULL THEN 'pending'
+                  ELSE 'not_required'
+                END AS "unenrollStatus",
+                e.unenroll_reason AS "unenrollReason", e.unenroll_requested_at AS "unenrollRequestedAt",
+                e.unenroll_token_expires_at AS "unenrollTokenExpiresAt", e.unenroll_last_error AS "unenrollLastError",
+                e.unenrolled_at AS "unenrolledAt",
+                (SELECT count(*)::int FROM enrollment_logs l WHERE l.enrollment_id = e.id) AS "logCount",
+                COALESCE((
+                  SELECT jsonb_agg(jsonb_build_object(
+                    'kind', es.script_kind,
+                    'platform', es.platform,
+                    'status', es.status,
+                    'startedAt', es.started_at,
+                    'finishedAt', es.finished_at,
+                    'lastError', es.last_error
+                  ) ORDER BY es.script_kind, es.platform)
+                    FROM enrollment_scripts es WHERE es.enrollment_id = e.id
+                ), '[]'::jsonb) AS scripts
+           FROM enrollments e
+          WHERE e.store_id = $1
+          ORDER BY e.created_at DESC, e.id DESC
+          LIMIT $2 OFFSET $3`,
+        [id, query.pageSize, offset]
+      ),
+      pool.query("SELECT count(*)::int AS total FROM enrollments WHERE store_id = $1", [id])
+    ]);
+    if (!storeResult.rowCount) return reply.code(404).send({ error: "Store not found" });
+    const total = countResult.rows[0]?.total as number ?? 0;
+    return {
+      enrollments: enrollmentResult.rows,
+      pagination: {
+        page: query.page,
+        pageSize: query.pageSize,
+        total,
+        totalPages: Math.max(1, Math.ceil(total / query.pageSize))
+      }
+    };
   });
 
   app.get("/api/stores/:storeId/routes/:routeId/waf", { preHandler: requireAuth }, async (request, reply) => {
@@ -612,9 +711,14 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     );
     if (!result.rowCount) return reply.code(404).send({ error: "Ingress route not found" });
     const row = result.rows[0];
+    const storedIps = (row.waf_allowed_ips ?? []) as string[];
+    // Resolved best-effort so the "Cloudflare Man origin" quick-add option can
+    // still be offered without breaking the read for routes that already have
+    // their own allowed IPs configured.
+    const cloudflareManIps = await defaultWafAllowedIps(row.providerMode).catch(() => [] as string[]);
     try {
-      const allowedIps = await resolveWafAllowedIps(row.waf_allowed_ips ?? [], row.providerMode);
-      return { waf: { enabled: row.waf_enabled, allowedIps, rulesetId: row.waf_ruleset_id, ruleId: row.waf_rule_id, defaulted: !(row.waf_allowed_ips?.length) } };
+      const allowedIps = await resolveWafAllowedIps(storedIps.length ? storedIps : cloudflareManIps, row.providerMode);
+      return { waf: { enabled: row.waf_enabled, allowedIps, rulesetId: row.waf_ruleset_id, ruleId: row.waf_rule_id, defaulted: !storedIps.length, cloudflareManIps } };
     } catch (error) {
       return reply.code(502).send({ error: error instanceof Error ? error.message : "Unable to resolve WAF source IP" });
     }
@@ -694,6 +798,12 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       storeId: z.string().uuid(),
       enrollmentId: z.string().uuid()
     }).parse(request.params);
+    await pool.query(
+      `UPDATE enrollment_diagnostic_runs
+          SET status = 'failed', finished_at = now()
+        WHERE enrollment_id = $1 AND status IN ('pending', 'running') AND expires_at <= now()`,
+      [enrollmentId]
+    );
     const deleted = await withTransaction(async (client) => {
       const result = await client.query(
         `SELECT e.id, e.deleted_at,
@@ -787,11 +897,12 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       if (!enrollment.is_current) return { kind: "not_current" as const };
       await client.query(
         `UPDATE enrollments
-            SET unenroll_token_hash = $1, unenroll_token_expires_at = $2,
+            SET unenroll_token_hash = $1, unenroll_token_encrypted = $2, unenroll_token_expires_at = $3,
+                unenroll_tunnel_id = (SELECT tunnel_id FROM stores WHERE id = $5),
                 unenroll_requested_at = now(), unenrolled_at = null,
                 unenroll_reason = null, unenroll_last_error = null, updated_at = now()
-          WHERE id = $3`,
-        [hashToken(rawToken), expiresAt, enrollmentId]
+          WHERE id = $4`,
+        [hashToken(rawToken), encryptSecret(rawToken), expiresAt, enrollmentId, storeId]
       );
       await client.query(
         `INSERT INTO enrollment_scripts(enrollment_id, script_kind, platform, status)
@@ -832,7 +943,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
         automatic = { requested: true, status: "unavailable", executionId: null, platform, error: "The command agent is not ready" };
       } else {
         const script = automaticUnenrollmentScript(platform, platform === "windows" ? urls.powershell : urls.shell);
-        const executionId = await createCommandExecution({
+        const executionHandle = await createCommandExecution({
           storeId,
           enrollmentId,
           scriptVersionId: null,
@@ -846,20 +957,26 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
           scriptVersion: null
         });
         try {
-          const execution = await executeStoreScript(storeId, script, 30_000, executionId);
-          automatic = execution?.success
-            ? { requested: true, status: "scheduled", executionId, platform, error: null }
-            : { requested: true, status: "failed", executionId, platform, error: execution?.stderr || "The command agent did not schedule cleanup" };
+          const execution = await executeStoreScript(storeId, script, 30_000, executionHandle);
+          automatic = execution?.scheduled || execution?.result?.success
+            ? { requested: true, status: "scheduled", executionId: executionHandle.executionId, platform, error: null }
+            : { requested: true, status: "failed", executionId: executionHandle.executionId, platform, error: execution?.result?.stderr || "The command agent did not schedule cleanup" };
         } catch (error) {
-          automatic = { requested: true, status: "failed", executionId, platform, error: error instanceof Error ? error.message : "Automatic unenrollment failed" };
+          automatic = { requested: true, status: "failed", executionId: executionHandle.executionId, platform, error: error instanceof Error ? error.message : "Automatic unenrollment failed" };
         }
-        await writeAudit({
-          actorUserId: request.authUser!.id,
-          action: "enrollment.unenroll_automatic_requested",
-          entityType: "enrollment",
-          entityId: enrollmentId,
-          details: { storeId, executionId, platform, status: automatic.status, error: automatic.error }
-        });
+      }
+      await writeAudit({
+        actorUserId: request.authUser!.id,
+        action: "enrollment.unenroll_automatic_requested",
+        entityType: "enrollment",
+        entityId: enrollmentId,
+        details: { storeId, executionId: automatic.executionId, platform: automatic.platform, status: automatic.status, error: automatic.error }
+      });
+      if (automatic.status !== "scheduled") {
+        await pool.query(
+          "UPDATE enrollments SET unenroll_last_error = $1, updated_at = now() WHERE id = $2",
+          [automatic.error, enrollmentId]
+        );
       }
     }
     return {
@@ -937,7 +1054,8 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       enrollmentId: z.string().uuid()
     }).parse(request.params);
     const result = await pool.query(
-      `SELECT l.id, l.level, l.step, l.message, l.metadata, l.created_at AS "createdAt"
+      `SELECT l.id, l.level, l.step, l.message, l.metadata, l.phase,
+              l.diagnostic_run_id AS "diagnosticRunId", l.created_at AS "createdAt"
          FROM enrollment_logs l
          JOIN enrollments e ON e.id = l.enrollment_id
         WHERE e.store_id = $1 AND e.id = $2
@@ -946,13 +1064,93 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     );
     const enrollment = await pool.query("SELECT 1 FROM enrollments WHERE id = $1 AND store_id = $2", [enrollmentId, storeId]);
     if (!enrollment.rowCount) return reply.code(404).send({ error: "Enrollment not found" });
-    return { logs: result.rows };
+    const diagnosticRuns = await pool.query(
+      `SELECT id, platform, status, expires_at AS "expiresAt", created_at AS "createdAt",
+              started_at AS "startedAt", finished_at AS "finishedAt"
+         FROM enrollment_diagnostic_runs
+        WHERE enrollment_id = $1
+        ORDER BY created_at DESC, id DESC`,
+      [enrollmentId]
+    );
+    return {
+      logs: result.rows,
+      diagnosticRuns: diagnosticRuns.rows,
+      hasActiveDiagnostics: diagnosticRuns.rows.some((run) => ["pending", "running"].includes(run.status))
+    };
+  });
+
+  app.get("/api/stores/:storeId/enrollments/:enrollmentId/install-script", { preHandler: requireAuth }, async (request, reply) => {
+    const { storeId, enrollmentId } = z.object({
+      storeId: z.string().uuid(),
+      enrollmentId: z.string().uuid()
+    }).parse(request.params);
+    const result = await pool.query(
+      "SELECT token_encrypted FROM enrollments WHERE id = $1 AND store_id = $2",
+      [enrollmentId, storeId]
+    );
+    if (!result.rowCount) return reply.code(404).send({ error: "Enrollment not found" });
+    const row = result.rows[0] as { token_encrypted: string | null };
+    if (!row.token_encrypted) return { powershell: null, shell: null };
+    const token = decryptSecret(row.token_encrypted);
+    const publicBaseUrl = await getPublicBaseUrl();
+    return {
+      powershell: `${publicBaseUrl}/e/${token}/install.ps1`,
+      shell: `${publicBaseUrl}/e/${token}/install.sh`
+    };
+  });
+
+  app.get("/api/stores/:storeId/enrollments/:enrollmentId/unenroll-script", { preHandler: requireAuth }, async (request, reply) => {
+    const { storeId, enrollmentId } = z.object({
+      storeId: z.string().uuid(),
+      enrollmentId: z.string().uuid()
+    }).parse(request.params);
+    const result = await pool.query(
+      `SELECT unenroll_token_encrypted, unenrolled_at, unenroll_token_expires_at
+         FROM enrollments WHERE id = $1 AND store_id = $2`,
+      [enrollmentId, storeId]
+    );
+    if (!result.rowCount) return reply.code(404).send({ error: "Enrollment not found" });
+    const row = result.rows[0] as { unenroll_token_encrypted: string | null; unenrolled_at: string | null; unenroll_token_expires_at: string | null };
+    const stillValid = row.unenroll_token_encrypted
+      && !row.unenrolled_at
+      && row.unenroll_token_expires_at
+      && new Date(row.unenroll_token_expires_at) > new Date();
+    if (!stillValid) return { powershell: null, shell: null };
+    const token = decryptSecret(row.unenroll_token_encrypted!);
+    const publicBaseUrl = await getPublicBaseUrl();
+    return {
+      powershell: `${publicBaseUrl}/e/${token}/unenroll.ps1`,
+      shell: `${publicBaseUrl}/e/${token}/unenroll.sh`
+    };
   });
 
   app.get("/api/stores/:id/command-executions", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const query = commandExecutionListSchema.parse(request.query);
     const offset = (query.page - 1) * query.pageSize;
+    const values: unknown[] = [id];
+    const conditions = ["ce.store_id = $1"];
+    if (query.search) {
+      values.push(query.search);
+      conditions.push(`strpos(lower(concat_ws(' ', ce.script_name, ms.name, ms.description, saved_ms.name, saved_ms.description, st.display_name, st.tenant_code, st.store_code, u.username)), lower($${values.length})) > 0`);
+    }
+    if (query.from) {
+      values.push(query.from);
+      conditions.push(`ce.created_at >= $${values.length}::timestamptz`);
+    }
+    if (query.to) {
+      values.push(query.to);
+      conditions.push(`ce.created_at <= $${values.length}::timestamptz`);
+    }
+    const where = conditions.join(" AND ");
+    const joins = `
+           LEFT JOIN users u ON u.id = ce.requested_by
+           LEFT JOIN managed_script_versions sv ON sv.id = ce.script_version_id
+           LEFT JOIN managed_scripts ms ON ms.id = sv.script_id
+           LEFT JOIN managed_script_versions saved_sv ON saved_sv.id = ce.saved_script_version_id
+           LEFT JOIN managed_scripts saved_ms ON saved_ms.id = saved_sv.script_id`;
+    const limitParameter = values.length + 1;
+    const offsetParameter = values.length + 2;
     const [storeResult, executionResult, statsResult] = await Promise.all([
       pool.query("SELECT 1 FROM stores WHERE id = $1", [id]),
       pool.query(
@@ -964,32 +1162,36 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
                 ce.saved_script_id AS "savedScriptId",
                 ce.saved_script_version_id AS "savedScriptVersionId",
                 ce.saved_at AS "savedAt",
+                ce.bulk_execution_id AS "bulkExecutionId",
                 COALESCE(ce.script_name, ms.name, 'Inline script') AS "scriptName",
                 COALESCE(ce.script_version_number, sv.version) AS "scriptVersion",
                 COALESCE(ce.script_platform, ms.platform) AS platform,
                 COALESCE(ce.script_language, ms.language) AS language,
-                ce.script, ce.timeout_ms AS "timeoutMs", ce.status,
-                ce.started_at AS "startedAt", ce.finished_at AS "finishedAt",
+                ce.script, ce.timeout_ms AS "timeoutMs", ce.status, ce.task_id AS "taskId", ce.process_id AS "processId",
+                ce.created_at AS "createdAt", ce.started_at AS "startedAt", ce.finished_at AS "finishedAt",
                 ce.elapsed_ms AS "elapsedMs", ce.exit_code AS "exitCode",
                 ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy"
            FROM store_command_executions ce
-           LEFT JOIN users u ON u.id = ce.requested_by
-           LEFT JOIN managed_script_versions sv ON sv.id = ce.script_version_id
-           LEFT JOIN managed_scripts ms ON ms.id = sv.script_id
-          WHERE ce.store_id = $1
+           JOIN stores st ON st.id = ce.store_id
+           ${joins}
+          WHERE ${where}
           ORDER BY ce.created_at DESC, ce.id DESC
-          LIMIT $2 OFFSET $3`,
-        [id, query.pageSize, offset]
+          LIMIT $${limitParameter} OFFSET $${offsetParameter}`,
+        [...values, query.pageSize, offset]
       ),
       pool.query(
         `SELECT count(*)::int AS total,
-                (count(*) FILTER (WHERE status = 'succeeded'))::int AS succeeded,
-                (count(*) FILTER (WHERE status = 'failed'))::int AS failed,
-                (count(*) FILTER (WHERE status = 'timed_out'))::int AS "timedOut",
-                (count(*) FILTER (WHERE status = 'running'))::int AS running
-           FROM store_command_executions
-          WHERE store_id = $1`,
-        [id]
+                (count(*) FILTER (WHERE ce.status = 'succeeded'))::int AS succeeded,
+                (count(*) FILTER (WHERE ce.status = 'failed'))::int AS failed,
+                (count(*) FILTER (WHERE ce.status = 'timed_out'))::int AS "timedOut",
+                (count(*) FILTER (WHERE ce.status = 'cancelled'))::int AS cancelled,
+                (count(*) FILTER (WHERE ce.status = 'scheduled'))::int AS scheduled,
+                (count(*) FILTER (WHERE ce.status = 'running'))::int AS running
+           FROM store_command_executions ce
+           JOIN stores st ON st.id = ce.store_id
+           ${joins}
+          WHERE ${where}`,
+        values
       )
     ]);
     if (!storeResult.rowCount) return reply.code(404).send({ error: "Store not found" });
@@ -1005,6 +1207,44 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
         totalPages: Math.max(1, Math.ceil(total / query.pageSize))
       }
     };
+  });
+
+  app.get("/api/stores/:storeId/command-executions/:executionId/logs", { preHandler: requireAuth }, async (request, reply) => {
+    const { storeId, executionId } = z.object({ storeId: z.string().uuid(), executionId: z.string().uuid() }).parse(request.params);
+    const query = commandExecutionLogListSchema.parse(request.query);
+    const execution = await pool.query(
+      `SELECT id, status, task_id AS "taskId", process_id AS "processId", stdout, stderr, error FROM store_command_executions
+        WHERE id = $1 AND store_id = $2`,
+      [executionId, storeId]
+    );
+    if (!execution.rowCount) return reply.code(404).send({ error: "Command execution not found" });
+    const logs = await pool.query(
+      `SELECT id, stream, line, sequence, created_at AS "createdAt"
+         FROM store_command_execution_logs
+        WHERE execution_id = $1 AND id > $2
+        ORDER BY id ASC LIMIT $3`,
+      [executionId, query.after, query.limit]
+    );
+    return { execution: execution.rows[0], logs: logs.rows, nextAfter: logs.rows.at(-1)?.id ?? query.after };
+  });
+
+  app.post("/api/stores/:storeId/command-executions/:executionId/cancel", { preHandler: requireAuth }, async (request, reply) => {
+    const { storeId, executionId } = z.object({ storeId: z.string().uuid(), executionId: z.string().uuid() }).parse(request.params);
+    try {
+      const result = await cancelCommandExecution(storeId, executionId);
+      await writeAudit({
+        actorUserId: request.authUser!.id,
+        action: "store.command_execution_cancelled",
+        entityType: "store_command_execution",
+        entityId: executionId,
+        details: { storeId, taskId: result.taskId }
+      });
+      return reply.code(202).send(result);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Unable to cancel command execution";
+      const status = message === "Command execution not found" ? 404 : 409;
+      return reply.code(status).send({ error: message });
+    }
   });
 
   app.post("/api/stores/:id/commands/execute", { preHandler: requireAuth }, async (request, reply) => {
@@ -1032,10 +1272,12 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     let scriptPlatform: "windows" | "unix";
     let scriptLanguage: "powershell" | "bash" | "sh";
     let scriptId: string | null;
+    let resolvedTimeoutMs = body.timeoutMs ?? 60_000;
     if (body.scriptVersionId) {
       const scriptVersionResult = await pool.query(
-        `SELECT v.id, v.content, v.version, s.id AS script_id, s.name, s.platform, s.language
-           FROM managed_script_versions v
+        `SELECT v.id, v.content, v.version, s.id AS script_id, s.name, s.platform, s.language,
+                s.default_timeout_ms AS "defaultTimeoutMs"
+          FROM managed_script_versions v
            JOIN managed_scripts s ON s.id = v.script_id
           WHERE v.id = $1`,
         [body.scriptVersionId]
@@ -1053,6 +1295,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       scriptVersion = managedScript.version;
       scriptPlatform = managedScript.platform;
       scriptLanguage = managedScript.language;
+      resolvedTimeoutMs = body.timeoutMs ?? managedScript.defaultTimeoutMs;
     } else {
       const inlineLanguage = body.language ?? (enrollmentPlatform === "windows" ? "powershell" : "bash");
       if (enrollmentPlatform === "windows" && inlineLanguage !== "powershell") {
@@ -1072,13 +1315,13 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     }
     const agent = await getCommandAgentConfig(id);
     if (!agent) return reply.code(409).send({ error: "No command agent route is configured for this store" });
-    const executionId = await createCommandExecution({
+    const executionHandle = await createCommandExecution({
       storeId: id,
       enrollmentId: enrollment.id,
       scriptVersionId,
       requestedBy: request.authUser!.id,
       script: executionScript,
-      timeoutMs: body.timeoutMs,
+      timeoutMs: resolvedTimeoutMs,
       scriptType,
       scriptName,
       scriptPlatform,
@@ -1086,16 +1329,17 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       scriptVersion
     });
     try {
-      const result = await executeStoreScript(id, executionScript, body.timeoutMs, executionId);
+      const result = await executeStoreScript(id, executionScript, resolvedTimeoutMs, executionHandle);
       if (!result) return reply.code(409).send({ error: "No command agent route is configured for this store" });
       await writeAudit({
         actorUserId: request.authUser!.id,
         action: "store.command_executed",
         entityType: "store",
         entityId: id,
-        details: { endpoint: agent.endpoint, executionId, enrollmentId: enrollment.id, scriptType, scriptId, scriptVersionId, timeoutMs: body.timeoutMs, success: result.success, exitCode: result.exitCode }
+        details: { endpoint: agent.endpoint, executionId: executionHandle.executionId, taskId: result.taskId, enrollmentId: enrollment.id, scriptType, scriptId, scriptVersionId, timeoutMs: resolvedTimeoutMs, status: result.status, success: result.result?.success ?? null, exitCode: result.result?.exitCode ?? null }
       });
-      return { executionId, endpoint: agent.endpoint, enrollmentId: enrollment.id, scriptType, scriptId, scriptVersionId, scriptName, version: scriptVersion, platform: scriptPlatform, language: scriptLanguage, ...result };
+      const response = { executionId: executionHandle.executionId, taskId: result.taskId, status: result.status, scheduled: result.scheduled, endpoint: agent.endpoint, enrollmentId: enrollment.id, scriptType, scriptId, scriptVersionId, scriptName, version: scriptVersion, platform: scriptPlatform, language: scriptLanguage, ...(result.result ?? {}) };
+      return result.scheduled ? reply.code(202).send(response) : response;
     } catch (error) {
       const message = error instanceof Error ? error.message : "Command agent execution failed";
       await writeAudit({
@@ -1103,9 +1347,9 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
         action: "store.command_executed",
         entityType: "store",
         entityId: id,
-        details: { endpoint: agent.endpoint, executionId, enrollmentId: enrollment.id, scriptType, scriptId, scriptVersionId, timeoutMs: body.timeoutMs, success: false, error: message }
+        details: { endpoint: agent.endpoint, executionId: executionHandle.executionId, enrollmentId: enrollment.id, scriptType, scriptId, scriptVersionId, timeoutMs: resolvedTimeoutMs, success: false, error: message }
       });
-      return reply.code(502).send({ error: message, executionId });
+      return reply.code(502).send({ error: message, executionId: executionHandle.executionId });
     }
   });
 
@@ -1241,6 +1485,78 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(201).send({ store: created.rows[0] });
   });
 
+  app.patch("/api/stores/:id/zone", { preHandler: requireAuth }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = z.object({ zoneId: z.string().uuid() }).parse(request.body);
+    try {
+      const result = await withTransaction(async (client) => {
+        const storeResult = await client.query(
+          `SELECT s.id, s.tenant_code, s.store_code, s.zone_id, s.tunnel_id,
+                  NOT EXISTS (
+                    SELECT 1 FROM enrollments e
+                     WHERE e.store_id = s.id AND e.status IN ('ready', 'installed')
+                       AND e.unenrolled_at IS NULL AND e.deleted_at IS NULL
+                  ) AS "noActiveEnrollment"
+             FROM stores s WHERE s.id = $1 FOR UPDATE`,
+          [id]
+        );
+        const store = storeResult.rows[0];
+        if (!store) return { kind: "missing" as const };
+        if (store.tunnel_id || !store.noActiveEnrollment) return { kind: "blocked" as const };
+        if (store.zone_id === body.zoneId) return { kind: "same_zone" as const };
+
+        const allocation = await selectZone(client, body.zoneId);
+        const publications = await client.query(
+          "SELECT id, suffix FROM store_publications WHERE store_id = $1 ORDER BY created_at",
+          [id]
+        );
+        const baseLabel = slugifyLabel(`${store.tenant_code}-${store.store_code}`);
+        const prepared = publications.rows.map((publication) => ({
+          id: publication.id as string,
+          hostname: `${publication.suffix ? `${baseLabel}-${publication.suffix}` : baseLabel}.${allocation.zoneName}`
+        }));
+        const primary = prepared[0];
+        if (!primary) throw new Error("Store has no published endpoints");
+
+        await client.query(
+          "UPDATE stores SET account_id = $1, zone_id = $2, hostname = $3, updated_at = now() WHERE id = $4",
+          [allocation.accountId, allocation.zoneId, primary.hostname, id]
+        );
+        for (const publication of prepared) {
+          await client.query(
+            "UPDATE store_publications SET hostname = $1, updated_at = now() WHERE id = $2",
+            [publication.hostname, publication.id]
+          );
+        }
+        // Defensive: a fully deprovisioned store should already have these
+        // cleared, but a zone-scoped WAF ruleset reference from the old zone
+        // would 404 if reused, so make sure none linger.
+        await client.query(
+          `UPDATE store_routes r SET waf_ruleset_id = null, waf_rule_id = null, updated_at = now()
+             FROM store_publications p WHERE r.publication_id = p.id AND p.store_id = $1`,
+          [id]
+        );
+        await writeAudit({
+          actorUserId: request.authUser!.id,
+          action: "store.zone_reassigned",
+          entityType: "store",
+          entityId: id,
+          details: { fromZoneId: store.zone_id, toZoneId: allocation.zoneId, hostnames: prepared.map((publication) => publication.hostname) }
+        }, client);
+        return { kind: "ok" as const };
+      });
+      if (result.kind === "missing") return reply.code(404).send({ error: "Store not found" });
+      if (result.kind === "blocked") return reply.code(409).send({ error: "The store must have no active enrollment and be fully unenrolled before its account/zone can be changed" });
+      if (result.kind === "same_zone") return reply.code(409).send({ error: "Store is already assigned to this zone" });
+      return { success: true };
+    } catch (error) {
+      if ((error as { code?: string }).code === "23505") {
+        return reply.code(409).send({ error: "A store with this hostname already exists in the target zone" });
+      }
+      return reply.code(400).send({ error: error instanceof Error ? error.message : "Unable to change account/zone" });
+    }
+  });
+
   app.put("/api/stores/:id/connectivity", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = connectivitySchema.parse(request.body);
@@ -1353,13 +1669,13 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       // so we only need to flag the transitional state here, not pre-issue
       // cleanup scripts for the operator to run manually.
       const active = await client.query(
-        `SELECT 1
+        `SELECT id, platform, created_at
            FROM enrollments
           WHERE store_id = $1
             AND status IN ('claimed', 'provisioning', 'ready', 'installed')
             AND unenrolled_at IS NULL
             AND deleted_at IS NULL
-          LIMIT 1`,
+          ORDER BY COALESCE(installed_at, claimed_at, created_at) DESC`,
         [id]
       );
       const hasActivePrevious = (active.rowCount ?? 0) > 0;
@@ -1368,15 +1684,35 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
         [id]
       );
       const result = await client.query(
-        `INSERT INTO enrollments(store_id, token_hash, expires_at, created_by)
-         VALUES ($1, $2, $3, $4) RETURNING id`,
-        [id, hashToken(rawToken), expiresAt, request.authUser!.id]
+        `INSERT INTO enrollments(store_id, token_hash, token_encrypted, expires_at, created_by)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        [id, hashToken(rawToken), encryptSecret(rawToken), expiresAt, request.authUser!.id]
       );
       await client.query(
         `INSERT INTO enrollment_scripts(enrollment_id, script_kind, platform, status)
          VALUES ($1, 'install', 'windows', 'available'), ($1, 'install', 'unix', 'available')`,
         [result.rows[0].id]
       );
+      const unenrollCommands: Array<{ enrollmentId: string; createdAt: string; token: string }> = [];
+      for (const previous of active.rows) {
+        const unenrollToken = createOpaqueToken();
+        await client.query(
+          `UPDATE enrollments
+              SET unenroll_token_hash = $1, unenroll_token_encrypted = $2,
+                  unenroll_token_expires_at = $3, unenroll_tunnel_id = (SELECT tunnel_id FROM stores WHERE id = $4),
+                  unenroll_requested_at = now(), unenroll_last_error = null, updated_at = now()
+            WHERE id = $5`,
+          [hashToken(unenrollToken), encryptSecret(unenrollToken), expiresAt, id, previous.id]
+        );
+        await client.query(
+          `INSERT INTO enrollment_scripts(enrollment_id, script_kind, platform, status)
+           VALUES ($1, 'unenroll', 'windows', 'available'), ($1, 'unenroll', 'unix', 'available')
+           ON CONFLICT (enrollment_id, script_kind, platform) DO UPDATE SET
+             status = 'available', started_at = null, finished_at = null, last_error = null, updated_at = now()`,
+          [previous.id]
+        );
+        unenrollCommands.push({ enrollmentId: previous.id, createdAt: previous.created_at, token: unenrollToken });
+      }
       await client.query(
         "UPDATE stores SET onboarding_status = $1, last_error = null, updated_at = now() WHERE id = $2",
         [hasActivePrevious ? "waiting_for_new_enrollment" : "url_issued", id]
@@ -1388,12 +1724,19 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
         entityId: id,
         details: { enrollmentId: result.rows[0].id, expiresAt, hasActivePrevious }
       }, client);
-      return { id: result.rows[0].id as string };
+      return { id: result.rows[0].id as string, unenrollCommands };
     });
+    const unenrollCommands = await Promise.all(issued.unenrollCommands.map(async (command) => ({
+      enrollmentId: command.enrollmentId,
+      createdAt: command.createdAt,
+      expiresAt,
+      urls: await unenrollmentUrls(command.token)
+    })));
     return reply.code(201).send({
       id: issued.id,
       expiresAt,
-      urls: await enrollmentUrls(rawToken)
+      urls: await enrollmentUrls(rawToken),
+      unenrollCommands
     });
   });
 
@@ -1427,6 +1770,10 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/stores/:id/verify", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = z.object({ publicationId: z.string().uuid().optional(), routeId: z.string().uuid().optional() }).parse(request.body ?? {});
+    const storeAccount = await pool.query("SELECT account_id FROM stores WHERE id = $1", [id]);
+    if (storeAccount.rows[0]?.account_id) {
+      await synchronizeAccount(storeAccount.rows[0].account_id as string).catch(() => undefined);
+    }
     const result = await verifyStoreEndpoints(id, {
       actorUserId: request.authUser!.id,
       ...(body.publicationId ? { publicationId: body.publicationId } : {}),
@@ -1494,12 +1841,17 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     if (!enrollment.rowCount) return reply.code(404).send({ error: "No enrollment found for this store" });
     const rawToken = createOpaqueToken();
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
-    await pool.query(
-      "UPDATE enrollments SET diagnose_token_hash = $1, diagnose_token_expires_at = $2, updated_at = now() WHERE id = $3",
-      [hashToken(rawToken), expiresAt, enrollment.rows[0].id]
+    const diagnosticRun = await pool.query(
+      `INSERT INTO enrollment_diagnostic_runs(enrollment_id, token_hash, platform, expires_at)
+       VALUES ($1, $2, $3, $4)
+       RETURNING id, status`,
+      [enrollment.rows[0].id, hashToken(rawToken), enrollment.rows[0].platform, expiresAt]
     );
     const baseUrl = await getPublicBaseUrl();
     return {
+      enrollmentId: enrollment.rows[0].id,
+      diagnosticRunId: diagnosticRun.rows[0].id,
+      status: diagnosticRun.rows[0].status,
       platform: enrollment.rows[0].platform,
       expiresAt: expiresAt.toISOString(),
       urls: {

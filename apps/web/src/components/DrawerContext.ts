@@ -4,7 +4,7 @@ export type StoreDrawerTab = "overall" | "ingress" | "connect";
 
 export type DrawerApi = {
   openStoreDrawer: (storeId: string, tab?: StoreDrawerTab) => void;
-  openScriptDrawer: (scriptId: string, version?: number | null) => void;
+  openScriptDrawer: (scriptId: string, version?: number | null, options?: { bulkRunId?: string | undefined }) => void;
 };
 
 export const DrawerContext = createContext<DrawerApi | null>(null);

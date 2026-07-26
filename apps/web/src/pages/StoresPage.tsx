@@ -6,7 +6,7 @@ import { toast } from "sonner";
 import { api } from "../api";
 import { useDrawers, type StoreDrawerTab } from "../components/DrawerContext";
 import { PageHeader } from "../components/PageHeader";
-import { isPendingOnboardingStatus, StatusBadge, tunnelOnlineStatus } from "../components/StatusBadge";
+import { StatusBadge, storeNeedsFastPolling, tunnelOnlineStatus } from "../components/StatusBadge";
 import type { Store } from "../types";
 
 export type { StoreDrawerTab };
@@ -26,32 +26,36 @@ export function StoresPage() {
   const queryClient = useQueryClient();
   const { openStoreDrawer } = useDrawers();
   const [search, setSearch] = useState("");
-  const [status, setStatus] = useState("");
+  const [tenantCode, setTenantCode] = useState("");
+  const [tunnelStatus, setTunnelStatus] = useState("");
+  const [enrollmentStatus, setEnrollmentStatus] = useState("");
   const [page, setPage] = useState(1);
   const [refreshingIds, setRefreshingIds] = useState<Set<string>>(new Set());
   const pageSize = 25;
   const params = new URLSearchParams({ page: String(page), pageSize: String(pageSize) });
   if (search) params.set("search", search);
-  if (status) params.set("status", status);
+  if (tenantCode) params.set("tenantCode", tenantCode);
+  if (tunnelStatus) params.set("tunnelStatus", tunnelStatus);
+  if (enrollmentStatus) params.set("enrollmentStatus", enrollmentStatus);
   const { data, isLoading } = useQuery({
-    queryKey: ["stores", search, status, page, pageSize],
+    queryKey: ["stores", search, tenantCode, tunnelStatus, enrollmentStatus, page, pageSize],
     queryFn: () => api.get<StoreListResponse>(`/api/stores?${params.toString()}`),
-    refetchInterval: (query) => query.state.data?.stores.some((store) => isPendingOnboardingStatus(store.onboardingStatus)) ? 3000 : false
+    refetchInterval: (query) => query.state.data?.stores.some((store) => storeNeedsFastPolling(store)) ? 2000 : false
   });
-  const refreshStore = async (storeId: string) => {
+  const refreshStores = async (storeIds: string[]) => {
     try {
-      await api.post<StoreRefreshResponse>("/api/stores/refresh", { storeIds: [storeId] });
+      await api.post<StoreRefreshResponse>("/api/stores/refresh", { storeIds });
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Unable to refresh store status");
     } finally {
       setRefreshingIds((current) => {
         const next = new Set(current);
-        next.delete(storeId);
+        for (const id of storeIds) next.delete(id);
         return next;
       });
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["stores"] }),
-        queryClient.invalidateQueries({ queryKey: ["store-detail", storeId] }),
+        ...storeIds.map((storeId) => queryClient.invalidateQueries({ queryKey: ["store-detail", storeId] })),
         queryClient.invalidateQueries({ queryKey: ["dashboard"] })
       ]);
     }
@@ -60,9 +64,9 @@ export function StoresPage() {
     const ids = data?.stores.map((store) => store.id) ?? [];
     if (!ids.length) return;
     setRefreshingIds(new Set(ids));
-    ids.forEach((id) => void refreshStore(id));
+    void refreshStores(ids);
   };
-  useEffect(() => setPage(1), [search, status]);
+  useEffect(() => setPage(1), [search, tenantCode, tunnelStatus, enrollmentStatus]);
   const pagination = data?.pagination;
   const firstResult = pagination && pagination.total > 0 ? (pagination.page - 1) * pagination.pageSize + 1 : 0;
   const lastResult = pagination ? Math.min(pagination.page * pagination.pageSize, pagination.total) : 0;
@@ -71,7 +75,9 @@ export function StoresPage() {
       <PageHeader title="Stores" eyebrow="Tunnel inventory" actions={<><button className="button button-secondary" onClick={refreshAll} disabled={refreshingIds.size > 0 || !data?.stores.length}><RefreshCw size={15} className={refreshingIds.size > 0 ? "spin-icon" : undefined} />{refreshingIds.size > 0 ? "Refreshing..." : "Refresh"}</button><Link className="button button-primary" to="/onboarding"><Plus size={16} />Onboard store</Link></>} />
       <div className="toolbar">
         <label className="search-box"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search stores or hostnames" /></label>
-        <select value={status} onChange={(event) => setStatus(event.target.value)} aria-label="Filter onboarding status"><option value="">All statuses</option><option value="active">Active</option><option value="verified">Verified</option><option value="waiting_for_new_enrollment">Waiting for new enrollment</option><option value="url_issued">URL issued</option><option value="claimed">Claimed</option><option value="provisioning">Provisioning</option><option value="connector_online">Connector online</option><option value="unenrolled">Unenrolled</option><option value="expired">Expired</option><option value="failed">Failed</option><option value="revoked">Revoked</option></select>
+        <input className="toolbar-filter-input" value={tenantCode} onChange={(event) => setTenantCode(event.target.value)} placeholder="Tenant code" aria-label="Filter by tenant code" />
+        <select value={tunnelStatus} onChange={(event) => setTunnelStatus(event.target.value)} aria-label="Filter tunnel status"><option value="">All tunnel statuses</option><option value="not_created">Not created</option><option value="inactive">Inactive</option><option value="healthy">Healthy</option><option value="degraded">Degraded</option><option value="down">Down</option><option value="unknown">Unknown</option></select>
+        <select value={enrollmentStatus} onChange={(event) => setEnrollmentStatus(event.target.value)} aria-label="Filter enrollment status"><option value="">All enrollment statuses</option><option value="active">Active</option><option value="verified">Verified</option><option value="waiting_for_new_enrollment">Waiting for new enrollment</option><option value="url_issued">URL issued</option><option value="claimed">Claimed</option><option value="provisioning">Provisioning</option><option value="connector_online">Connector online</option><option value="unenrolled">Unenrolled</option><option value="expired">Expired</option><option value="failed">Failed</option><option value="revoked">Revoked</option></select>
         <span className="result-count">{pagination?.total ?? 0} stores</span>
       </div>
       <section className="panel table-panel store-table-panel">

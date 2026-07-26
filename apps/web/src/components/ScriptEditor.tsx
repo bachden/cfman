@@ -9,6 +9,8 @@ import "monaco-editor/languages/definitions/shell/register";
 };
 loader.config({ monaco });
 
+const codeFontFamily = '"SFMono-Regular", Consolas, "Liberation Mono", monospace';
+
 type ScriptEditorProps = {
   value: string;
   language: "powershell" | "bash" | "sh";
@@ -28,7 +30,11 @@ export function ScriptEditor({ value, language, onChange, readOnly = false, heig
     options={{
       readOnly,
       minimap: { enabled: false },
+      fontFamily: codeFontFamily,
       fontSize: 13,
+      fontWeight: "400",
+      lineHeight: 20,
+      fontLigatures: false,
       lineNumbers: "on",
       scrollBeyondLastLine: false,
       wordWrap: "on",
