@@ -6,7 +6,9 @@ import { api } from "../api";
 import type { ArgumentValueSource, StoreCommandExecution } from "../types";
 import { CopyButton } from "./CopyButton";
 
-const SCOPE_LABELS: Record<ArgumentValueSource extends { scope: infer S } ? S : never, string> = {
+type ArgumentValueScope = Extract<ArgumentValueSource, { origin: "variable" }>["scope"];
+
+const SCOPE_LABELS: Record<ArgumentValueScope, string> = {
   global: "Global",
   account: "Account",
   zone: "Zone",
