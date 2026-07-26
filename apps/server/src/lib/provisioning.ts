@@ -119,6 +119,25 @@ function cloudflareClient(store: StoreConnectivity): CloudflareClient {
   );
 }
 
+export async function isStoreTunnelActive(storeId: string, expectedTunnelId: string): Promise<boolean> {
+  const result = await pool.query(
+    `SELECT s.id, s.tenant_code, s.store_code, s.tunnel_id,
+            a.id AS account_row_id, a.provider_mode, a.cf_account_id, a.api_token_encrypted,
+            z.cf_zone_id
+       FROM stores s
+       JOIN cloudflare_accounts a ON a.id = s.account_id
+       JOIN zones z ON z.id = s.zone_id
+      WHERE s.id = $1`,
+    [storeId]
+  );
+  const store = result.rows[0] as StoreConnectivity | undefined;
+  if (!store || store.tunnel_id !== expectedTunnelId) return false;
+  if (store.provider_mode === "mock") return true;
+  if (!store.api_token_encrypted) return false;
+  const tunnel = (await cloudflareClient(store).listTunnels()).find((candidate) => candidate.id === expectedTunnelId);
+  return tunnel?.status === "healthy" || tunnel?.status === "degraded";
+}
+
 async function applyConnectivity(
   storeId: string,
   store: StoreConnectivity,
@@ -160,10 +179,15 @@ async function applyConnectivity(
     }
   }
   for (const publication of publications) {
-    if (!publication.dnsRecordId) {
-      const record = await client.createDnsRecord(store.cf_zone_id ?? "mock-zone", publication.hostname, tunnelId);
-      publication.dnsRecordId = record.id;
-    }
+    // Always upsert instead of trusting a cached dns_record_id: Cloudflare is
+    // the source of truth, and a record can disappear out-of-band (deleted
+    // directly on the dashboard, a failed prior cleanup, etc.) without this
+    // column ever being cleared. createDnsRecord looks the record up by name
+    // and recreates it if missing, self-healing that drift on every
+    // provision/reconfigure instead of silently marking the publication
+    // "active" against a record that no longer exists.
+    const record = await client.createDnsRecord(store.cf_zone_id ?? "mock-zone", publication.hostname, tunnelId);
+    publication.dnsRecordId = record.id;
     await pool.query(
       `UPDATE store_publications
           SET dns_record_id = $1, status = 'active', last_error = null, updated_at = now()

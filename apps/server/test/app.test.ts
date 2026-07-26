@@ -9,6 +9,7 @@ let accountId = "";
 let storeId = "";
 let enrollmentToken = "";
 let enrollmentId = "";
+let commandAgentToken = "";
 let scriptVersionId = "";
 let mcpToken = "";
 
@@ -109,7 +110,10 @@ test("enables MCP and exposes structured tools with reusable identifiers", async
   assert.ok(listed.json().result.tools.some((tool: { name: string }) => tool.name === "cfman_get_script_execution_history"));
   assert.ok(listed.json().result.tools.some((tool: { name: string }) => tool.name === "cfman_delete_script"));
   assert.ok(listed.json().result.tools.some((tool: { name: string }) => tool.name === "cfman_get_store_execution_history"));
-  assert.ok(listed.json().result.tools.some((tool: { name: string }) => tool.name === "cfman_update_account_support_email"));
+  assert.ok(listed.json().result.tools.some((tool: { name: string }) => tool.name === "cfman_get_store_enrollment_history"));
+  assert.ok(listed.json().result.tools.some((tool: { name: string }) => tool.name === "cfman_issue_store_diagnostic"));
+  assert.ok(listed.json().result.tools.some((tool: { name: string }) => tool.name === "cfman_get_execution_logs"));
+  assert.ok(listed.json().result.tools.some((tool: { name: string }) => tool.name === "cfman_cancel_execution"));
   assert.ok(listed.json().result.tools.some((tool: { name: string }) => tool.name === "cfman_issue_unenrollment"));
 
   const created = await mcpRequest({
@@ -175,39 +179,12 @@ test("creates a mock account with its first zone", async () => {
       name: "Test Account A",
       providerMode: "mock",
       initialZoneName: "stores-a.example",
-      supportEmail: "initial-support@example.com",
       softTunnelLimit: 750
     }
   });
   assert.equal(response.statusCode, 201, response.body);
   accountId = response.json().id;
   assert.match(accountId, /^[0-9a-f-]{36}$/);
-  const rotatedMcp = await app.inject({ method: "POST", url: "/api/settings/mcp/rotate", headers: { cookie: sessionCookie } });
-  assert.equal(rotatedMcp.statusCode, 200, rotatedMcp.body);
-  const updated = await app.inject({
-    method: "POST",
-    url: "/mcp",
-    headers: {
-      authorization: `Bearer ${rotatedMcp.json().token}`,
-      accept: "application/json, text/event-stream",
-      "mcp-protocol-version": "2025-11-25"
-    },
-    payload: {
-      jsonrpc: "2.0",
-      id: 9,
-      method: "tools/call",
-      params: {
-        name: "cfman_update_account_support_email",
-        arguments: { accountId, supportEmail: "store-support@example.com" }
-      }
-    }
-  });
-  assert.equal(updated.statusCode, 200, updated.body);
-  assert.equal(updated.json().result.structuredContent.data.account.id, accountId);
-  assert.equal(updated.json().result.structuredContent.data.account.supportEmail, "store-support@example.com");
-  const accountList = await app.inject({ method: "GET", url: "/api/accounts", headers: { cookie: sessionCookie } });
-  assert.equal(accountList.statusCode, 200, accountList.body);
-  assert.equal(accountList.json().accounts.find((account: { id: string }) => account.id === accountId).supportEmail, "store-support@example.com");
 });
 
 test("deletes an empty account and its zones", async () => {
@@ -366,6 +343,7 @@ test("creates and versions a platform-specific managed script", async () => {
       platform: "windows",
       language: "powershell",
       description: "Checks the active store host",
+      defaultTimeoutMs: 90000,
       content: "Write-Output 'ready v1'"
     }
   });
@@ -388,12 +366,14 @@ test("creates and versions a platform-specific managed script", async () => {
   assert.equal(list.json().scripts[0].versionCount, 2);
   assert.deepEqual(list.json().pagination, { page: 1, pageSize: 100, total: 1, totalPages: 1 });
   assert.equal(list.json().scripts[0].latestVersionId, scriptVersionId);
+  assert.equal(list.json().scripts[0].defaultTimeoutMs, 90000);
   const noMatch = await app.inject({ method: "GET", url: "/api/scripts?platform=windows&name=missing", headers: { cookie: sessionCookie } });
   assert.equal(noMatch.statusCode, 200, noMatch.body);
   assert.equal(noMatch.json().scripts.length, 0);
   const detail = await app.inject({ method: "GET", url: `/api/scripts/${created.json().id}`, headers: { cookie: sessionCookie } });
   assert.equal(detail.statusCode, 200, detail.body);
   assert.deepEqual(detail.json().script.versions.map((item: { version: number }) => item.version), [2, 1]);
+  assert.equal(detail.json().script.defaultTimeoutMs, 90000);
 });
 
 test("allocates a store and issues bootstrap URLs", async () => {
@@ -454,6 +434,7 @@ test("allocates a store and issues bootstrap URLs", async () => {
   assert.match(scriptResponse.body, /overrideExisting/);
   assert.match(scriptResponse.body, /command-agent\.py/);
   assert.match(scriptResponse.body, /ThreadingHTTPServer/);
+  assert.match(scriptResponse.body, /log_queue/);
   assert.match(scriptResponse.body, /cloudflare-man-command-agent\.service/);
   assert.match(scriptResponse.body, /Restart=always/);
   assert.match(scriptResponse.body, /systemctl enable --now cloudflared\.service/);
@@ -477,6 +458,7 @@ test("allocates a store and issues bootstrap URLs", async () => {
   assert.match(windowsScript.body, /Read-Host "Cleanup and override/);
   assert.match(windowsScript.body, /overrideExisting/);
   assert.match(windowsScript.body, /CloudflareManCommandAgent/);
+  assert.match(windowsScript.body, /ReadLineAsync/);
   assert.match(windowsScript.body, /New-ScheduledTaskAction/);
   assert.match(windowsScript.body, /X-Cloudflare-Man-Agent-Token/);
   assert.match(windowsScript.body, /sc\.exe failure cloudflared/);
@@ -496,6 +478,13 @@ test("paginates and refreshes the visible store list", async () => {
   assert.equal(list.statusCode, 200, list.body);
   assert.equal(list.json().stores.length, 1);
   assert.deepEqual(list.json().pagination, { page: 1, pageSize: 10, total: 1, totalPages: 1 });
+  const filtered = await app.inject({
+    method: "GET",
+    url: "/api/stores?tenantCode=hl&tunnelStatus=not_created&enrollmentStatus=url_issued&page=1&pageSize=10",
+    headers: { cookie: sessionCookie }
+  });
+  assert.equal(filtered.statusCode, 200, filtered.body);
+  assert.deepEqual(filtered.json().stores.map((store: { id: string }) => store.id), [storeId]);
 
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async () => new Response("ok", { status: 200 });
@@ -675,6 +664,7 @@ test("claim is atomic and provisions a tunnel once", async () => {
   assert.equal(claimResponse.statusCode, 200, claimResponse.body);
   assert.match(claimResponse.json().tunnelToken, /^mock-/);
   assert.match(claimResponse.json().agentToken, /^[A-Za-z0-9_-]{40,}$/);
+  commandAgentToken = claimResponse.json().agentToken;
   const provisionedStore = await pool.query("SELECT tunnel_name FROM stores WHERE id = $1", [storeId]);
   assert.equal(provisionedStore.rows[0].tunnel_name, `dcorp-hlc-0001-${storeId.slice(0, 8)}`);
 
@@ -706,6 +696,79 @@ test("claim is atomic and provisions a tunnel once", async () => {
     { platform: "unix", status: "staled_ignored" },
     { platform: "windows", status: "running" }
   ]);
+});
+
+test("tracks multiple diagnostic runs as grouped enrollment log sections", async () => {
+  await pool.query(
+    "UPDATE stores SET tunnel_status = 'healthy' WHERE id = $1",
+    [storeId]
+  );
+  const first = await app.inject({
+    method: "POST",
+    url: `/api/stores/${storeId}/diagnose`,
+    headers: { cookie: sessionCookie }
+  });
+  assert.equal(first.statusCode, 200, first.body);
+  assert.equal(first.json().enrollmentId, enrollmentId);
+  assert.equal(first.json().status, "pending");
+  const firstRunId = first.json().diagnosticRunId as string;
+  const tokenMatch = first.json().urls.powershell.match(/\/d\/([^/]+)\/diagnose\.ps1$/);
+  assert.ok(tokenMatch);
+
+  const script = await app.inject({ method: "GET", url: `/d/${tokenMatch[1]}/diagnose.ps1` });
+  assert.equal(script.statusCode, 200, script.body);
+  assert.match(script.body, new RegExp(firstRunId));
+  const runningLogs = await app.inject({
+    method: "GET",
+    url: `/api/stores/${storeId}/enrollments/${enrollmentId}/logs`,
+    headers: { cookie: sessionCookie }
+  });
+  assert.equal(runningLogs.statusCode, 200, runningLogs.body);
+  assert.equal(runningLogs.json().hasActiveDiagnostics, true);
+  assert.equal(runningLogs.json().diagnosticRuns[0].status, "running");
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response("ok", { status: 200 });
+  try {
+    const reported = await app.inject({
+      method: "POST",
+      url: "/api/public/stores/diagnose/report",
+      payload: {
+        storeId,
+        diagnosticRunId: firstRunId,
+        agentToken: commandAgentToken,
+        cloudflaredRunning: true,
+        hostnameMatch: true,
+        localHostname: "0001.stores-a.example",
+        agentHealthy: true
+      }
+    });
+    assert.equal(reported.statusCode, 200, reported.body);
+    assert.equal(reported.json().diagnosticRunId, firstRunId);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const second = await app.inject({
+    method: "POST",
+    url: `/api/stores/${storeId}/diagnose`,
+    headers: { cookie: sessionCookie }
+  });
+  assert.equal(second.statusCode, 200, second.body);
+  const groupedLogs = await app.inject({
+    method: "GET",
+    url: `/api/stores/${storeId}/enrollments/${enrollmentId}/logs`,
+    headers: { cookie: sessionCookie }
+  });
+  assert.equal(groupedLogs.statusCode, 200, groupedLogs.body);
+  assert.equal(groupedLogs.json().hasActiveDiagnostics, true);
+  assert.deepEqual(groupedLogs.json().diagnosticRuns.map((run: { id: string; status: string }) => ({ id: run.id, status: run.status })), [
+    { id: second.json().diagnosticRunId, status: "pending" },
+    { id: firstRunId, status: "completed" }
+  ]);
+  const firstRunLogs = groupedLogs.json().logs.filter((log: { diagnosticRunId: string | null }) => log.diagnosticRunId === firstRunId);
+  assert.deepEqual(firstRunLogs.map((log: { step: string }) => log.step), ["started", "cloudflared", "local-enrollment", "command-agent", "cloudflare-tunnel", "published-endpoints", "summary"]);
+  assert.ok(firstRunLogs.every((log: { phase: string }) => log.phase === "diagnostic"));
 });
 
 test("updates all ingress routes on an existing tunnel", async () => {
@@ -788,6 +851,11 @@ test("installer report activates a mock store", async () => {
   const enrollmentDetail = await app.inject({ method: "GET", url: `/api/stores/${storeId}`, headers: { cookie: sessionCookie } });
   assert.equal(enrollmentDetail.statusCode, 200, enrollmentDetail.body);
   assert.equal(enrollmentDetail.json().store.enrollments[0].environment, "windows");
+  const enrollmentHistory = await app.inject({ method: "GET", url: `/api/stores/${storeId}/enrollments?page=1&pageSize=5`, headers: { cookie: sessionCookie } });
+  assert.equal(enrollmentHistory.statusCode, 200, enrollmentHistory.body);
+  assert.deepEqual(enrollmentHistory.json().pagination, { page: 1, pageSize: 5, total: 1, totalPages: 1 });
+  assert.equal(enrollmentHistory.json().enrollments[0].id, enrollmentId);
+  assert.equal(enrollmentHistory.json().enrollments[0].environment, "windows");
   const installedScripts = await pool.query("SELECT platform, status FROM enrollment_scripts WHERE enrollment_id = $1 AND script_kind = 'install' ORDER BY platform", [enrollmentId]);
   assert.deepEqual(installedScripts.rows, [
     { platform: "unix", status: "staled_ignored" },
@@ -822,14 +890,30 @@ test("executes a script through the configured store command agent", async () =>
 
   const originalFetch = globalThis.fetch;
   let executionCall = 0;
+  let streamedExecutionId = "";
   globalThis.fetch = async (input, init) => {
     assert.equal(String(input), "https://0001-ops.stores-a.example/agent");
     const headers = new Headers(init?.headers);
     assert.match(headers.get("X-Cloudflare-Man-Agent-Token") ?? "", /^[A-Za-z0-9_-]{40,}$/);
     executionCall += 1;
-    assert.deepEqual(JSON.parse(String(init?.body)), executionCall <= 2
-      ? { script: "Write-Output 'ready v2'", timeoutMs: 30000 }
+    const requestBody = JSON.parse(String(init?.body));
+    assert.deepEqual({ script: requestBody.script, timeoutMs: requestBody.timeoutMs }, executionCall <= 2
+      ? { script: "Write-Output 'ready v2'", timeoutMs: executionCall === 1 ? 90000 : 30000 }
       : { script: "Write-Output 'inline'", timeoutMs: 15000 });
+    assert.match(requestBody.executionId, /^[0-9a-f-]{36}$/);
+    assert.match(requestBody.reportToken, /^[A-Za-z0-9_-]{40,}$/);
+    assert.equal(requestBody.startUrl, `https://cfman.example.test/api/public/command-executions/${requestBody.executionId}/started`);
+    assert.equal(requestBody.reportUrl, `https://cfman.example.test/api/public/command-executions/${requestBody.executionId}/report`);
+    assert.equal(requestBody.logUrl, `https://cfman.example.test/api/public/command-executions/${requestBody.executionId}/log`);
+    if (executionCall === 1) {
+      streamedExecutionId = requestBody.executionId;
+      const streamed = await app.inject({
+        method: "POST",
+        url: `/api/public/command-executions/${requestBody.executionId}/log`,
+        payload: { token: requestBody.reportToken, stream: "stdout", line: "streamed ready", sequence: 0 }
+      });
+      assert.equal(streamed.statusCode, 202, streamed.body);
+    }
     return new Response(JSON.stringify(executionCall === 1
       ? { success: true, exitCode: 0, stdout: "ready\n", stderr: "", durationMs: 25 }
       : executionCall === 2
@@ -844,7 +928,7 @@ test("executes a script through the configured store command agent", async () =>
       method: "POST",
       url: `/api/stores/${storeId}/commands/execute`,
       headers: { cookie: sessionCookie },
-      payload: { scriptVersionId, timeoutMs: 30000 }
+      payload: { scriptVersionId }
     });
     assert.equal(response.statusCode, 200, response.body);
     assert.deepEqual({
@@ -960,7 +1044,7 @@ test("executes a script through the configured store command agent", async () =>
     assert.equal(historyResult.scriptId, savedInlineResult.scriptId);
     assert.equal(historyResult.version, 1);
     assert.equal(historyResult.pagination.total, 1);
-    assert.deepEqual(historyResult.summary, { total: 1, succeeded: 1, failed: 0, timedOut: 0, running: 0 });
+    assert.deepEqual(historyResult.summary, { total: 1, succeeded: 1, failed: 0, timedOut: 0, cancelled: 0, scheduled: 0, running: 0 });
     assert.equal(historyResult.executions[0].id, inlineResult.executionId);
     assert.equal(historyResult.executions[0].storeId, storeId);
     assert.equal(historyResult.executions[0].enrollmentId, enrollmentId);
@@ -1008,6 +1092,9 @@ test("executes a script through the configured store command agent", async () =>
   assert.ok(executions.rows[2].saved_at);
   assert.ok(executions.rows.every((execution) => execution.enrollment_id === enrollmentId));
   assert.ok(executions.rows.slice(0, 2).every((execution) => execution.script_version_id === scriptVersionId));
+  const streamedLogs = await app.inject({ method: "GET", url: `/api/stores/${storeId}/command-executions/${streamedExecutionId}/logs`, headers: { cookie: sessionCookie } });
+  assert.equal(streamedLogs.statusCode, 200, streamedLogs.body);
+  assert.deepEqual(streamedLogs.json().logs.map((entry: { stream: string; line: string; sequence: number }) => ({ stream: entry.stream, line: entry.line, sequence: entry.sequence })), [{ stream: "stdout", line: "streamed ready", sequence: 0 }]);
 
   const refreshedDetail = await app.inject({ method: "GET", url: `/api/stores/${storeId}`, headers: { cookie: sessionCookie } });
   assert.equal(refreshedDetail.statusCode, 200, refreshedDetail.body);
@@ -1025,14 +1112,176 @@ test("executes a script through the configured store command agent", async () =>
   const paginatedHistory = await app.inject({ method: "GET", url: `/api/stores/${storeId}/command-executions?page=1&pageSize=5`, headers: { cookie: sessionCookie } });
   assert.equal(paginatedHistory.statusCode, 200, paginatedHistory.body);
   assert.equal(paginatedHistory.json().pagination.total, 3);
-  assert.deepEqual(paginatedHistory.json().summary, { total: 3, succeeded: 2, failed: 1, timedOut: 0, running: 0 });
+  assert.deepEqual(paginatedHistory.json().summary, { total: 3, succeeded: 2, failed: 1, timedOut: 0, cancelled: 0, scheduled: 0, running: 0 });
   assert.equal(paginatedHistory.json().pagination.pageSize, 5);
   assert.equal(paginatedHistory.json().executions.length, 3);
   assert.equal(paginatedHistory.json().executions[0].id, latestExecution.id);
   const scriptListWithStats = await app.inject({ method: "GET", url: "/api/scripts", headers: { cookie: sessionCookie } });
   assert.equal(scriptListWithStats.statusCode, 200, scriptListWithStats.body);
   const readinessScript = scriptListWithStats.json().scripts.find((script: { name: string }) => script.name === "Store readiness check");
-  assert.deepEqual(readinessScript.executionStats, { total: 2, succeeded: 1, failed: 1, timedOut: 0, running: 0 });
+  assert.deepEqual(readinessScript.executionStats, { total: 2, succeeded: 1, failed: 1, timedOut: 0, cancelled: 0, scheduled: 0, running: 0 });
+});
+
+test("schedules concurrent agent work, accepts post-unenrollment logs, and reconciles terminal callbacks", async () => {
+  const originalFetch = globalThis.fetch;
+  const dispatched: Array<Record<string, unknown>> = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    if (url.includes("/executions/") && url.endsWith("/cancel")) {
+      const executionId = url.split("/").at(-2)!;
+      return new Response(JSON.stringify({ accepted: true, taskId: executionId, status: "cancelling" }), {
+        status: 202,
+        headers: { "Content-Type": "application/json" }
+      });
+    }
+    assert.equal(url, "https://0001-ops.stores-a.example/agent");
+    const payload = JSON.parse(String(init?.body)) as Record<string, unknown>;
+    dispatched.push(payload);
+    return new Response(JSON.stringify({ scheduled: true, executionId: payload.executionId, taskId: payload.executionId }), {
+      status: 202,
+      headers: { "Content-Type": "application/json" }
+    });
+  };
+  try {
+    const scheduled = await app.inject({
+      method: "POST",
+      url: `/api/stores/${storeId}/commands/execute`,
+      headers: { cookie: sessionCookie },
+      payload: { scriptVersionId }
+    });
+    assert.equal(scheduled.statusCode, 202, scheduled.body);
+    assert.equal(scheduled.json().scheduled, true);
+    assert.equal(scheduled.json().status, "scheduled");
+    assert.equal(scheduled.json().taskId, scheduled.json().executionId);
+    const executionId = scheduled.json().executionId as string;
+    const request = dispatched[0]!;
+    assert.equal(request.startUrl, `https://cfman.example.test/api/public/command-executions/${executionId}/started`);
+
+    const started = await app.inject({
+      method: "POST",
+      url: `/api/public/command-executions/${executionId}/started`,
+      payload: { token: request.reportToken, taskId: executionId, processId: 4242 }
+    });
+    assert.equal(started.statusCode, 202, started.body);
+    const running = await pool.query("SELECT status, task_id, process_id FROM store_command_executions WHERE id = $1", [executionId]);
+    assert.deepEqual(running.rows[0], { status: "running", task_id: executionId, process_id: "4242" });
+
+    await pool.query("UPDATE enrollments SET status = 'unenrolled', unenrolled_at = now() WHERE id = $1", [enrollmentId]);
+    const postUnenrollmentLog = await app.inject({
+      method: "POST",
+      url: `/api/public/command-executions/${executionId}/log`,
+      payload: { token: request.reportToken, stream: "stdout", line: "worker still reporting", sequence: 0 }
+    });
+    assert.equal(postUnenrollmentLog.statusCode, 202, postUnenrollmentLog.body);
+    const retriedLog = await app.inject({
+      method: "POST",
+      url: `/api/public/command-executions/${executionId}/log`,
+      payload: { token: request.reportToken, stream: "stdout", line: "worker still reporting", sequence: 0 }
+    });
+    assert.equal(retriedLog.statusCode, 202, retriedLog.body);
+    const loggedLines = await pool.query("SELECT count(*)::int AS count FROM store_command_execution_logs WHERE execution_id = $1", [executionId]);
+    assert.equal(loggedLines.rows[0].count, 1);
+    await pool.query("UPDATE enrollments SET status = 'installed', unenrolled_at = NULL WHERE id = $1", [enrollmentId]);
+
+    await pool.query("UPDATE store_command_executions SET status = 'timed_out', error = 'No final result was reported before the execution deadline.' WHERE id = $1", [executionId]);
+    const succeeded = await app.inject({
+      method: "POST",
+      url: `/api/public/command-executions/${executionId}/report`,
+      payload: { token: request.reportToken, status: "succeeded", success: true, exitCode: 0, stdout: "worker still reporting", stderr: "", durationMs: 95000 }
+    });
+    assert.equal(succeeded.statusCode, 202, succeeded.body);
+    const corrected = await pool.query("SELECT status, error, stdout FROM store_command_executions WHERE id = $1", [executionId]);
+    assert.deepEqual(corrected.rows[0], { status: "succeeded", error: null, stdout: "worker still reporting" });
+
+    const cancellable = await app.inject({
+      method: "POST",
+      url: `/api/stores/${storeId}/commands/execute`,
+      headers: { cookie: sessionCookie },
+      payload: { scriptVersionId }
+    });
+    assert.equal(cancellable.statusCode, 202, cancellable.body);
+    const cancellableId = cancellable.json().executionId as string;
+    const cancelled = await app.inject({
+      method: "POST",
+      url: `/api/stores/${storeId}/command-executions/${cancellableId}/cancel`,
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(cancelled.statusCode, 202, cancelled.body);
+    assert.equal(cancelled.json().status, "cancelled");
+
+    const cancelledRequest = dispatched[1]!;
+    const lateSuccess = await app.inject({
+      method: "POST",
+      url: `/api/public/command-executions/${cancellableId}/report`,
+      payload: { token: cancelledRequest.reportToken, status: "succeeded", success: true, exitCode: 0, stdout: "too late", stderr: "", durationMs: 10 }
+    });
+    assert.equal(lateSuccess.statusCode, 404, lateSuccess.body);
+    const stillCancelled = await pool.query("SELECT status FROM store_command_executions WHERE id = $1", [cancellableId]);
+    assert.equal(stillCancelled.rows[0].status, "cancelled");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("groups a bulk script execution and exposes per-store detail", async () => {
+  const script = await pool.query("SELECT script_id FROM managed_script_versions WHERE id = $1", [scriptVersionId]);
+  const scriptId = script.rows[0].script_id as string;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => new Response(JSON.stringify({ success: true, exitCode: 0, stdout: "bulk ready\n", stderr: "", durationMs: 30 }), { status: 200, headers: { "Content-Type": "application/json" } });
+  try {
+    const started = await app.inject({
+      method: "POST",
+      url: `/api/scripts/${scriptId}/bulk-execute`,
+      headers: { cookie: sessionCookie },
+      payload: {
+        scriptVersionId,
+        name: "July rollout",
+        description: "Validate store readiness",
+        filters: { tenantCode: "HLC", enrollmentStatus: "active" },
+        selectAll: true
+      }
+    });
+    assert.equal(started.statusCode, 202, started.body);
+    assert.equal(started.json().selectedCount, 1);
+    assert.equal(started.json().descriptionVersion, 1);
+    assert.equal(started.json().timeoutMs, 90000);
+    const runId = started.json().bulkExecutionId as string;
+    const scriptVersion = await pool.query("SELECT version FROM managed_script_versions WHERE id = $1", [scriptVersionId]);
+    const versionNumber = scriptVersion.rows[0].version as number;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const status = await pool.query("SELECT status FROM store_command_executions WHERE bulk_execution_id = $1", [runId]);
+      if (status.rows[0]?.status !== "running") break;
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const history = await app.inject({ method: "GET", url: `/api/scripts/${scriptId}/bulk-executions?page=1&pageSize=10`, headers: { cookie: sessionCookie } });
+    assert.equal(history.statusCode, 200, history.body);
+    assert.equal(history.json().runs[0].id, runId);
+    assert.deepEqual({ selected: history.json().runs[0].selectedCount, succeeded: history.json().runs[0].succeeded, running: history.json().runs[0].running }, { selected: 1, succeeded: 1, running: 0 });
+    const unifiedHistory = await app.inject({ method: "GET", url: `/api/scripts/${scriptId}/execution-history?version=${versionNumber}&page=1&pageSize=10`, headers: { cookie: sessionCookie } });
+    assert.equal(unifiedHistory.statusCode, 200, unifiedHistory.body);
+    const unifiedBulk = unifiedHistory.json().history.find((item: { kind: string; run?: { id: string; selectedCount: number; succeeded: number } }) => item.kind === "bulk");
+    assert.equal(unifiedBulk?.kind, "bulk");
+    assert.deepEqual({ id: unifiedBulk?.run?.id, selectedCount: unifiedBulk?.run?.selectedCount, succeeded: unifiedBulk?.run?.succeeded }, { id: runId, selectedCount: 1, succeeded: 1 });
+    const filteredUnified = await app.inject({ method: "GET", url: `/api/scripts/${scriptId}/execution-history?version=${versionNumber}&search=July%20rollout&page=1&pageSize=10`, headers: { cookie: sessionCookie } });
+    assert.equal(filteredUnified.statusCode, 200, filteredUnified.body);
+    assert.deepEqual(filteredUnified.json().history.map((item: { kind: string }) => item.kind), ["bulk"]);
+    const detail = await app.inject({ method: "GET", url: `/api/scripts/${scriptId}/bulk-executions/${runId}?status=succeeded&page=1&pageSize=25`, headers: { cookie: sessionCookie } });
+    assert.equal(detail.statusCode, 200, detail.body);
+    assert.equal(detail.json().executions[0].storeId, storeId);
+    assert.equal(detail.json().executions[0].computerName, null);
+    assert.equal(detail.json().executions[0].environment, "windows");
+    assert.deepEqual(detail.json().summary, { total: 1, running: 0, succeeded: 1, failed: 0, timedOut: 0, cancelled: 0, scheduled: 0 });
+    for (const storeSearch of ["highlands", "hlc", "0001"]) {
+      const filtered = await app.inject({ method: "GET", url: `/api/scripts/${scriptId}/bulk-executions/${runId}?storeSearch=${storeSearch}&page=1&pageSize=25`, headers: { cookie: sessionCookie } });
+      assert.equal(filtered.statusCode, 200, filtered.body);
+      assert.deepEqual(filtered.json().executions.map((execution: { storeId: string }) => execution.storeId), [storeId]);
+    }
+    const missingStore = await app.inject({ method: "GET", url: `/api/scripts/${scriptId}/bulk-executions/${runId}?storeSearch=missing-store&page=1&pageSize=25`, headers: { cookie: sessionCookie } });
+    assert.equal(missingStore.statusCode, 200, missingStore.body);
+    assert.equal(missingStore.json().pagination.total, 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("deletes a saved script and all related execution history", async () => {
@@ -1409,7 +1658,8 @@ test("deprovisions the previous tunnel before an enrollment override", async () 
     url: "/api/public/enrollments/unenroll/report",
     payload: { token: supersededCleanupToken, platform: "unix", status: "unenrolled" }
   });
-  assert.equal(staleReport.statusCode, 404, staleReport.body);
+  assert.equal(staleReport.statusCode, 200, staleReport.body);
+  assert.equal(staleReport.json().cloudflareDeprovisioned, false);
   const resourcesAfterStaleReport = await pool.query("SELECT tunnel_id FROM stores WHERE id = $1", [overrideStoreId]);
   assert.equal(resourcesAfterStaleReport.rows[0].tunnel_id, replacedResources.rows[0].tunnel_id);
   const previousEnrollment = await pool.query("SELECT status, unenroll_reason, unenrolled_at FROM enrollments WHERE id = $1", [firstEnrollmentId]);

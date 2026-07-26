@@ -15,16 +15,16 @@ const DRAWER_Z_TOP = 91;
 export function DrawerProvider({ children }: { children: ReactNode }) {
   const lastOpened = useRef<"store" | "script" | null>(null);
   const [storeDrawer, setStoreDrawer] = useState<{ id: string; tab: StoreDrawerTab } | null>(null);
-  const [scriptDrawer, setScriptDrawer] = useState<{ id: string; version: number | null } | null>(null);
+  const [scriptDrawer, setScriptDrawer] = useState<{ id: string; version: number | null; bulkRunId: string | null } | null>(null);
 
   const api = useMemo(() => ({
     openStoreDrawer: (storeId: string, tab: StoreDrawerTab = "overall") => {
       lastOpened.current = "store";
       setStoreDrawer({ id: storeId, tab });
     },
-    openScriptDrawer: (scriptId: string, version: number | null = null) => {
+    openScriptDrawer: (scriptId: string, version: number | null = null, options?: { bulkRunId?: string | undefined }) => {
       lastOpened.current = "script";
-      setScriptDrawer({ id: scriptId, version });
+      setScriptDrawer({ id: scriptId, version, bulkRunId: options?.bulkRunId ?? null });
     }
   }), []);
   const storeZIndex = lastOpened.current === "store" ? DRAWER_Z_TOP : DRAWER_Z_BASE;
@@ -44,6 +44,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
         <ScriptDrawer
           scriptId={scriptDrawer?.id ?? null}
           version={scriptDrawer?.version ?? null}
+          initialBulkRunId={scriptDrawer?.bulkRunId ?? null}
           onClose={() => setScriptDrawer(null)}
           zIndex={scriptZIndex}
         />

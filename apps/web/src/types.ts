@@ -34,7 +34,6 @@ export type CloudflareAccount = {
   status: string;
   tunnelLimit: number;
   softTunnelLimit: number;
-  supportEmail: string | null;
   rdpAllowedEmails: string[];
   storeCount: number;
   lastSyncedAt: string | null;
@@ -74,6 +73,7 @@ export type Store = {
   tunnelStatus: string;
   onboardingStatus: string;
   latestEnrollmentStatus?: string | null;
+  hasPendingActivity?: boolean;
   accountId: string;
   cfAccountId: string | null;
   accountName: string;
@@ -133,6 +133,8 @@ export type StoreEnrollment = {
   unenrollStatus: "not_required" | "pending" | "unenrolled" | "failed";
   unenrollReason: "script" | "override" | null;
   unenrollRequestedAt: string | null;
+  unenrollTokenExpiresAt: string | null;
+  unenrollLastError: string | null;
   unenrolledAt: string | null;
   logCount: number;
   hostInfo: {
@@ -167,8 +169,11 @@ export type StoreCommandExecution = {
   language: "powershell" | "bash" | "sh" | null;
   script: string;
   timeoutMs: number;
-  status: "running" | "succeeded" | "failed" | "timed_out";
-  startedAt: string;
+  status: "scheduled" | "running" | "succeeded" | "failed" | "timed_out" | "cancelled";
+  taskId: string | null;
+  processId: number | null;
+  createdAt: string;
+  startedAt: string | null;
   finishedAt: string | null;
   elapsedMs: number | null;
   exitCode: number | null;
@@ -176,6 +181,7 @@ export type StoreCommandExecution = {
   stderr: string;
   error: string | null;
   requestedBy: string | null;
+  bulkExecutionId?: string | null;
 };
 
 export type ScriptCommandExecution = StoreCommandExecution & {
@@ -196,6 +202,7 @@ export type ManagedScriptSummary = {
   platform: "windows" | "unix";
   language: "powershell" | "bash" | "sh";
   description: string;
+  defaultTimeoutMs: number;
   latestVersion: number | null;
   latestVersionId: string | null;
   versionCount: number;
@@ -209,7 +216,19 @@ export type ExecutionStats = {
   succeeded: number;
   failed: number;
   timedOut: number;
+  cancelled: number;
+  scheduled: number;
   running: number;
+};
+
+export const emptyExecutionStats: ExecutionStats = {
+  total: 0,
+  succeeded: 0,
+  failed: 0,
+  timedOut: 0,
+  cancelled: 0,
+  scheduled: 0,
+  running: 0
 };
 
 export type ManagedScript = ManagedScriptSummary & {
@@ -220,6 +239,24 @@ export type ManagedScript = ManagedScriptSummary & {
     createdAt: string;
     createdBy: string | null;
   }>;
+};
+
+export type BulkScriptRun = {
+  id: string;
+  name: string;
+  description: string;
+  descriptionVersion: number;
+  scriptVersionId: string;
+  timeoutMs: number;
+  createdAt: string;
+  requestedBy: string | null;
+  selectedCount: number;
+  running: number;
+  succeeded: number;
+  failed: number;
+  timedOut: number;
+  cancelled: number;
+  scheduled: number;
 };
 
 export type EnrollmentResult = {
@@ -250,6 +287,9 @@ export type UnenrollmentResult = {
 };
 
 export type DiagnoseResult = {
+  enrollmentId: string;
+  diagnosticRunId: string;
+  status: "pending";
   platform: "windows" | "unix";
   expiresAt: string;
   urls: {

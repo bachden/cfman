@@ -2,8 +2,10 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { writeAudit } from "../lib/audit.js";
 import { requireAuth } from "../lib/auth.js";
+import { createCommandExecution, executeStoreScript, getCommandAgentConfig } from "../lib/command-agent.js";
 import { pool, withTransaction } from "../lib/database.js";
 import { appendNameFilter, nameFilterFields, validateNameFilter } from "../lib/name-filter.js";
+import { latestEnrollmentJoin, onboardingStatusExpression } from "./stores.js";
 
 const platformSchema = z.enum(["windows", "unix"]);
 const languageSchema = z.enum(["powershell", "bash", "sh"]);
@@ -12,19 +14,43 @@ const scriptMetadata = z.object({
   name: z.string().trim().min(1).max(120),
   platform: platformSchema,
   language: languageSchema,
-  description: z.string().trim().max(500).default("")
+  description: z.string().trim().max(500).default(""),
+  defaultTimeoutMs: z.number().int().min(1_000).max(300_000).default(60_000)
 });
 const scriptCreateSchema = scriptMetadata.extend({ content: scriptContent });
 const scriptUpdateSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   language: languageSchema.optional(),
-  description: z.string().trim().max(500).optional()
+  description: z.string().trim().max(500).optional(),
+  defaultTimeoutMs: z.number().int().min(1_000).max(300_000).optional()
 });
 const versionSchema = z.object({ content: scriptContent });
+const executionTimestampSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/, "Timestamp must use ISO 8601 format");
 const executionHistorySchema = z.object({
   version: z.coerce.number().int().min(1).optional(),
+  search: z.string().trim().max(120).optional(),
+  from: executionTimestampSchema.optional(),
+  to: executionTimestampSchema.optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(5).max(50).default(10)
+});
+const bulkFilterSchema = z.object({
+  tenantCode: z.string().trim().max(80).optional(),
+  tunnelStatus: z.string().trim().max(40).optional(),
+  enrollmentStatus: z.string().trim().max(40).optional()
+});
+const bulkExecuteSchema = z.object({
+  scriptVersionId: z.string().uuid(),
+  name: z.string().trim().min(1).max(120),
+  description: z.string().trim().max(1000).default(""),
+  timeoutMs: z.number().int().min(1_000).max(300_000).optional(),
+  storeIds: z.array(z.string().uuid()).max(5000).optional(),
+  filters: bulkFilterSchema.default({}),
+  selectAll: z.boolean().default(false)
+}).superRefine((value, context) => {
+  if (!value.selectAll && !value.storeIds?.length) {
+    context.addIssue({ code: "custom", path: ["storeIds"], message: "Select stores or provide filters before starting a bulk execution" });
+  }
 });
 const scriptListQuerySchema = z.object({
   ...nameFilterFields,
@@ -45,6 +71,7 @@ const scriptSummary = `jsonb_build_object(
   'platform', s.platform,
   'language', s.language,
   'description', s.description,
+  'defaultTimeoutMs', s.default_timeout_ms,
   'latestVersion', latest.version,
   'latestVersionId', latest.id,
   'versionCount', COALESCE(latest."versionCount", 0),
@@ -53,6 +80,8 @@ const scriptSummary = `jsonb_build_object(
     'succeeded', execution_stats.succeeded,
     'failed', execution_stats.failed,
     'timedOut', execution_stats."timedOut",
+    'cancelled', execution_stats.cancelled,
+    'scheduled', execution_stats.scheduled,
     'running', execution_stats.running
   ),
   'updatedAt', s.updated_at,
@@ -90,6 +119,8 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                   (count(*) FILTER (WHERE ce.status = 'succeeded'))::int AS succeeded,
                   (count(*) FILTER (WHERE ce.status = 'failed'))::int AS failed,
                   (count(*) FILTER (WHERE ce.status = 'timed_out'))::int AS "timedOut",
+                  (count(*) FILTER (WHERE ce.status = 'cancelled'))::int AS cancelled,
+                  (count(*) FILTER (WHERE ce.status = 'scheduled'))::int AS scheduled,
                   (count(*) FILTER (WHERE ce.status = 'running'))::int AS running
              FROM store_command_executions ce
              LEFT JOIN managed_script_versions executed_version ON executed_version.id = ce.script_version_id
@@ -138,6 +169,8 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                     (count(*) FILTER (WHERE ce.status = 'succeeded'))::int AS succeeded,
                     (count(*) FILTER (WHERE ce.status = 'failed'))::int AS failed,
                     (count(*) FILTER (WHERE ce.status = 'timed_out'))::int AS "timedOut",
+                    (count(*) FILTER (WHERE ce.status = 'cancelled'))::int AS cancelled,
+                    (count(*) FILTER (WHERE ce.status = 'scheduled'))::int AS scheduled,
                     (count(*) FILTER (WHERE ce.status = 'running'))::int AS running
                FROM store_command_executions ce
                LEFT JOIN managed_script_versions executed_version ON executed_version.id = ce.script_version_id
@@ -166,6 +199,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     const offset = (query.page - 1) * query.pageSize;
     const script = await pool.query("SELECT 1 FROM managed_scripts WHERE id = $1", [id]);
     if (!script.rowCount) return reply.code(404).send({ error: "Script not found" });
+    const values: unknown[] = [id, query.version ?? null];
     const joins = `
       FROM store_command_executions ce
       JOIN stores st ON st.id = ce.store_id
@@ -173,8 +207,27 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
       LEFT JOIN users u ON u.id = ce.requested_by
       LEFT JOIN managed_script_versions executed_version ON executed_version.id = ce.script_version_id
       LEFT JOIN managed_script_versions saved_version ON saved_version.id = ce.saved_script_version_id
+      LEFT JOIN managed_scripts executed_script ON executed_script.id = executed_version.script_id
+      LEFT JOIN managed_scripts saved_script ON saved_script.id = saved_version.script_id
      WHERE (executed_version.script_id = $1 OR saved_version.script_id = $1)
+       AND ce.bulk_execution_id IS NULL
        AND ($2::int IS NULL OR COALESCE(executed_version.version, saved_version.version) = $2)`;
+    const filters: string[] = [];
+    if (query.search) {
+      values.push(query.search);
+      filters.push(`strpos(lower(concat_ws(' ', ce.script_name, executed_script.name, executed_script.description, saved_script.name, saved_script.description, st.display_name, st.tenant_code, st.store_code, u.username)), lower($${values.length})) > 0`);
+    }
+    if (query.from) {
+      values.push(query.from);
+      filters.push(`ce.created_at >= $${values.length}::timestamptz`);
+    }
+    if (query.to) {
+      values.push(query.to);
+      filters.push(`ce.created_at <= $${values.length}::timestamptz`);
+    }
+    const where = filters.length ? ` AND ${filters.join(" AND ")}` : "";
+    const limitParameter = values.length + 1;
+    const offsetParameter = values.length + 2;
     const [executionResult, statsResult] = await Promise.all([
       pool.query(
         `SELECT ce.id,
@@ -190,27 +243,32 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                 ce.saved_script_id AS "savedScriptId",
                 ce.saved_script_version_id AS "savedScriptVersionId",
                 ce.saved_at AS "savedAt",
+                ce.bulk_execution_id AS "bulkExecutionId",
                 COALESCE(executed_version.id, saved_version.id) AS "anchorScriptVersionId",
                 COALESCE(executed_version.version, saved_version.version) AS "scriptVersion",
                 COALESCE(ce.script_name, 'Inline script') AS "scriptName",
                 ce.script_platform AS platform, ce.script_language AS language,
-                ce.script, ce.timeout_ms AS "timeoutMs", ce.status,
-                ce.started_at AS "startedAt", ce.finished_at AS "finishedAt",
+                ce.script, ce.timeout_ms AS "timeoutMs", ce.status, ce.task_id AS "taskId", ce.process_id AS "processId",
+                ce.created_at AS "createdAt", ce.started_at AS "startedAt", ce.finished_at AS "finishedAt",
                 ce.elapsed_ms AS "elapsedMs", ce.exit_code AS "exitCode",
                 ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy"
          ${joins}
+         ${where}
          ORDER BY ce.created_at DESC, ce.id DESC
-         LIMIT $3 OFFSET $4`,
-        [id, query.version ?? null, query.pageSize, offset]
+         LIMIT $${limitParameter} OFFSET $${offsetParameter}`,
+        [...values, query.pageSize, offset]
       ),
       pool.query(
         `SELECT count(*)::int AS total,
                 (count(*) FILTER (WHERE ce.status = 'succeeded'))::int AS succeeded,
                 (count(*) FILTER (WHERE ce.status = 'failed'))::int AS failed,
                 (count(*) FILTER (WHERE ce.status = 'timed_out'))::int AS "timedOut",
+                (count(*) FILTER (WHERE ce.status = 'cancelled'))::int AS cancelled,
+                (count(*) FILTER (WHERE ce.status = 'scheduled'))::int AS scheduled,
                 (count(*) FILTER (WHERE ce.status = 'running'))::int AS running
-         ${joins}`,
-        [id, query.version ?? null]
+         ${joins}
+         ${where}`,
+        values
       )
     ]);
     const summary = statsResult.rows[0];
@@ -229,16 +287,390 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
+  app.get("/api/scripts/:id/execution-history", { preHandler: requireAuth }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const query = executionHistorySchema.parse(request.query);
+    const script = await pool.query("SELECT 1 FROM managed_scripts WHERE id = $1", [id]);
+    if (!script.rowCount) return reply.code(404).send({ error: "Script not found" });
+    const values: unknown[] = [id, query.version ?? null];
+    const filters: string[] = [];
+    let searchParameter: string | null = null;
+    let fromParameter: string | null = null;
+    let toParameter: string | null = null;
+    if (query.search) {
+      values.push(query.search);
+      searchParameter = `$${values.length}`;
+      filters.push(`strpos(lower(concat_ws(' ', ce.script_name, executed_script.name, executed_script.description, saved_script.name, saved_script.description, st.display_name, st.tenant_code, st.store_code, u.username)), lower(${searchParameter})) > 0`);
+    }
+    if (query.from) {
+      values.push(query.from);
+      fromParameter = `$${values.length}`;
+      filters.push(`ce.created_at >= ${fromParameter}::timestamptz`);
+    }
+    if (query.to) {
+      values.push(query.to);
+      toParameter = `$${values.length}`;
+      filters.push(`ce.created_at <= ${toParameter}::timestamptz`);
+    }
+    const executionScope = `
+      (executed_version.script_id = $1 OR saved_version.script_id = $1)
+      AND ($2::int IS NULL OR COALESCE(executed_version.version, saved_version.version) = $2)
+      ${filters.length ? `AND ${filters.join(" AND ")}` : ""}`;
+    const regularWhere = `${executionScope} AND ce.bulk_execution_id IS NULL`;
+    const bulkFilters: string[] = [];
+    if (searchParameter) {
+      bulkFilters.push(`(strpos(lower(concat_ws(' ', r.name, r.description, bulk_script.name, bulk_script.description, bulk_user.username)), lower(${searchParameter})) > 0 OR EXISTS (
+        SELECT 1 FROM store_command_executions search_ce
+        JOIN stores search_store ON search_store.id = search_ce.store_id
+        WHERE search_ce.bulk_execution_id = r.id
+          AND strpos(lower(concat_ws(' ', search_store.display_name, search_store.tenant_code, search_store.store_code)), lower(${searchParameter})) > 0
+      ))`);
+    }
+    if (fromParameter) {
+      bulkFilters.push(`r.created_at >= ${fromParameter}::timestamptz`);
+    }
+    if (toParameter) {
+      bulkFilters.push(`r.created_at <= ${toParameter}::timestamptz`);
+    }
+    const bulkWhere = `r.saved_script_id = $1
+      AND ($2::int IS NULL OR bulk_version.version = $2)
+      ${bulkFilters.length ? `AND ${bulkFilters.join(" AND ")}` : ""}`;
+    const historySource = `
+      SELECT jsonb_build_object(
+               'kind', 'execution',
+               'execution', jsonb_build_object(
+                 'id', ce.id,
+                 'storeId', ce.store_id,
+                 'storeDisplayName', st.display_name,
+                 'tenantCode', st.tenant_code,
+                 'storeCode', st.store_code,
+                 'enrollmentId', ce.enrollment_id,
+                 'computerName', NULLIF(e.host_info->>'machineName', ''),
+                 'osName', NULLIF(e.host_info->>'osName', ''),
+                 'environment', e.platform,
+                 'enrollmentPlatform', e.platform,
+                 'scriptType', ce.script_type,
+                 'scriptId', $1::uuid,
+                 'scriptVersionId', ce.script_version_id,
+                 'savedScriptId', ce.saved_script_id,
+                 'savedScriptVersionId', ce.saved_script_version_id,
+                 'savedAt', ce.saved_at,
+                 'bulkExecutionId', ce.bulk_execution_id,
+                 'anchorScriptVersionId', COALESCE(executed_version.id, saved_version.id),
+                 'scriptVersion', COALESCE(executed_version.version, saved_version.version),
+                 'scriptName', COALESCE(ce.script_name, executed_script.name, saved_script.name, 'Inline script'),
+                 'platform', ce.script_platform,
+                 'language', ce.script_language,
+                 'script', ce.script,
+                 'timeoutMs', ce.timeout_ms,
+                 'status', ce.status,
+                 'taskId', ce.task_id,
+                 'processId', ce.process_id,
+                 'createdAt', ce.created_at,
+                 'startedAt', ce.started_at,
+                 'finishedAt', ce.finished_at,
+                 'elapsedMs', ce.elapsed_ms,
+                 'exitCode', ce.exit_code,
+                 'stdout', ce.stdout,
+                 'stderr', ce.stderr,
+                 'error', ce.error,
+                 'requestedBy', u.username
+               )
+             ) AS item,
+             ce.created_at AS sort_at,
+             ce.id AS sort_id
+        FROM store_command_executions ce
+        JOIN stores st ON st.id = ce.store_id
+        LEFT JOIN enrollments e ON e.id = ce.enrollment_id
+        LEFT JOIN users u ON u.id = ce.requested_by
+        LEFT JOIN managed_script_versions executed_version ON executed_version.id = ce.script_version_id
+        LEFT JOIN managed_script_versions saved_version ON saved_version.id = ce.saved_script_version_id
+        LEFT JOIN managed_scripts executed_script ON executed_script.id = executed_version.script_id
+        LEFT JOIN managed_scripts saved_script ON saved_script.id = saved_version.script_id
+       WHERE ${regularWhere}
+      UNION ALL
+      SELECT jsonb_build_object(
+               'kind', 'bulk',
+               'run', jsonb_build_object(
+                 'id', r.id,
+                 'name', r.name,
+                 'description', r.description,
+                 'descriptionVersion', r.description_version,
+                 'scriptVersionId', r.saved_script_version_id,
+                 'timeoutMs', r.timeout_ms,
+                 'createdAt', r.created_at,
+                 'requestedBy', bulk_user.username,
+                 'selectedCount', count(ce.id)::int,
+                 'running', count(ce.id) FILTER (WHERE ce.status = 'running'),
+                 'succeeded', count(ce.id) FILTER (WHERE ce.status = 'succeeded'),
+                 'failed', count(ce.id) FILTER (WHERE ce.status = 'failed'),
+                 'timedOut', count(ce.id) FILTER (WHERE ce.status = 'timed_out'),
+                 'cancelled', count(ce.id) FILTER (WHERE ce.status = 'cancelled'),
+                 'scheduled', count(ce.id) FILTER (WHERE ce.status = 'scheduled')
+               )
+             ) AS item,
+             r.created_at AS sort_at,
+             r.id AS sort_id
+        FROM script_bulk_executions r
+        JOIN managed_script_versions bulk_version ON bulk_version.id = r.saved_script_version_id
+        LEFT JOIN managed_scripts bulk_script ON bulk_script.id = r.saved_script_id
+        LEFT JOIN users bulk_user ON bulk_user.id = r.requested_by
+        LEFT JOIN store_command_executions ce ON ce.bulk_execution_id = r.id
+       WHERE ${bulkWhere}
+       GROUP BY r.id, bulk_version.version, bulk_script.name, bulk_script.description, bulk_user.username`;
+    const limitParameter = values.length + 1;
+    const offsetParameter = values.length + 2;
+    const [historyResult, countResult, statsResult] = await Promise.all([
+      pool.query(`SELECT item FROM (${historySource}) history ORDER BY sort_at DESC, sort_id DESC LIMIT $${limitParameter} OFFSET $${offsetParameter}`, [...values, query.pageSize, (query.page - 1) * query.pageSize]),
+      pool.query(`SELECT count(*)::int AS total FROM (${historySource}) history`, values),
+      pool.query(
+        `SELECT count(*)::int AS total,
+                (count(*) FILTER (WHERE ce.status = 'succeeded'))::int AS succeeded,
+                (count(*) FILTER (WHERE ce.status = 'failed'))::int AS failed,
+                (count(*) FILTER (WHERE ce.status = 'timed_out'))::int AS "timedOut",
+                (count(*) FILTER (WHERE ce.status = 'cancelled'))::int AS cancelled,
+                (count(*) FILTER (WHERE ce.status = 'scheduled'))::int AS scheduled,
+                (count(*) FILTER (WHERE ce.status = 'running'))::int AS running
+           FROM store_command_executions ce
+           JOIN stores st ON st.id = ce.store_id
+           LEFT JOIN users u ON u.id = ce.requested_by
+           LEFT JOIN managed_script_versions executed_version ON executed_version.id = ce.script_version_id
+           LEFT JOIN managed_script_versions saved_version ON saved_version.id = ce.saved_script_version_id
+           LEFT JOIN managed_scripts executed_script ON executed_script.id = executed_version.script_id
+           LEFT JOIN managed_scripts saved_script ON saved_script.id = saved_version.script_id
+          WHERE ${executionScope}`,
+        values
+      )
+    ]);
+    const total = countResult.rows[0]?.total as number ?? 0;
+    return {
+      scriptId: id,
+      version: query.version ?? null,
+      history: historyResult.rows.map((row) => row.item),
+      summary: statsResult.rows[0],
+      pagination: { page: query.page, pageSize: query.pageSize, total, totalPages: Math.max(1, Math.ceil(total / query.pageSize)) }
+    };
+  });
+
+  app.get("/api/scripts/:id/bulk-executions", { preHandler: requireAuth }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const query = z.object({ page: z.coerce.number().int().min(1).default(1), pageSize: z.coerce.number().int().min(5).max(50).default(10) }).parse(request.query);
+    const script = await pool.query("SELECT 1 FROM managed_scripts WHERE id = $1", [id]);
+    if (!script.rowCount) return reply.code(404).send({ error: "Script not found" });
+    const offset = (query.page - 1) * query.pageSize;
+    const [runsResult, countResult] = await Promise.all([
+      pool.query(
+        `SELECT r.id, r.name, r.description, r.description_version AS "descriptionVersion",
+                r.saved_script_version_id AS "scriptVersionId", r.timeout_ms AS "timeoutMs",
+                r.created_at AS "createdAt", u.username AS "requestedBy",
+                count(ce.id)::int AS "selectedCount",
+                (count(ce.id) FILTER (WHERE ce.status = 'running'))::int AS running,
+                (count(ce.id) FILTER (WHERE ce.status = 'succeeded'))::int AS succeeded,
+                (count(ce.id) FILTER (WHERE ce.status = 'failed'))::int AS failed,
+                (count(ce.id) FILTER (WHERE ce.status = 'timed_out'))::int AS "timedOut",
+                (count(ce.id) FILTER (WHERE ce.status = 'cancelled'))::int AS cancelled,
+                (count(ce.id) FILTER (WHERE ce.status = 'scheduled'))::int AS scheduled
+           FROM script_bulk_executions r
+           LEFT JOIN store_command_executions ce ON ce.bulk_execution_id = r.id
+           LEFT JOIN users u ON u.id = r.requested_by
+          WHERE r.saved_script_id = $1
+          GROUP BY r.id, u.username
+          ORDER BY r.created_at DESC, r.id DESC
+          LIMIT $2 OFFSET $3`,
+        [id, query.pageSize, offset]
+      ),
+      pool.query("SELECT count(*)::int AS total FROM script_bulk_executions WHERE saved_script_id = $1", [id])
+    ]);
+    const total = countResult.rows[0]?.total as number ?? 0;
+    return { runs: runsResult.rows, pagination: { page: query.page, pageSize: query.pageSize, total, totalPages: Math.max(1, Math.ceil(total / query.pageSize)) } };
+  });
+
+  app.get("/api/scripts/:id/bulk-executions/:runId", { preHandler: requireAuth }, async (request, reply) => {
+    const { id, runId } = z.object({ id: z.string().uuid(), runId: z.string().uuid() }).parse(request.params);
+    const query = z.object({
+      status: z.enum(["scheduled", "running", "succeeded", "failed", "timed_out", "cancelled"]).optional(),
+      storeId: z.string().uuid().optional(),
+      storeSearch: z.string().trim().max(120).optional(),
+      page: z.coerce.number().int().min(1).default(1),
+      pageSize: z.coerce.number().int().min(5).max(100).default(25)
+    }).parse(request.query);
+    const offset = (query.page - 1) * query.pageSize;
+    const runResult = await pool.query(
+      `SELECT r.id, r.name, r.description, r.description_version AS "descriptionVersion",
+              r.saved_script_version_id AS "scriptVersionId", r.timeout_ms AS "timeoutMs",
+              r.created_at AS "createdAt", u.username AS "requestedBy"
+         FROM script_bulk_executions r
+         LEFT JOIN users u ON u.id = r.requested_by
+        WHERE r.id = $1 AND r.saved_script_id = $2`,
+      [runId, id]
+    );
+    if (!runResult.rowCount) return reply.code(404).send({ error: "Bulk execution not found" });
+    const values: unknown[] = [runId];
+    const conditions = ["ce.bulk_execution_id = $1"];
+    if (query.status) { values.push(query.status); conditions.push(`ce.status = $${values.length}`); }
+    if (query.storeId) { values.push(query.storeId); conditions.push(`ce.store_id = $${values.length}`); }
+    if (query.storeSearch) {
+      values.push(query.storeSearch);
+      conditions.push(`EXISTS (
+        SELECT 1 FROM stores search_store
+         WHERE search_store.id = ce.store_id
+           AND strpos(lower(concat_ws(' ', search_store.display_name, search_store.tenant_code, search_store.store_code)), lower($${values.length})) > 0
+      )`);
+    }
+    const where = conditions.join(" AND ");
+    const limitParameter = values.length + 1;
+    const offsetParameter = values.length + 2;
+    const [executionResult, countResult, statsResult] = await Promise.all([
+      pool.query(
+        `SELECT ce.id, ce.store_id AS "storeId", st.display_name AS "storeDisplayName",
+                st.tenant_code AS "tenantCode", st.store_code AS "storeCode",
+                ce.enrollment_id AS "enrollmentId",
+                NULLIF(e.host_info->>'machineName', '') AS "computerName",
+                NULLIF(e.host_info->>'osName', '') AS "osName",
+                e.platform AS environment, e.platform AS "enrollmentPlatform",
+                ce.script_type AS "scriptType",
+                ce.bulk_execution_id AS "bulkExecutionId",
+                ce.script_version_id AS "scriptVersionId", ce.saved_script_id AS "savedScriptId",
+                ce.saved_script_version_id AS "savedScriptVersionId", ce.script_name AS "scriptName",
+                ce.script_version_number AS "scriptVersion", ce.script_platform AS platform,
+                ce.script_language AS language, ce.script, ce.timeout_ms AS "timeoutMs", ce.status,
+                ce.task_id AS "taskId", ce.process_id AS "processId",
+                ce.created_at AS "createdAt", ce.started_at AS "startedAt", ce.finished_at AS "finishedAt", ce.elapsed_ms AS "elapsedMs",
+                ce.exit_code AS "exitCode", ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy"
+           FROM store_command_executions ce
+           JOIN stores st ON st.id = ce.store_id
+           LEFT JOIN enrollments e ON e.id = ce.enrollment_id
+           LEFT JOIN users u ON u.id = ce.requested_by
+          WHERE ${where}
+          ORDER BY ce.created_at ASC, ce.id ASC
+          LIMIT $${limitParameter} OFFSET $${offsetParameter}`,
+        [...values, query.pageSize, offset]
+      ),
+      pool.query(`SELECT count(*)::int AS total FROM store_command_executions ce WHERE ${where}`, values),
+      pool.query(
+        `SELECT count(*)::int AS total,
+                (count(*) FILTER (WHERE status = 'running'))::int AS running,
+                (count(*) FILTER (WHERE status = 'succeeded'))::int AS succeeded,
+                (count(*) FILTER (WHERE status = 'failed'))::int AS failed,
+                (count(*) FILTER (WHERE status = 'timed_out'))::int AS "timedOut",
+                (count(*) FILTER (WHERE status = 'cancelled'))::int AS cancelled,
+                (count(*) FILTER (WHERE status = 'scheduled'))::int AS scheduled
+           FROM store_command_executions WHERE bulk_execution_id = $1`,
+        [runId]
+      )
+    ]);
+    return {
+      run: runResult.rows[0],
+      summary: statsResult.rows[0],
+      executions: executionResult.rows,
+      pagination: { page: query.page, pageSize: query.pageSize, total: countResult.rows[0].total, totalPages: Math.max(1, Math.ceil(Number(countResult.rows[0].total) / query.pageSize)) }
+    };
+  });
+
+  app.post("/api/scripts/:id/bulk-execute", { preHandler: requireAuth }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const body = bulkExecuteSchema.parse(request.body);
+    const selectedVersion = await pool.query(
+      `SELECT v.id, v.version, v.content, s.id AS "scriptId", s.name AS "scriptName", s.platform, s.language,
+              s.default_timeout_ms AS "defaultTimeoutMs"
+         FROM managed_script_versions v JOIN managed_scripts s ON s.id = v.script_id
+        WHERE v.id = $1 AND s.id = $2`,
+      [body.scriptVersionId, id]
+    );
+    const version = selectedVersion.rows[0];
+    if (!version) return reply.code(404).send({ error: "Script version not found" });
+    const filters = body.filters;
+    const values: unknown[] = [];
+    const conditions: string[] = [];
+    if (body.selectAll) {
+      conditions.push("TRUE");
+      if (filters.tenantCode) { values.push(`%${filters.tenantCode}%`); conditions.push(`s.tenant_code ILIKE $${values.length}`); }
+      if (filters.tunnelStatus) { values.push(filters.tunnelStatus); conditions.push(`s.tunnel_status = $${values.length}`); }
+      if (filters.enrollmentStatus) { values.push(filters.enrollmentStatus); conditions.push(`${onboardingStatusExpression} = $${values.length}`); }
+    }
+    const storeIds = body.selectAll ? undefined : body.storeIds;
+    if (!storeIds?.length && !body.selectAll) return reply.code(400).send({ error: "No stores selected" });
+    if (storeIds?.length) { values.push(storeIds); conditions.push(`s.id = ANY($${values.length}::uuid[])`); }
+    const targetResult = await pool.query(
+      `SELECT s.id, e.id AS "enrollmentId", e.platform,
+              e.status AS "enrollmentRawStatus"
+         FROM stores s
+         ${latestEnrollmentJoin}
+         LEFT JOIN LATERAL (
+           SELECT e.id, e.platform, e.status
+             FROM enrollments e
+            WHERE e.store_id = s.id AND e.status IN ('ready', 'installed')
+              AND e.unenrolled_at IS NULL AND e.deleted_at IS NULL
+            ORDER BY COALESCE(e.installed_at, e.claimed_at, e.created_at) DESC
+            LIMIT 1
+         ) e ON TRUE
+        WHERE ${conditions.join(" AND ")}
+        ORDER BY s.tenant_code, s.store_code`,
+      values
+    );
+    if (!targetResult.rowCount) return reply.code(409).send({ error: "No stores matched the selected filters" });
+    const timeoutMs = body.timeoutMs ?? version.defaultTimeoutMs;
+    const run = await withTransaction(async (client) => {
+      const next = await client.query(
+        `SELECT COALESCE(MAX(description_version), 0) + 1 AS version
+           FROM script_bulk_executions WHERE saved_script_id = $1 AND name = $2`,
+        [id, body.name]
+      );
+      const inserted = await client.query(
+        `INSERT INTO script_bulk_executions(saved_script_id, saved_script_version_id, name, description, description_version, timeout_ms, requested_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id, description_version AS "descriptionVersion"`,
+        [id, body.scriptVersionId, body.name, body.description, next.rows[0].version, timeoutMs, request.authUser!.id]
+      );
+      return inserted.rows[0] as { id: string; descriptionVersion: number };
+    });
+    const executions: string[] = [];
+    const pending: Array<{ storeId: string; execution: Awaited<ReturnType<typeof createCommandExecution>> }> = [];
+    for (const target of targetResult.rows) {
+      const platform = target.platform === "windows" ? "windows" : "unix";
+      const execution = await createCommandExecution({
+        storeId: target.id,
+        enrollmentId: target.enrollmentId ?? null,
+        scriptVersionId: version.id,
+        requestedBy: request.authUser!.id,
+        script: version.content,
+        timeoutMs,
+        scriptType: "managed",
+        scriptName: version.scriptName,
+        scriptPlatform: version.platform,
+        scriptLanguage: version.language,
+        scriptVersion: version.version,
+        bulkExecutionId: run.id
+      });
+      executions.push(execution.executionId);
+      if (!target.enrollmentId || platform !== version.platform) {
+        await pool.query(
+          `UPDATE store_command_executions SET status = 'failed', finished_at = now(), elapsed_ms = 0, error = $1 WHERE id = $2`,
+          [target.enrollmentId ? `This script is for ${version.platform}, but the active enrollment is ${platform}` : "This store has no active enrollment", execution.executionId]
+        );
+        continue;
+      }
+      pending.push({ storeId: target.id, execution });
+    }
+    void (async () => {
+      for (let index = 0; index < pending.length; index += 20) {
+        const batch = pending.slice(index, index + 20);
+        await Promise.allSettled(batch.map((item) => executeStoreScript(item.storeId, version.content, timeoutMs, item.execution)));
+      }
+    })();
+    await writeAudit({ actorUserId: request.authUser!.id, action: "script.bulk_executed", entityType: "script", entityId: id, details: { bulkExecutionId: run.id, name: body.name, descriptionVersion: run.descriptionVersion, selectedCount: executions.length, timeoutMs } });
+    return reply.code(202).send({ bulkExecutionId: run.id, scriptId: id, scriptVersionId: version.id, name: body.name, descriptionVersion: run.descriptionVersion, selectedCount: executions.length, executionIds: executions, timeoutMs });
+  });
+
   app.post("/api/scripts", { preHandler: requireAuth }, async (request, reply) => {
     const body = scriptCreateSchema.parse(request.body);
     const languageError = validateLanguage(body.platform, body.language);
     if (languageError) return reply.code(400).send({ error: languageError });
     const created = await withTransaction(async (client) => {
       const script = await client.query(
-        `INSERT INTO managed_scripts(name, platform, language, description, created_by)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO managed_scripts(name, platform, language, description, default_timeout_ms, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING id`,
-        [body.name, body.platform, body.language, body.description, request.authUser!.id]
+        [body.name, body.platform, body.language, body.description, body.defaultTimeoutMs, request.authUser!.id]
       );
       const version = await client.query(
         `INSERT INTO managed_script_versions(script_id, version, content, created_by)
@@ -269,10 +701,10 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     const result = await pool.query(
       `UPDATE managed_scripts
           SET name = COALESCE($1, name), language = COALESCE($2, language),
-              description = COALESCE($3, description), updated_at = now()
-        WHERE id = $4
+              description = COALESCE($3, description), default_timeout_ms = COALESCE($4, default_timeout_ms), updated_at = now()
+        WHERE id = $5
         RETURNING id`,
-      [body.name ?? null, body.language ?? null, body.description ?? null, id]
+      [body.name ?? null, body.language ?? null, body.description ?? null, body.defaultTimeoutMs ?? null, id]
     );
     await writeAudit({ actorUserId: request.authUser!.id, action: "script.updated", entityType: "script", entityId: id, details: body });
     return { success: Boolean(result.rowCount) };

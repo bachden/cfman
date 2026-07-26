@@ -9,15 +9,18 @@ import "monaco-editor/languages/definitions/shell/register";
 };
 loader.config({ monaco });
 
+const codeFontFamily = '"SFMono-Regular", Consolas, "Liberation Mono", monospace';
+
 type ScriptEditorProps = {
   value: string;
   language: "powershell" | "bash" | "sh";
   onChange?: (value: string) => void;
   readOnly?: boolean;
   height?: string;
+  compactLineNumberGutter?: boolean;
 };
 
-export function ScriptEditor({ value, language, onChange, readOnly = false, height = "420px" }: ScriptEditorProps) {
+export function ScriptEditor({ value, language, onChange, readOnly = false, height = "420px", compactLineNumberGutter = false }: ScriptEditorProps) {
   const monacoLanguage = language === "powershell" ? "powershell" : "shell";
   return <div className="script-editor"><Editor
     height={height}
@@ -28,8 +31,14 @@ export function ScriptEditor({ value, language, onChange, readOnly = false, heig
     options={{
       readOnly,
       minimap: { enabled: false },
+      fontFamily: codeFontFamily,
       fontSize: 13,
+      fontWeight: "400",
+      lineHeight: 20,
+      fontLigatures: false,
       lineNumbers: "on",
+      lineNumbersMinChars: compactLineNumberGutter ? 4 : 5,
+      lineDecorationsWidth: compactLineNumberGutter ? 8 : 10,
       scrollBeyondLastLine: false,
       wordWrap: "on",
       padding: { top: 12, bottom: 12 },

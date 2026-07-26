@@ -13,10 +13,6 @@ const domainName = z.string().trim().toLowerCase().min(3).max(253).regex(
   "Enter a valid DNS zone name"
 );
 const operatorEmails = z.array(z.string().trim().toLowerCase().email()).min(1).max(50);
-const optionalSupportEmail = z.preprocess(
-  (value) => typeof value === "string" && value.trim() === "" ? null : value,
-  z.string().trim().toLowerCase().email().nullable().default(null)
-);
 
 const accountSchema = z.object({
   name: z.string().trim().min(2).max(100),
@@ -25,7 +21,6 @@ const accountSchema = z.object({
   apiToken: z.string().trim().max(1000).optional(),
   softTunnelLimit: z.number().int().min(1).max(1000).default(750),
   initialZoneName: domainName.optional(),
-  supportEmail: optionalSupportEmail,
   rdpAllowedEmails: z.array(z.string().trim().toLowerCase().email()).max(50).default([])
 }).superRefine((data, context) => {
   if (data.providerMode === "live" && (!data.cfAccountId || !data.apiToken)) {
@@ -40,7 +35,6 @@ const accountSchema = z.object({
 });
 
 const rdpSettingsSchema = z.object({ rdpAllowedEmails: operatorEmails });
-const accountSupportSchema = z.object({ supportEmail: optionalSupportEmail });
 
 const tokenValidationSchema = z.object({
   cfAccountId: z.string().trim().min(1).max(100),
@@ -66,7 +60,6 @@ async function accountList(filter: z.infer<typeof accountListQuerySchema>) {
   const result = await pool.query(`
     SELECT a.id, a.name, a.provider_mode AS "providerMode", a.cf_account_id AS "cfAccountId",
            a.status, a.tunnel_limit AS "tunnelLimit", a.soft_tunnel_limit AS "softTunnelLimit",
-           a.support_email AS "supportEmail",
            a.rdp_allowed_emails AS "rdpAllowedEmails",
            a.last_synced_at AS "lastSyncedAt", a.last_error AS "lastError", a.created_at AS "createdAt",
            COALESCE((SELECT count(*)::int FROM stores s WHERE s.account_id = a.id), 0) AS "storeCount",
@@ -202,15 +195,14 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
 
     const account = await withTransaction(async (client) => {
       const inserted = await client.query(
-        `INSERT INTO cloudflare_accounts(name, provider_mode, cf_account_id, api_token_encrypted, status, soft_tunnel_limit, support_email, rdp_allowed_emails, last_synced_at)
-         VALUES ($1, $2, $3, $4, 'active', $5, $6, $7, now()) RETURNING id`,
+        `INSERT INTO cloudflare_accounts(name, provider_mode, cf_account_id, api_token_encrypted, status, soft_tunnel_limit, rdp_allowed_emails, last_synced_at)
+         VALUES ($1, $2, $3, $4, 'active', $5, $6, now()) RETURNING id`,
         [
           body.name,
           body.providerMode,
           body.cfAccountId ?? null,
           body.apiToken ? encryptSecret(body.apiToken) : null,
           body.softTunnelLimit,
-          body.supportEmail,
           body.rdpAllowedEmails
         ]
       );
@@ -241,31 +233,6 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
       return accountId;
     });
     return reply.code(201).send({ id: account });
-  });
-
-  app.patch("/api/accounts/:id/support", { preHandler: requireAuth }, async (request, reply) => {
-    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
-    const body = accountSupportSchema.parse(request.body);
-    const updated = await withTransaction(async (client) => {
-      const result = await client.query(
-        `UPDATE cloudflare_accounts
-            SET support_email = $1, updated_at = now()
-          WHERE id = $2
-          RETURNING id, support_email AS "supportEmail"`,
-        [body.supportEmail, id]
-      );
-      if (!result.rowCount) return null;
-      await writeAudit({
-        actorUserId: request.authUser!.id,
-        action: "account.support_email_updated",
-        entityType: "cloudflare_account",
-        entityId: id,
-        details: { supportEmail: body.supportEmail }
-      }, client);
-      return result.rows[0];
-    });
-    if (!updated) return reply.code(404).send({ error: "Account not found" });
-    return { account: updated };
   });
 
   app.delete("/api/accounts/:id", { preHandler: requireAuth }, async (request, reply) => {
@@ -376,7 +343,14 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/accounts/sync-all", { preHandler: requireAuth }, async () => {
     const accounts = await pool.query("SELECT id FROM cloudflare_accounts ORDER BY created_at ASC");
     const results: AccountSyncResult[] = [];
-    for (const account of accounts.rows) results.push(await synchronizeAccount(account.id));
+    let nextIndex = 0;
+    const worker = async () => {
+      while (nextIndex < accounts.rows.length) {
+        const account = accounts.rows[nextIndex++]!;
+        results.push(await synchronizeAccount(account.id));
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(5, accounts.rows.length) }, () => worker()));
     return { success: results.every((result) => result.success), results };
   });
 }
