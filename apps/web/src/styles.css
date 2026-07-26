@@ -391,6 +391,7 @@ tbody tr:hover td { background: #fbfcfb; }
 .command-mode-toggle button:hover { color: var(--ink); }
 .command-mode-toggle button.active { color: var(--ink); background: white; box-shadow: 0 1px 3px rgba(28, 42, 33, .13); }
 .command-script-picker { display: grid; grid-template-columns: minmax(0, 1fr) 145px; align-items: end; gap: 9px; }
+.command-saved-script { display: flex; flex-direction: column; gap: 10px; }
 .command-saved-script-field .searchable-select-menu { max-height: 280px; }
 .command-inline-script { display: flex; flex-direction: column; gap: 8px; }
 .command-inline-heading { min-height: 38px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }

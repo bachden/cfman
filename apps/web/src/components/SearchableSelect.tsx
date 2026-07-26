@@ -18,6 +18,7 @@ export function SearchableSelect({
   defaultValue = "",
   value,
   ariaLabel,
+  placeholder,
   emptyMessage = "No matching options",
   onValueChange,
   actions = []
@@ -27,11 +28,14 @@ export function SearchableSelect({
   defaultValue?: string;
   value?: string;
   ariaLabel: string;
+  placeholder?: string;
   emptyMessage?: string;
   onValueChange?: (value: string) => void;
   actions?: SearchableSelectAction[];
 }) {
-  const initial = options.find((option) => option.value === defaultValue) ?? options[0];
+  const initial = value !== undefined
+    ? options.find((option) => option.value === value)
+    : options.find((option) => option.value === defaultValue) ?? options[0];
   const [internalValue, setInternalValue] = useState(initial?.value ?? "");
   const [query, setQuery] = useState(initial?.label ?? "");
   const [open, setOpen] = useState(false);
@@ -39,6 +43,10 @@ export function SearchableSelect({
   const rootRef = useRef<HTMLDivElement>(null);
   const listId = useId();
   const selectedValue = value ?? internalValue;
+  const resetQuery = () => {
+    const selected = options.find((option) => option.value === selectedValue);
+    setQuery(selected?.label ?? (value === undefined ? options[0]?.label ?? "" : ""));
+  };
   const filteredOptions = useMemo(() => {
     const normalized = query.trim().toLowerCase();
     if (!normalized || options.some((option) => option.value === selectedValue && option.label === query)) return options;
@@ -53,14 +61,13 @@ export function SearchableSelect({
   useEffect(() => {
     const close = (event: PointerEvent) => {
       if (!rootRef.current?.contains(event.target as Node)) {
-        const selected = options.find((option) => option.value === selectedValue) ?? options[0];
-        setQuery(selected?.label ?? "");
+        resetQuery();
         setOpen(false);
       }
     };
     document.addEventListener("pointerdown", close);
     return () => document.removeEventListener("pointerdown", close);
-  }, [options, selectedValue]);
+  }, [options, selectedValue, value]);
 
   const select = (option: SearchableSelectOption) => {
     setInternalValue(option.value);
@@ -75,8 +82,7 @@ export function SearchableSelect({
       ref={rootRef}
       onBlur={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-          const selected = options.find((option) => option.value === selectedValue) ?? options[0];
-          setQuery(selected?.label ?? "");
+          resetQuery();
           setOpen(false);
         }
       }}
@@ -85,6 +91,7 @@ export function SearchableSelect({
       <div className="searchable-select-control">
         <input
           value={query}
+          placeholder={placeholder}
           role="combobox"
           aria-label={ariaLabel}
           aria-autocomplete="list"
@@ -114,8 +121,7 @@ export function SearchableSelect({
               event.preventDefault();
               if (filteredOptions[activeIndex]) select(filteredOptions[activeIndex]);
             } else if (event.key === "Escape") {
-              const selected = options.find((option) => option.value === selectedValue) ?? options[0];
-              setQuery(selected?.label ?? "");
+              resetQuery();
               setOpen(false);
             }
           }}
