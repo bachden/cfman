@@ -72,8 +72,8 @@ export function ExecutionLog({ storeId, execution }: { storeId: string; executio
     {appliedVariables.length > 0 && <details className="execution-applied-variables"><summary>Applied arguments ({appliedVariables.length})</summary>
       <div className="execution-applied-variable-row execution-applied-variable-row-header" aria-hidden="true"><span>Name</span><span>Value</span><span>Source</span></div>
       <div className="execution-applied-variable-list">{appliedVariables.map(([name, value]) => <div className="execution-applied-variable-row" key={name}>
-        <code className="execution-applied-variable-name">{name}</code>
-        <code className="execution-applied-variable-value">{value}</code>
+        <code className="execution-applied-variable-name mono">{name}</code>
+        <code className="execution-applied-variable-value mono">{value}</code>
         <span className="execution-applied-variable-source">{formatArgumentSource(execution.argumentSources?.[name])}</span>
       </div>)}</div>
     </details>}

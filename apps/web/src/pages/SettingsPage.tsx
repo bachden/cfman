@@ -51,9 +51,9 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
     mutationFn: () => api.put<{ variables: ExecutionVariables }>("/api/settings/execution-variables", { variables: globalVariables }),
     onSuccess: async () => {
       await queryClient.invalidateQueries({ queryKey: ["settings"] });
-      toast.success("Global execution variables updated");
+      toast.success("Global environment variables updated");
     },
-    onError: (requestError) => toast.error(requestError instanceof Error ? requestError.message : "Unable to update global execution variables")
+    onError: (requestError) => toast.error(requestError instanceof Error ? requestError.message : "Unable to update global environment variables")
   });
   const rotateMcp = useMutation({
     mutationFn: () => api.post<McpSettingsResponse>("/api/settings/mcp/rotate"),
@@ -93,7 +93,14 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
     const form = new FormData(event.currentTarget);
     updateSettings.mutate({ publicBaseUrl: form.get("publicBaseUrl")?.toString() ?? "" });
   };
-  const logout = async () => { await api.post("/api/auth/logout"); queryClient.clear(); onLogout(); };
+  const logout = async () => {
+    try {
+      await api.post("/api/auth/logout");
+    } finally {
+      onLogout();
+      window.location.assign("/");
+    }
+  };
 
   return <div className="page settings-page">
     <PageHeader title="Settings" eyebrow="System and security" />
@@ -107,7 +114,7 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
     </section>
 
     <section className="settings-section execution-variable-settings-section">
-      <header><span><Braces size={19} /></span><div className="settings-heading-copy"><h2>Global execution variables</h2><small>Inherited by every saved and inline script execution. Account, zone, store, computer, and run overrides take precedence.</small></div></header>
+      <header><span><Braces size={19} /></span><div className="settings-heading-copy"><h2>Global environment variables</h2><small>Inherited by every saved and inline script execution. Account, zone, store, computer, and run overrides take precedence.</small></div></header>
       <div className="settings-form execution-variable-settings-body"><ExecutionVariablesEditor variables={globalVariables} savedVariables={settingsData?.settings.executionVariables ?? {}} onChange={setGlobalVariables} /><div className="form-actions"><AddVariableButton variables={globalVariables} onChange={setGlobalVariables} /><button className="button button-primary" type="button" disabled={settingsLoading || updateExecutionVariables.isPending} onClick={() => updateExecutionVariables.mutate()}><Save size={15} />{updateExecutionVariables.isPending ? "Saving..." : "Save variables"}</button></div></div>
     </section>
 

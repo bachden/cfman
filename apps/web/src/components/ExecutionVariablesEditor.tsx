@@ -90,7 +90,7 @@ export function ScriptArgumentsEditor({ argumentsList, onChange }: { argumentsLi
       <label className="field"><span className="field-label">Default value</span><input value={argument.defaultValue} onChange={(event) => onChange(argumentsList.map((item, itemIndex) => itemIndex === index ? { ...item, defaultValue: event.target.value } : item))} /></label>
       <label className="field script-argument-description"><span className="field-label">Description</span><input value={argument.description} placeholder="Optional operator context" onChange={(event) => onChange(argumentsList.map((item, itemIndex) => itemIndex === index ? { ...item, description: event.target.value } : item))} /></label>
       <div className="field script-argument-required-field"><span className="field-label" aria-hidden="true">&nbsp;</span><label className="script-argument-required"><input type="checkbox" checked={argument.required} onChange={(event) => onChange(argumentsList.map((item, itemIndex) => itemIndex === index ? { ...item, required: event.target.checked } : item))} />Required</label></div>
-      <button className="icon-button account-delete" type="button" title={`Remove ${argument.name}`} aria-label={`Remove ${argument.name}`} onClick={() => onChange(argumentsList.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={15} /></button>
+      <div className="field script-argument-delete-field"><span className="field-label" aria-hidden="true">&nbsp;</span><button className="icon-button account-delete" type="button" title={`Remove ${argument.name}`} aria-label={`Remove ${argument.name}`} onClick={() => onChange(argumentsList.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={15} /></button></div>
     </div>)}</div> : <div className="quiet-empty">This script has no declared arguments.</div>}
   </section>;
 }
@@ -135,7 +135,7 @@ export function ArgumentBindingsEditor({
           : <input value={binding.value} placeholder={argument.description || undefined} onChange={(event) => onChange({ ...bindings, [argument.name]: { type: "custom", value: event.target.value } })} aria-label={`Custom value for ${argument.name}`} />}
         {variesPerStore
           ? <span className="argument-binding-preview argument-binding-preview-hint">Resolved per store</span>
-          : <code className="argument-binding-preview" title="Effective value at execution time">{effectiveValue || "—"}</code>}
+          : <code className="argument-binding-preview mono" title="Effective value at execution time">{effectiveValue || "—"}</code>}
       </div>;
     })}</div>
   </section>;
