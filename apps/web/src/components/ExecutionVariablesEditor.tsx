@@ -59,18 +59,18 @@ export function ExecutionVariablesEditor({
   if (!entries.length) return <div className="quiet-empty">No variables configured at this scope.</div>;
   return <div className="execution-variable-editor">
     <div className="execution-variable-row execution-variable-row-header" aria-hidden="true"><span>Name</span><span>Value</span><span /></div>
-    <div className="execution-variable-list">{entries.map(([name, value]) => {
+    <div className="execution-variable-list">{entries.map(([name, value], index) => {
       const isBuiltIn = builtIns.includes(name);
       const isSaved = name in savedVariables;
       const isEditing = editingNames.has(name) || !isSaved;
-      if (!isEditing) return <div className="execution-variable-row execution-variable-row-display" key={name}>
+      if (!isEditing) return <div className="execution-variable-row execution-variable-row-display" key={index}>
         <code className="execution-variable-name-label">{name}</code>
         <span className="execution-variable-value-label">{value || "—"}</span>
         <div className="execution-variable-row-actions">
           <button className="icon-button" type="button" title={`Edit ${name}`} aria-label={`Edit ${name}`} onClick={() => setEditingNames((current) => new Set(current).add(name))}><Pencil size={14} /></button>
         </div>
       </div>;
-      return <div className="execution-variable-row" key={name}>
+      return <div className="execution-variable-row" key={index}>
         <input className="mono-input" value={name} disabled={isBuiltIn} onChange={(event) => rename(name, event.target.value)} aria-label={`Variable name ${name}`} />
         <input value={value} onChange={(event) => onChange({ ...variables, [name]: event.target.value })} aria-label={`Value for ${name}`} />
         <div className="execution-variable-row-actions">
@@ -85,7 +85,7 @@ export function ExecutionVariablesEditor({
 export function ScriptArgumentsEditor({ argumentsList, onChange }: { argumentsList: ScriptArgument[]; onChange: (argumentsList: ScriptArgument[]) => void }) {
   return <section className="script-arguments-editor">
     <header><div><h3>Script arguments</h3><span>The default value is used unless an operator maps this argument to a resolved variable or a custom value when preparing a run.</span></div><button className="button button-secondary button-small" type="button" onClick={() => onChange([...argumentsList, { name: `ARGUMENT_${argumentsList.length + 1}`, defaultValue: "", description: "", required: false }])}><Plus size={14} />Argument</button></header>
-    {argumentsList.length ? <div className="script-argument-list">{argumentsList.map((argument, index) => <div className="script-argument-row" key={`${index}-${argument.name}`}>
+    {argumentsList.length ? <div className="script-argument-list">{argumentsList.map((argument, index) => <div className="script-argument-row" key={index}>
       <label className="field"><span className="field-label">Name</span><input className="mono-input" value={argument.name} onChange={(event) => onChange(argumentsList.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value.toUpperCase() } : item))} /></label>
       <label className="field"><span className="field-label">Default value</span><input value={argument.defaultValue} onChange={(event) => onChange(argumentsList.map((item, itemIndex) => itemIndex === index ? { ...item, defaultValue: event.target.value } : item))} /></label>
       <label className="field script-argument-description"><span className="field-label">Description</span><input value={argument.description} placeholder="Optional operator context" onChange={(event) => onChange(argumentsList.map((item, itemIndex) => itemIndex === index ? { ...item, description: event.target.value } : item))} /></label>
