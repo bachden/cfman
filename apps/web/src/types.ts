@@ -6,6 +6,11 @@ export type User = {
 
 export type ExecutionVariables = Record<string, string>;
 
+// Store identity values the server injects into every execution. A script that
+// declares an argument under one of these names replaces it for that run, so
+// the UI warns wherever an operator can create that collision.
+export const STORE_BUILT_IN_VARIABLES = ["TENANT_CODE", "STORE_NAME", "STORE_CODE"];
+
 export type ScriptArgument = {
   name: string;
   defaultValue: string;

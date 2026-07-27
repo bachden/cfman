@@ -250,8 +250,14 @@ export function resolveArgumentValues(
     else values[key] = expandArgumentValue(argument.defaultValue, availableVariables);
   }
   // Built-in store identity values are always available to every script,
-  // regardless of what arguments it declares or how they're mapped.
-  for (const name of STORE_BUILT_IN_VARIABLES) values[name] = availableVariables[name] ?? "";
+  // regardless of what arguments it declares or how they're mapped - but a
+  // script that declares an argument under a built-in name keeps the operator's
+  // mapping for it. Overwriting it here would silently discard the chosen
+  // binding while describeArgumentValueSources still recorded that binding,
+  // leaving history describing a value the run never used.
+  for (const name of STORE_BUILT_IN_VARIABLES) {
+    if (!(name in values)) values[name] = availableVariables[name] ?? "";
+  }
 
   const missing = argumentsList.filter((argument) => argument.required && !values[argument.name.toUpperCase()]);
   if (missing.length) throw new Error(`Required argument${missing.length === 1 ? "" : "s"} missing a value: ${missing.map((argument) => argument.name).join(", ")}`);

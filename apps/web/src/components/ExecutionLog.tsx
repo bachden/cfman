@@ -3,7 +3,7 @@ import { Ban, RefreshCw } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { api } from "../api";
-import type { ArgumentValueSource, StoreCommandExecution } from "../types";
+import { STORE_BUILT_IN_VARIABLES, type ArgumentValueSource, type StoreCommandExecution } from "../types";
 import { CopyButton } from "./CopyButton";
 
 type ArgumentValueScope = Extract<ArgumentValueSource, { origin: "variable" }>["scope"];
@@ -73,11 +73,20 @@ export function ExecutionLog({ storeId, execution }: { storeId: string; executio
   return <>
     {appliedVariables.length > 0 && <details className="execution-applied-variables"><summary>Applied arguments ({appliedVariables.length})</summary>
       <div className="execution-applied-variable-row execution-applied-variable-row-header" aria-hidden="true"><span>Name</span><span>Value</span><span>Source</span></div>
-      <div className="execution-applied-variable-list">{appliedVariables.map(([name, value]) => <div className="execution-applied-variable-row" key={name}>
-        <code className="execution-applied-variable-name mono">{name}</code>
-        <code className="execution-applied-variable-value mono">{value}</code>
-        <span className="execution-applied-variable-source">{formatArgumentSource(execution.argumentSources?.[name])}</span>
-      </div>)}</div>
+      <div className="execution-applied-variable-list">{appliedVariables.map(([name, value]) => {
+        const source = execution.argumentSources?.[name];
+        // The built-ins are injected under their own name from the built-in
+        // scope. Anything else carrying a built-in name is a declared argument
+        // that took the name over for this run, so the store identity value is
+        // not what the script saw.
+        const shadowsBuiltIn = STORE_BUILT_IN_VARIABLES.includes(name)
+          && !(source?.origin === "variable" && source.variable === name && source.scope === "built-in");
+        return <div className="execution-applied-variable-row" key={name}>
+          <code className="execution-applied-variable-name mono">{name}{shadowsBuiltIn && <span className="script-argument-shadow-flag" title={`${name} is a built-in store identity variable, but this script declares an argument with the same name. The script received the mapped argument value below instead of the store's ${name}.`}>shadows built-in</span>}</code>
+          <code className="execution-applied-variable-value mono">{value}</code>
+          <span className="execution-applied-variable-source">{formatArgumentSource(source)}</span>
+        </div>;
+      })}</div>
     </details>}
     <div className="execution-log-actions">
       <span><code>{Math.round(execution.timeoutMs / 1000)}s timeout</code>{current.taskId ? <> · Task <code>{current.taskId}</code>{current.processId ? <> · PID <code>{current.processId}</code></> : null}</> : " · No task metadata reported yet"}</span>

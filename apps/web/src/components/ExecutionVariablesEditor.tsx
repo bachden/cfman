@@ -1,6 +1,6 @@
 import { Check, Pencil, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
-import type { ArgumentBindings, ExecutionVariables, ScriptArgument } from "../types";
+import { STORE_BUILT_IN_VARIABLES, type ArgumentBindings, type ExecutionVariables, type ScriptArgument } from "../types";
 import { FieldHelp } from "./FieldHelp";
 
 // Mirrors the server's expansion rule (apps/server/src/lib/execution-variables.ts)
@@ -131,17 +131,18 @@ export function ScriptArgumentsEditor({ argumentsList, onChange }: { argumentsLi
     ));
   };
   return <section className="script-arguments-editor">
-    <header><div><h3>Script arguments</h3><span>Defined per version: saving a change to this list creates a new script version. The default value is used unless an operator maps the argument to a resolved variable or a custom value when preparing a run.</span></div><button className="button button-secondary button-small" type="button" onClick={add}><Plus size={14} />Argument</button></header>
+    <header><div><h3>Script arguments</h3><span>Defined per version: saving a change to this list creates a new script version. The default value is used unless an operator maps the argument to a resolved variable or a custom value when preparing a run. Avoid naming an argument after a built-in ({STORE_BUILT_IN_VARIABLES.join(", ")}) - the argument replaces it inside the script. <FieldHelp text="The server injects the store identity built-ins into every execution. If a script declares an argument under one of those names, that argument's mapped value wins and the script no longer sees the store identity value under that name. Pick a different argument name when the script needs both." /></span></div><button className="button button-secondary button-small" type="button" onClick={add}><Plus size={14} />Argument</button></header>
     {argumentsList.length ? <div className="script-argument-list">{argumentsList.map((argument, index) => {
+      const shadowsBuiltIn = STORE_BUILT_IN_VARIABLES.includes(argument.name.toUpperCase());
       if (!editingIndexes.has(index)) return <div className="script-argument-row script-argument-row-display" key={index}>
-        <code className="script-argument-name-label">{argument.name}</code>
+        <code className="script-argument-name-label">{argument.name}{shadowsBuiltIn && <span className="script-argument-shadow-flag" title={`${argument.name} is a built-in store identity variable. This argument replaces it inside the script.`}>shadows built-in</span>}</code>
         <span className="script-argument-value-label">{argument.defaultValue || "—"}</span>
         <span className="script-argument-value-label script-argument-description">{argument.description || "—"}</span>
         <span className="script-argument-required-label">{argument.required ? "Required" : ""}</span>
         <button className="icon-button" type="button" title={`Edit ${argument.name}`} aria-label={`Edit ${argument.name}`} onClick={() => startEditing(index)}><Pencil size={14} /></button>
       </div>;
       return <div className="script-argument-row" key={index}>
-        <label className="field"><span className="field-label">Name</span><input className="mono-input" value={argument.name} onChange={(event) => update(index, { name: event.target.value.toUpperCase() })} /></label>
+        <label className="field"><span className="field-label">Name{shadowsBuiltIn && <span className="script-argument-shadow-flag">shadows built-in</span>}</span><input className={`mono-input${shadowsBuiltIn ? " input-warning" : ""}`} value={argument.name} onChange={(event) => update(index, { name: event.target.value.toUpperCase() })} /></label>
         <label className="field"><span className="field-label">Default value</span><input value={argument.defaultValue} onChange={(event) => update(index, { defaultValue: event.target.value })} /></label>
         <label className="field script-argument-description"><span className="field-label">Description</span><input value={argument.description} placeholder="Optional operator context" onChange={(event) => update(index, { description: event.target.value })} /></label>
         <div className="field script-argument-required-field"><span className="field-label" aria-hidden="true">&nbsp;</span><label className="script-argument-required"><input type="checkbox" checked={argument.required} onChange={(event) => update(index, { required: event.target.checked })} />Required</label></div>

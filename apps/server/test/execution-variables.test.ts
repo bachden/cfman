@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   applyScriptArguments,
+  describeArgumentValueSources,
   expandArgumentValue,
   expandVariableReferences,
   resolveArgumentValues,
@@ -162,6 +163,31 @@ test("a quote in an expanded value cannot break out of its assignment", () => {
   // pwsh is not assumed to be installed, so this side is checked by construction.
   const powershell = applyScriptArguments("$true", "powershell", values);
   assert.match(powershell, /^\$ARG = '''; touch .+; x='''$/m);
+});
+
+test("an argument declared under a built-in name keeps the operator's mapping", () => {
+  const scope = storeScope({ GREETING_FROM_STORE: "Hello, this is PhamHaiTest58!!!" }, { GREETING_FROM_STORE: "store" });
+  const available = expandVariableReferences(scope.raw, scope.sources);
+  const argumentsList = [argument("STORE_NAME", { required: true }), argument("STORE_TENANT", { required: true })];
+  const bindings = {
+    STORE_NAME: { type: "variable" as const, variable: "GREETING_FROM_STORE" },
+    STORE_TENANT: { type: "variable" as const, variable: "GREETING_FROM_STORE" }
+  };
+  const values = resolveArgumentValues(argumentsList, available, bindings);
+  assert.equal(values.STORE_NAME, "Hello, this is PhamHaiTest58!!!", "the built-in must not overwrite a declared argument");
+  assert.equal(values.STORE_TENANT, "Hello, this is PhamHaiTest58!!!");
+  // The recorded source has always claimed the binding, so the value has to agree with it.
+  const sources = describeArgumentValueSources(argumentsList, scope.sources, bindings);
+  assert.deepEqual(sources.STORE_NAME, { origin: "variable", variable: "GREETING_FROM_STORE", scope: "store" });
+});
+
+test("built-in identity is still injected for arguments a script does not declare", () => {
+  const scope = storeScope();
+  const available = expandVariableReferences(scope.raw, scope.sources);
+  const values = resolveArgumentValues([argument("OTHER")], available, {});
+  assert.equal(values.STORE_NAME, "PhamHaiTest58");
+  assert.equal(values.TENANT_CODE, "dcorp");
+  assert.equal(values.STORE_CODE, "pmha_58");
 });
 
 test("a required argument that expands to nothing is still rejected", () => {
