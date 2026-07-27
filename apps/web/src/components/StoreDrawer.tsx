@@ -868,6 +868,14 @@ function ExpiryLine({ expiresAt }: { expiresAt: string }) {
   return <div className="expiry-line">{formatExpiry(expiresAt)}</div>;
 }
 
+// Store administrators paste this into an elevated Command Prompt as often as an
+// elevated PowerShell, so the one-liner invokes powershell.exe explicitly instead of
+// relying on the host shell. TLS 1.2 must be forced here, before the download, for
+// stores on older Windows builds that still default to TLS 1.0.
+function windowsBootstrapCommand(url: string): string {
+  return `powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; irm '${url}' | iex"`;
+}
+
 export function EnrollmentCommands({ result, defaultPlatform = "windows" }: { result: EnrollmentResult; defaultPlatform?: "windows" | "unix" }) {
   const [platform, setPlatform] = useState<"windows" | "unix">(defaultPlatform);
   const { data } = useQuery({ queryKey: ["settings"], queryFn: () => api.get<{ settings: AppSettings }>("/api/settings") });
@@ -878,9 +886,9 @@ export function EnrollmentCommands({ result, defaultPlatform = "windows" }: { re
   };
   const powershellUrl = withCurrentBaseUrl(result.urls.powershell);
   const shellUrl = withCurrentBaseUrl(result.urls.shell);
-  const command = platform === "windows" ? `[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; irm '${powershellUrl}' | iex` : `curl -fsSL '${shellUrl}' | sudo bash`;
+  const command = platform === "windows" ? windowsBootstrapCommand(powershellUrl) : `curl -fsSL '${shellUrl}' | sudo bash`;
   return <div className="enrollment-command-stack">
-    <div className="command-section"><div className="command-head"><div className="segmented compact"><button type="button" className={platform === "windows" ? "active" : ""} onClick={() => setPlatform("windows")}>PowerShell</button><button type="button" className={platform === "unix" ? "active" : ""} onClick={() => setPlatform("unix")}>Bash</button></div><CopyButton value={command} label="Copy command" /></div><pre><code>{command}</code></pre>{platform === "windows" && <div className="command-note"><ShieldAlert size={14} />Run PowerShell as Administrator.</div>}<ExpiryLine expiresAt={result.expiresAt} /></div>
+    <div className="command-section"><div className="command-head"><div className="segmented compact"><button type="button" className={platform === "windows" ? "active" : ""} onClick={() => setPlatform("windows")}>PowerShell</button><button type="button" className={platform === "unix" ? "active" : ""} onClick={() => setPlatform("unix")}>Bash</button></div><CopyButton value={command} label="Copy command" /></div><pre><code>{command}</code></pre>{platform === "windows" && <div className="command-note"><ShieldAlert size={14} />Run as Administrator, from Command Prompt or PowerShell.</div>}<ExpiryLine expiresAt={result.expiresAt} /></div>
   </div>;
 }
 
@@ -912,7 +920,7 @@ function DiagnosticCommands({ result }: { result: DiagnoseResult }) {
   };
   const powershellUrl = withCurrentBaseUrl(result.urls.powershell);
   const shellUrl = withCurrentBaseUrl(result.urls.shell);
-  const command = platform === "windows" ? `[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; irm '${powershellUrl}' | iex` : `curl -fsSL '${shellUrl}' | bash`;
+  const command = platform === "windows" ? windowsBootstrapCommand(powershellUrl) : `curl -fsSL '${shellUrl}' | bash`;
   return <div className="command-section">
     <div className="command-head">
       <div className="segmented compact"><button type="button" className={platform === "windows" ? "active" : ""} onClick={() => setPlatform("windows")}>PowerShell</button><button type="button" className={platform === "unix" ? "active" : ""} onClick={() => setPlatform("unix")}>Bash</button></div>
