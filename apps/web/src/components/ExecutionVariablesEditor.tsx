@@ -1,4 +1,4 @@
-import { Check, Pencil, Plus, Trash2 } from "lucide-react";
+import { Check, Pencil, Plus, Trash2, X } from "lucide-react";
 import { useState } from "react";
 import { STORE_BUILT_IN_VARIABLES, type ArgumentBindings, type ExecutionVariables, type ScriptArgument } from "../types";
 import { FieldHelp } from "./FieldHelp";
@@ -51,6 +51,9 @@ export function ExecutionVariablesEditor({
   builtIns?: string[];
 }) {
   const [editingNames, setEditingNames] = useState<Set<string>>(new Set());
+  // The value a row held when it was opened, so cancelling can put it back.
+  // Keyed by the row's current name, which moves when the row is renamed.
+  const [snapshots, setSnapshots] = useState<Map<string, { name: string; value: string }>>(new Map());
   const entries = Object.entries(variables);
   const rename = (oldName: string, nextName: string) => {
     const normalized = nextName.toUpperCase();
@@ -62,6 +65,40 @@ export function ExecutionVariablesEditor({
       next.add(normalized);
       return next;
     });
+    setSnapshots((current) => {
+      const snapshot = current.get(oldName);
+      if (!snapshot) return current;
+      const next = new Map(current);
+      next.delete(oldName);
+      next.set(normalized, snapshot);
+      return next;
+    });
+  };
+  const startEditing = (name: string) => {
+    setEditingNames((current) => new Set(current).add(name));
+    setSnapshots((current) => new Map(current).set(name, { name, value: variables[name] ?? "" }));
+  };
+  // Cancel restores the opened value, including a name that was edited. A row
+  // that was never saved has nothing to restore to, so cancelling drops it.
+  const cancelEditing = (name: string) => {
+    const snapshot = snapshots.get(name);
+    if (snapshot) {
+      onChange(Object.fromEntries(entries.map(([entryName, value]) => entryName === name ? [snapshot.name, snapshot.value] : [entryName, value])));
+    } else {
+      onChange(Object.fromEntries(entries.filter(([entryName]) => entryName !== name)));
+    }
+    setEditingNames((current) => {
+      const next = new Set(current);
+      next.delete(name);
+      if (snapshot) next.delete(snapshot.name);
+      return next;
+    });
+    setSnapshots((current) => {
+      if (!current.has(name)) return current;
+      const next = new Map(current);
+      next.delete(name);
+      return next;
+    });
   };
   const remove = (name: string) => {
     onChange(Object.fromEntries(entries.filter(([entryName]) => entryName !== name)));
@@ -71,13 +108,27 @@ export function ExecutionVariablesEditor({
       next.delete(name);
       return next;
     });
+    setSnapshots((current) => {
+      if (!current.has(name)) return current;
+      const next = new Map(current);
+      next.delete(name);
+      return next;
+    });
   };
-  const stopEditing = (name: string) => setEditingNames((current) => {
-    if (!current.has(name)) return current;
-    const next = new Set(current);
-    next.delete(name);
-    return next;
-  });
+  const stopEditing = (name: string) => {
+    setEditingNames((current) => {
+      if (!current.has(name)) return current;
+      const next = new Set(current);
+      next.delete(name);
+      return next;
+    });
+    setSnapshots((current) => {
+      if (!current.has(name)) return current;
+      const next = new Map(current);
+      next.delete(name);
+      return next;
+    });
+  };
   if (!entries.length) return <div className="quiet-empty">No variables configured at this scope.</div>;
   return <div className="execution-variable-editor">
     <div className="execution-variable-row execution-variable-row-header" aria-hidden="true"><span>Name</span><span>Value</span><span /></div>
@@ -89,14 +140,15 @@ export function ExecutionVariablesEditor({
         <code className="execution-variable-name-label">{name}</code>
         <span className="execution-variable-value-label">{value || "—"}</span>
         <div className="execution-variable-row-actions">
-          <button className="icon-button" type="button" title={`Edit ${name}`} aria-label={`Edit ${name}`} onClick={() => setEditingNames((current) => new Set(current).add(name))}><Pencil size={14} /></button>
+          <button className="icon-button" type="button" title={`Edit ${name}`} aria-label={`Edit ${name}`} onClick={() => startEditing(name)}><Pencil size={14} /></button>
         </div>
       </div>;
-      return <div className="execution-variable-row" key={index}>
+      return <div className="execution-variable-row" key={index} onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); cancelEditing(name); } }}>
         <input className="mono-input" value={name} disabled={isBuiltIn} onChange={(event) => rename(name, event.target.value)} aria-label={`Variable name ${name}`} />
         <input value={value} onChange={(event) => onChange({ ...variables, [name]: event.target.value })} aria-label={`Value for ${name}`} />
         <div className="execution-variable-row-actions">
           {isSaved && <button className="icon-button" type="button" title={`Done editing ${name}`} aria-label={`Done editing ${name}`} onClick={() => stopEditing(name)}><Check size={14} /></button>}
+          <button className="icon-button" type="button" title={`Cancel editing ${name} (Esc)`} aria-label={`Cancel editing ${name}`} onClick={() => cancelEditing(name)}><X size={14} /></button>
           <button className="icon-button account-delete" type="button" title={`Remove ${name}`} aria-label={`Remove ${name}`} disabled={isBuiltIn} onClick={() => remove(name)}><Trash2 size={15} /></button>
         </div>
       </div>;
@@ -110,25 +162,56 @@ export function ExecutionVariablesEditor({
 // depend on cannot be dropped with a single stray click.
 export function ScriptArgumentsEditor({ argumentsList, onChange }: { argumentsList: ScriptArgument[]; onChange: (argumentsList: ScriptArgument[]) => void }) {
   const [editingIndexes, setEditingIndexes] = useState<Set<number>>(new Set());
-  const startEditing = (index: number) => setEditingIndexes((current) => new Set(current).add(index));
-  const stopEditing = (index: number) => setEditingIndexes((current) => {
-    if (!current.has(index)) return current;
-    const next = new Set(current);
-    next.delete(index);
-    return next;
-  });
+  // The definition a row held when it was opened. A row added this session has
+  // no earlier state, so it is snapshotted as null and cancelling drops it.
+  const [snapshots, setSnapshots] = useState<Map<number, ScriptArgument | null>>(new Map());
+  const startEditing = (index: number, snapshot: ScriptArgument | null) => {
+    setEditingIndexes((current) => new Set(current).add(index));
+    setSnapshots((current) => new Map(current).set(index, snapshot));
+  };
+  const closeRow = (index: number) => {
+    setEditingIndexes((current) => {
+      if (!current.has(index)) return current;
+      const next = new Set(current);
+      next.delete(index);
+      return next;
+    });
+    setSnapshots((current) => {
+      if (!current.has(index)) return current;
+      const next = new Map(current);
+      next.delete(index);
+      return next;
+    });
+  };
   const update = (index: number, patch: Partial<ScriptArgument>) =>
     onChange(argumentsList.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item));
   const add = () => {
     onChange([...argumentsList, { name: `ARGUMENT_${argumentsList.length + 1}`, defaultValue: "", description: "", required: false }]);
-    startEditing(argumentsList.length);
+    startEditing(argumentsList.length, null);
   };
-  const remove = (index: number) => {
-    onChange(argumentsList.filter((_, itemIndex) => itemIndex !== index));
-    // Rows after the removed one shift down, so the open-row set shifts with them.
+  // Rows after a removed one shift down, so the open-row set and the snapshots
+  // shift with them.
+  const shiftAfterRemoval = (index: number) => {
     setEditingIndexes((current) => new Set(
       [...current].filter((entry) => entry !== index).map((entry) => entry > index ? entry - 1 : entry)
     ));
+    setSnapshots((current) => new Map(
+      [...current].filter(([entry]) => entry !== index).map(([entry, snapshot]) => [entry > index ? entry - 1 : entry, snapshot])
+    ));
+  };
+  const remove = (index: number) => {
+    onChange(argumentsList.filter((_, itemIndex) => itemIndex !== index));
+    shiftAfterRemoval(index);
+  };
+  const cancelEditing = (index: number) => {
+    const snapshot = snapshots.get(index);
+    if (snapshot) {
+      onChange(argumentsList.map((item, itemIndex) => itemIndex === index ? snapshot : item));
+      closeRow(index);
+      return;
+    }
+    onChange(argumentsList.filter((_, itemIndex) => itemIndex !== index));
+    shiftAfterRemoval(index);
   };
   return <section className="script-arguments-editor">
     <header><div><h3>Script arguments</h3><span>Defined per version: saving a change to this list creates a new script version. The default value is used unless an operator maps the argument to a resolved variable or a custom value when preparing a run. Avoid naming an argument after a built-in ({STORE_BUILT_IN_VARIABLES.join(", ")}) - the argument replaces it inside the script. <FieldHelp text="The server injects the store identity built-ins into every execution. If a script declares an argument under one of those names, that argument's mapped value wins and the script no longer sees the store identity value under that name. Pick a different argument name when the script needs both." /></span></div><button className="button button-secondary button-small" type="button" onClick={add}><Plus size={14} />Argument</button></header>
@@ -139,15 +222,16 @@ export function ScriptArgumentsEditor({ argumentsList, onChange }: { argumentsLi
         <span className="script-argument-value-label">{argument.defaultValue || "—"}</span>
         <span className="script-argument-value-label script-argument-description">{argument.description || "—"}</span>
         <span className="script-argument-required-label">{argument.required ? "Required" : ""}</span>
-        <button className="icon-button" type="button" title={`Edit ${argument.name}`} aria-label={`Edit ${argument.name}`} onClick={() => startEditing(index)}><Pencil size={14} /></button>
+        <button className="icon-button" type="button" title={`Edit ${argument.name}`} aria-label={`Edit ${argument.name}`} onClick={() => startEditing(index, argument)}><Pencil size={14} /></button>
       </div>;
-      return <div className="script-argument-row" key={index}>
+      return <div className="script-argument-row" key={index} onKeyDown={(event) => { if (event.key === "Escape") { event.stopPropagation(); cancelEditing(index); } }}>
         <label className="field"><span className="field-label">Name{shadowsBuiltIn && <span className="script-argument-shadow-flag">shadows built-in</span>}</span><input className={`mono-input${shadowsBuiltIn ? " input-warning" : ""}`} value={argument.name} onChange={(event) => update(index, { name: event.target.value.toUpperCase() })} /></label>
         <label className="field"><span className="field-label">Default value</span><input value={argument.defaultValue} onChange={(event) => update(index, { defaultValue: event.target.value })} /></label>
         <label className="field script-argument-description"><span className="field-label">Description</span><input value={argument.description} placeholder="Optional operator context" onChange={(event) => update(index, { description: event.target.value })} /></label>
         <div className="field script-argument-required-field"><span className="field-label" aria-hidden="true">&nbsp;</span><label className="script-argument-required"><input type="checkbox" checked={argument.required} onChange={(event) => update(index, { required: event.target.checked })} />Required</label></div>
         <div className="field script-argument-delete-field"><span className="field-label" aria-hidden="true">&nbsp;</span><div className="script-argument-row-actions">
-          <button className="icon-button" type="button" title={`Done editing ${argument.name}`} aria-label={`Done editing ${argument.name}`} onClick={() => stopEditing(index)}><Check size={14} /></button>
+          <button className="icon-button" type="button" title={`Done editing ${argument.name}`} aria-label={`Done editing ${argument.name}`} onClick={() => closeRow(index)}><Check size={14} /></button>
+          <button className="icon-button" type="button" title={`Cancel editing ${argument.name} (Esc)`} aria-label={`Cancel editing ${argument.name}`} onClick={() => cancelEditing(index)}><X size={14} /></button>
           <button className="icon-button account-delete" type="button" title={`Remove ${argument.name}`} aria-label={`Remove ${argument.name}`} onClick={() => remove(index)}><Trash2 size={15} /></button>
         </div></div>
       </div>;
