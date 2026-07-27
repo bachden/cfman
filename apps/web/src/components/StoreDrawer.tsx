@@ -168,11 +168,13 @@ export function StoreDrawer({ storeId, tab, onTabChange, onClose, zIndex }: { st
         </nav>
         {tab === "overall" && <div className="store-drawer-tab">
           <section className="store-drawer-section">
-            <header className="store-section-heading"><div><h3>Store overview</h3><span>Store assignment and infrastructure</span></div><div className="store-section-heading-actions"><button className="button button-secondary" type="button" onClick={() => setStoreVariablesOpen(true)}><Braces size={15} />Variables</button>{!currentStore.tunnelId && !(currentStore.enrollments ?? []).some((enrollment) => enrollment.isCurrent) && <button className="button button-secondary" type="button" onClick={() => setReassigningZone(true)}><Settings2 size={15} />Change account/zone</button>}</div></header>
+            <header className="store-section-heading"><div><h3>Store overview</h3><span>Store assignment and infrastructure</span></div><div className="store-section-heading-actions"><button className="button button-secondary" type="button" onClick={() => setStoreVariablesOpen(true)}><Braces size={15} />Variables</button></div></header>
             <dl className="detail-list">
               <div><dt>Store code</dt><dd>{currentStore.tenantCode} / {currentStore.storeCode}</dd></div>
               <div><dt>Account</dt><dd>{currentStore.accountName}</dd></div>
-              <div><dt>Zone</dt><dd>{currentStore.zoneName}</dd></div>
+              {/* Reassignment is driven by the zone - the account follows from it - so the
+                  action lives on the value it changes instead of in the section header. */}
+              <div><dt>Zone</dt><dd className="detail-value-row"><span>{currentStore.zoneName}</span>{!currentStore.tunnelId && !(currentStore.enrollments ?? []).some((enrollment) => enrollment.isCurrent) && <button className="button button-secondary button-small" type="button" title="Change account/zone" onClick={() => setReassigningZone(true)}><Settings2 size={14} />Change</button>}</dd></div>
               <div><dt>Tunnel</dt><dd>{currentStore.tunnelId ? currentStore.cfAccountId ? <a className="mono detail-link" href={`https://dash.cloudflare.com/${encodeURIComponent(currentStore.cfAccountId)}/tunnels/${encodeURIComponent(currentStore.tunnelId)}/overview`} target="_blank" rel="noreferrer" title="Open tunnel details in Cloudflare">{currentStore.tunnelName ?? currentStore.tunnelId}</a> : <span className="mono">{currentStore.tunnelName ?? currentStore.tunnelId}</span> : "Not provisioned"}</dd></div>
             </dl>
           </section>
