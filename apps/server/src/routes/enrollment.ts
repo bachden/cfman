@@ -1270,6 +1270,9 @@ if ($existingEnrollment) {
     Stop-Service -Name "cloudflared" -Force -ErrorAction SilentlyContinue
     Start-Process -FilePath (Join-Path $env:SystemRoot "System32\\sc.exe") -ArgumentList "delete", "cloudflared" -Wait -NoNewWindow
   }
+  # cloudflared's own uninstall does not remove this key, and a leftover key makes
+  # the next "service install" fail with "Cannot install event logger".
+  Remove-Item -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\Cloudflared" -Recurse -Force -ErrorAction SilentlyContinue
   Stop-ScheduledTask -TaskName "CloudflareManCommandAgent" -ErrorAction SilentlyContinue
   Unregister-ScheduledTask -TaskName "CloudflareManCommandAgent" -Confirm:$false -ErrorAction SilentlyContinue
   Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
@@ -1583,6 +1586,9 @@ try {
     Stop-Service -Name "cloudflared" -Force -ErrorAction SilentlyContinue
     Start-Process -FilePath (Join-Path $env:SystemRoot "System32\\sc.exe") -ArgumentList "delete", "cloudflared" -Wait -NoNewWindow
   }
+  # cloudflared's own uninstall does not remove this key, and a leftover key would make
+  # a future "service install" fail with "Cannot install event logger".
+  Remove-Item -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\Cloudflared" -Recurse -Force -ErrorAction SilentlyContinue
   $stateDirectory = Join-Path $env:ProgramData "cloudflare-man"
   if (Test-Path $stateDirectory) { Remove-Item $stateDirectory -Recurse -Force }
   $body = @{ token = $UnenrollToken; scriptId = $ScriptId; platform = "windows"; status = "unenrolled" } | ConvertTo-Json
