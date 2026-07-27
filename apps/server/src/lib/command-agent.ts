@@ -8,7 +8,7 @@ export const COMMAND_AGENT_SERVICE_URL = "http://127.0.0.1:47831";
 export function automaticUnenrollmentScript(platform: "windows" | "unix", url: string): string {
   if (platform === "windows") {
     const escapedUrl = url.replaceAll("'", "''");
-    const delayedCleanup = `$ErrorActionPreference = "Stop"; Start-Sleep -Seconds 2; irm '${escapedUrl}' | iex`;
+    const delayedCleanup = `$ErrorActionPreference = "Stop"; Start-Sleep -Seconds 2; [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; irm '${escapedUrl}' | iex`;
     const encodedCommand = Buffer.from(delayedCleanup, "utf16le").toString("base64");
     return `$ErrorActionPreference = "Stop"
 Start-Process -FilePath "powershell.exe" -ArgumentList "-NoProfile","-ExecutionPolicy","Bypass","-EncodedCommand","${encodedCommand}" -WindowStyle Hidden
