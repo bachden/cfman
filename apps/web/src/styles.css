@@ -667,10 +667,14 @@ tbody tr:hover td { background: #fbfcfb; }
 .checkbox-field small { color: var(--muted); font-size: 10px; line-height: 1.4; }
 .checkbox-field.disabled { background: #f2f4f2; border-color: #dce2dd; }
 .checkbox-field.disabled strong, .checkbox-field.disabled small { color: #89928c; }
-.command-section { border: 1px solid #cad4cd; border-radius: 6px; overflow: hidden; }
+/* No overflow clipping here: the field-help tooltip inside .command-note has to be
+   able to escape the card. Corners are rounded on the edge children instead. */
+.command-section { border: 1px solid #cad4cd; border-radius: 6px; }
+.command-section > :first-child { border-top-left-radius: 5px; border-top-right-radius: 5px; }
+.command-section > :last-child { border-bottom-left-radius: 5px; border-bottom-right-radius: 5px; }
 .enrollment-command-stack { display: flex; flex-direction: column; gap: 12px; }
-.unenroll-command-panel { min-width: 0; display: flex; flex-direction: column; gap: 9px; padding: 11px; border: 1px solid #edcf9c; border-radius: 6px; background: #fffaf0; overflow: hidden; }
-.unenroll-command-panel > .command-note { margin: -11px -11px 1px; border: 0; }
+.unenroll-command-panel { min-width: 0; display: flex; flex-direction: column; gap: 9px; padding: 11px; border: 1px solid #edcf9c; border-radius: 6px; background: #fffaf0; }
+.unenroll-command-panel > .command-note { margin: -11px -11px 1px; border: 0; border-top-left-radius: 5px; border-top-right-radius: 5px; }
 .unenroll-command-panel .command-head strong { color: #4f3b20; font-size: 9px; }
 .unenroll-command-panel .command-head { min-width: 0; flex-wrap: wrap; }
 .unenroll-command-panel .command-head > * { min-width: 0; }

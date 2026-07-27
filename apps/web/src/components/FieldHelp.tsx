@@ -10,7 +10,6 @@ export function FieldHelp({ text }: { text: string }) {
         tabIndex={-1}
         aria-label="Show field help"
         aria-expanded={open}
-        title="Field help"
         onClick={(event) => {
           event.preventDefault();
           event.stopPropagation();
