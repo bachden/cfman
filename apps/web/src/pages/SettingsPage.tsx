@@ -18,11 +18,119 @@ function formatDate(value: string | null): string {
   return value ? new Date(value).toLocaleString() : "Never";
 }
 
+// Written literally into the snippets. Clients that expand environment variables
+// resolve it; the others carry a note telling the operator to paste the token in.
+const MCP_TOKEN_REF = "${CLOUDFLARE_MAN_MCP_TOKEN}";
+
+type McpClientId = "claude-code" | "claude-desktop" | "codex" | "gemini-cli" | "cursor" | "vscode";
+
+type McpClientProfile = {
+  id: McpClientId;
+  label: string;
+  transport: string;
+  windowsPath: string;
+  macosPath: string;
+  notes: string[];
+  buildConfig: (endpoint: string) => string;
+};
+
+const MCP_CLIENTS: McpClientProfile[] = [
+  {
+    id: "claude-code",
+    label: "Claude Code",
+    transport: "Streamable HTTP (native)",
+    windowsPath: "%USERPROFILE%\\.claude.json  -  or .mcp.json in the project root",
+    macosPath: "~/.claude.json  -  or .mcp.json in the project root",
+    notes: [
+      "Expands ${VAR} from the environment, so exporting CLOUDFLARE_MAN_MCP_TOKEN keeps the token out of the file.",
+      "Equivalent CLI: claude mcp add --transport http cloudflare-man <endpoint> --header \"Authorization: Bearer $CLOUDFLARE_MAN_MCP_TOKEN\"",
+      "Use .mcp.json to share the server with a repository, or ~/.claude.json to keep it to your user account."
+    ],
+    buildConfig: (endpoint) => JSON.stringify({
+      mcpServers: { "cloudflare-man": { type: "http", url: endpoint, headers: { Authorization: `Bearer ${MCP_TOKEN_REF}` } } }
+    }, null, 2)
+  },
+  {
+    id: "claude-desktop",
+    label: "Claude Desktop (stdio only)",
+    transport: "stdio, bridged to HTTP by mcp-remote",
+    windowsPath: "%APPDATA%\\Claude\\claude_desktop_config.json",
+    macosPath: "~/Library/Application Support/Claude/claude_desktop_config.json",
+    notes: [
+      "Claude Desktop speaks stdio only, so mcp-remote proxies the Streamable HTTP endpoint. Node.js 18+ must be installed.",
+      "Environment variables are not expanded here - replace ${CLOUDFLARE_MAN_MCP_TOKEN} with the token value.",
+      "Quit Claude Desktop completely and reopen it; closing the window alone does not reload the config."
+    ],
+    buildConfig: (endpoint) => JSON.stringify({
+      mcpServers: { "cloudflare-man": { command: "npx", args: ["-y", "mcp-remote", endpoint, "--header", `Authorization: Bearer ${MCP_TOKEN_REF}`] } }
+    }, null, 2)
+  },
+  {
+    id: "codex",
+    label: "Codex CLI",
+    transport: "Streamable HTTP (native)",
+    windowsPath: "%USERPROFILE%\\.codex\\config.toml",
+    macosPath: "~/.codex/config.toml",
+    notes: [
+      "Codex uses TOML, not JSON - append the block to the existing config.toml instead of replacing the file.",
+      "Headers go under http_headers, not the headers key used by the JSON clients.",
+      "Replace ${CLOUDFLARE_MAN_MCP_TOKEN} with the token value."
+    ],
+    buildConfig: (endpoint) => `[mcp_servers.cloudflare-man]
+url = "${endpoint}"
+http_headers = { Authorization = "Bearer ${MCP_TOKEN_REF}" }`
+  },
+  {
+    id: "gemini-cli",
+    label: "Gemini CLI",
+    transport: "Streamable HTTP (native)",
+    windowsPath: "%USERPROFILE%\\.gemini\\settings.json",
+    macosPath: "~/.gemini/settings.json",
+    notes: [
+      "httpUrl selects Streamable HTTP. The url key would make Gemini CLI use SSE instead.",
+      "Expands ${VAR} from the environment.",
+      "A .gemini/settings.json inside the project overrides the user-level file."
+    ],
+    buildConfig: (endpoint) => JSON.stringify({
+      mcpServers: { "cloudflare-man": { httpUrl: endpoint, headers: { Authorization: `Bearer ${MCP_TOKEN_REF}` } } }
+    }, null, 2)
+  },
+  {
+    id: "cursor",
+    label: "Cursor",
+    transport: "Streamable HTTP (native)",
+    windowsPath: "%USERPROFILE%\\.cursor\\mcp.json  -  or .cursor\\mcp.json in the project",
+    macosPath: "~/.cursor/mcp.json  -  or .cursor/mcp.json in the project",
+    notes: [
+      "Replace ${CLOUDFLARE_MAN_MCP_TOKEN} with the token value.",
+      "Reload the MCP server from Cursor Settings > MCP after saving."
+    ],
+    buildConfig: (endpoint) => JSON.stringify({
+      mcpServers: { "cloudflare-man": { url: endpoint, headers: { Authorization: `Bearer ${MCP_TOKEN_REF}` } } }
+    }, null, 2)
+  },
+  {
+    id: "vscode",
+    label: "VS Code (Copilot)",
+    transport: "Streamable HTTP (native)",
+    windowsPath: ".vscode\\mcp.json in the workspace",
+    macosPath: ".vscode/mcp.json in the workspace",
+    notes: [
+      "VS Code uses the servers key, not mcpServers.",
+      "Prefer an input prompt over a literal token so it is not committed with the workspace."
+    ],
+    buildConfig: (endpoint) => JSON.stringify({
+      servers: { "cloudflare-man": { type: "http", url: endpoint, headers: { Authorization: `Bearer ${MCP_TOKEN_REF}` } } }
+    }, null, 2)
+  }
+];
+
 export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User; onLogout: () => void; onPasswordChanged: () => void }) {
   const queryClient = useQueryClient();
   const [error, setError] = useState("");
   const [settingsError, setSettingsError] = useState("");
   const [mcpToken, setMcpToken] = useState<string | null>(null);
+  const [mcpClient, setMcpClient] = useState<McpClientId>("claude-code");
   const [globalVariables, setGlobalVariables] = useState<ExecutionVariables>({});
   const { data: settingsData, isLoading: settingsLoading } = useQuery({
     queryKey: ["settings"],
@@ -70,15 +178,11 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
     onError: (requestError) => setError(requestError instanceof ApiError ? requestError.message : "Unable to change password")
   });
   const mcp = settingsData?.settings.mcp;
-  const mcpConfig = useMemo(() => JSON.stringify({
-    mcpServers: {
-      "cloudflare-man": {
-        type: "http",
-        url: mcp?.endpoint ?? "https://cloudflare-man.example.com/mcp",
-        headers: { Authorization: "Bearer ${CLOUDFLARE_MAN_MCP_TOKEN}" }
-      }
-    }
-  }, null, 2), [mcp?.endpoint]);
+  const mcpClientProfile = MCP_CLIENTS.find((client) => client.id === mcpClient) ?? MCP_CLIENTS[0]!;
+  const mcpConfig = useMemo(
+    () => mcpClientProfile.buildConfig(mcp?.endpoint ?? "https://cloudflare-man.example.com/mcp"),
+    [mcpClientProfile, mcp?.endpoint]
+  );
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
@@ -144,9 +248,23 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
           <span>Bearer tokens grant full administrator access through MCP.</span>
         </div>
         <div className="mcp-helper">
-          <div><strong>Client configuration</strong><span>Use Streamable HTTP transport and pass the token in the Authorization header.</span></div>
+          <div><strong>Client configuration</strong><span>Pick the agent you use to get its snippet, config file, and transport.</span></div>
+          <div className="mcp-client-picker">
+            <label className="field">
+              <span className="field-label">AI agent <FieldHelp text="Each client stores MCP servers in its own file and format. Clients without native Streamable HTTP support are bridged through mcp-remote, which requires Node.js on the machine running the agent." /></span>
+              <select value={mcpClient} onChange={(event) => setMcpClient(event.target.value as McpClientId)}>
+                {MCP_CLIENTS.map((client) => <option key={client.id} value={client.id}>{client.label}</option>)}
+              </select>
+            </label>
+            <dl className="mcp-client-paths">
+              <div><dt>Transport</dt><dd>{mcpClientProfile.transport}</dd></div>
+              <div><dt>Windows</dt><dd><code>{mcpClientProfile.windowsPath}</code></dd></div>
+              <div><dt>macOS</dt><dd><code>{mcpClientProfile.macosPath}</code></dd></div>
+            </dl>
+          </div>
           <div className="mcp-config-head"><code>CLOUDFLARE_MAN_MCP_TOKEN={mcpToken ?? "<token shown after enable or rotate>"}</code><CopyButton value={mcpConfig} label="Copy config" /></div>
           <pre><code>{mcpConfig}</code></pre>
+          <ul className="mcp-client-notes">{mcpClientProfile.notes.map((note) => <li key={note}>{note}</li>)}</ul>
         </div>
       </div>
     </section>

@@ -771,8 +771,19 @@ tbody tr:hover td { background: #fbfcfb; }
 .mcp-secret-value code { min-width: 0; flex: 1; padding: 9px 10px; overflow-x: auto; color: var(--ink); background: rgba(255, 255, 255, .7); border: 1px solid #e5c383; border-radius: 4px; font-size: 9px; white-space: nowrap; }
 .mcp-actions { display: flex; align-items: center; gap: 12px; }
 .mcp-actions > span { color: var(--muted); font-size: 9px; }
-.mcp-helper { min-width: 0; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; }
+/* No overflow clipping: the AI agent picker carries a field-help tooltip that has
+   to escape the card. Corners are rounded on the edge children instead. */
+.mcp-helper { min-width: 0; border: 1px solid var(--line); border-radius: 5px; }
+.mcp-helper > :first-child { border-top-left-radius: 4px; border-top-right-radius: 4px; }
+.mcp-helper > :last-child { border-bottom-left-radius: 4px; border-bottom-right-radius: 4px; }
 .mcp-helper > div:first-child { padding: 11px 13px; display: flex; flex-direction: column; gap: 3px; background: var(--surface-soft); border-bottom: 1px solid var(--line); }
+.mcp-client-picker { padding: 13px; display: grid; grid-template-columns: minmax(180px, .8fr) minmax(0, 2fr); gap: 14px; align-items: start; border-bottom: 1px solid var(--line); }
+.mcp-client-paths { margin: 0; display: flex; flex-direction: column; gap: 8px; }
+.mcp-client-paths > div { min-width: 0; display: flex; align-items: baseline; gap: 9px; }
+.mcp-client-paths dt { flex: 0 0 62px; color: var(--muted); text-transform: uppercase; font-size: 8px; font-weight: 800; }
+.mcp-client-paths dd { min-width: 0; margin: 0; color: #445047; font-size: 9px; font-weight: 650; overflow-wrap: anywhere; }
+.mcp-client-paths dd code { font-size: 9px; }
+.mcp-client-notes { margin: 0; padding: 11px 13px 12px 27px; display: flex; flex-direction: column; gap: 5px; color: var(--muted); background: var(--surface-soft); border-top: 1px solid var(--line); font-size: 9px; line-height: 1.55; }
 .mcp-helper strong { font-size: 10px; }
 .mcp-helper span { color: var(--muted); font-size: 9px; }
 .mcp-config-head { min-width: 0; padding: 8px 10px; display: flex; align-items: center; justify-content: space-between; gap: 10px; border-bottom: 1px solid #34453b; background: #223129; }
@@ -922,6 +933,7 @@ tbody tr:hover td { background: #fbfcfb; }
   .mcp-metadata { grid-template-columns: 1fr 1fr; }
   .mcp-metadata > div:nth-child(2) { border-right: 0; }
   .mcp-metadata > div:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+  .mcp-client-picker { grid-template-columns: 1fr; }
   .mcp-secret-value, .mcp-actions { align-items: stretch; flex-direction: column; }
   .mcp-secret-value .button, .mcp-actions .button { align-self: flex-start; }
   .account-profile { grid-template-columns: 1fr; }
