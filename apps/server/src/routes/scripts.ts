@@ -24,10 +24,9 @@ const scriptUpdateSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   language: languageSchema.optional(),
   description: z.string().trim().max(500).optional(),
-  defaultTimeoutMs: z.number().int().min(1_000).max(300_000).optional(),
-  arguments: scriptArgumentsSchema.optional()
+  defaultTimeoutMs: z.number().int().min(1_000).max(300_000).optional()
 });
-const versionSchema = z.object({ content: scriptContent });
+const versionSchema = z.object({ content: scriptContent, arguments: scriptArgumentsSchema.default([]) });
 const executionTimestampSchema = z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/, "Timestamp must use ISO 8601 format");
 const executionHistorySchema = z.object({
   version: z.coerce.number().int().min(1).optional(),
@@ -78,7 +77,6 @@ const scriptSummary = `jsonb_build_object(
   'language', s.language,
   'description', s.description,
   'defaultTimeoutMs', s.default_timeout_ms,
-  'arguments', s.arguments,
   'latestVersion', latest.version,
   'latestVersionId', latest.id,
   'versionCount', COALESCE(latest."versionCount", 0),
@@ -188,7 +186,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
         [id]
       ),
       pool.query(
-        `SELECT v.id, v.version, v.content, v.created_at AS "createdAt", u.username AS "createdBy"
+        `SELECT v.id, v.version, v.content, v.arguments, v.created_at AS "createdAt", u.username AS "createdBy"
            FROM managed_script_versions v
            LEFT JOIN users u ON u.id = v.created_by
           WHERE v.script_id = $1
@@ -580,8 +578,8 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = bulkExecuteSchema.parse(request.body);
     const selectedVersion = await pool.query(
-      `SELECT v.id, v.version, v.content, s.id AS "scriptId", s.name AS "scriptName", s.platform, s.language,
-              s.default_timeout_ms AS "defaultTimeoutMs", s.arguments
+      `SELECT v.id, v.version, v.content, v.arguments, s.id AS "scriptId", s.name AS "scriptName", s.platform, s.language,
+              s.default_timeout_ms AS "defaultTimeoutMs"
          FROM managed_script_versions v JOIN managed_scripts s ON s.id = v.script_id
         WHERE v.id = $1 AND s.id = $2`,
       [body.scriptVersionId, id]
@@ -719,16 +717,16 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     if (languageError) return reply.code(400).send({ error: languageError });
     const created = await withTransaction(async (client) => {
       const script = await client.query(
-        `INSERT INTO managed_scripts(name, platform, language, description, default_timeout_ms, arguments, created_by)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `INSERT INTO managed_scripts(name, platform, language, description, default_timeout_ms, created_by)
+         VALUES ($1, $2, $3, $4, $5, $6)
          RETURNING id`,
-        [body.name, body.platform, body.language, body.description, body.defaultTimeoutMs, JSON.stringify(body.arguments), request.authUser!.id]
+        [body.name, body.platform, body.language, body.description, body.defaultTimeoutMs, request.authUser!.id]
       );
       const version = await client.query(
-        `INSERT INTO managed_script_versions(script_id, version, content, created_by)
-         VALUES ($1, 1, $2, $3)
+        `INSERT INTO managed_script_versions(script_id, version, content, arguments, created_by)
+         VALUES ($1, 1, $2, $3, $4)
          RETURNING id, version`,
-        [script.rows[0].id, body.content, request.authUser!.id]
+        [script.rows[0].id, body.content, JSON.stringify(body.arguments), request.authUser!.id]
       );
       await writeAudit({
         actorUserId: request.authUser!.id,
@@ -754,10 +752,10 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
       `UPDATE managed_scripts
           SET name = COALESCE($1, name), language = COALESCE($2, language),
               description = COALESCE($3, description), default_timeout_ms = COALESCE($4, default_timeout_ms),
-              arguments = COALESCE($5, arguments), updated_at = now()
-        WHERE id = $6
+              updated_at = now()
+        WHERE id = $5
         RETURNING id`,
-      [body.name ?? null, body.language ?? null, body.description ?? null, body.defaultTimeoutMs ?? null, body.arguments ? JSON.stringify(body.arguments) : null, id]
+      [body.name ?? null, body.language ?? null, body.description ?? null, body.defaultTimeoutMs ?? null, id]
     );
     await writeAudit({ actorUserId: request.authUser!.id, action: "script.updated", entityType: "script", entityId: id, details: body });
     return { success: Boolean(result.rowCount) };
@@ -802,10 +800,10 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
       if (!script.rowCount) return null;
       const next = await client.query("SELECT COALESCE(MAX(version), 0) + 1 AS version FROM managed_script_versions WHERE script_id = $1", [id]);
       const inserted = await client.query(
-        `INSERT INTO managed_script_versions(script_id, version, content, created_by)
-         VALUES ($1, $2, $3, $4)
+        `INSERT INTO managed_script_versions(script_id, version, content, arguments, created_by)
+         VALUES ($1, $2, $3, $4, $5)
          RETURNING id, version`,
-        [id, next.rows[0].version, body.content, request.authUser!.id]
+        [id, next.rows[0].version, body.content, JSON.stringify(body.arguments), request.authUser!.id]
       );
       await client.query("UPDATE managed_scripts SET updated_at = now() WHERE id = $1", [id]);
       await writeAudit({ actorUserId: request.authUser!.id, action: "script.version_created", entityType: "script", entityId: id, details: { version: inserted.rows[0].version } }, client);

@@ -609,6 +609,11 @@ tbody tr:hover td { background: #fbfcfb; }
 .argument-binding-type input { width: 13px; height: 13px; margin: 0; accent-color: var(--green); cursor: pointer; }
 .argument-binding-row select, .argument-binding-row input { height: 34px; padding: 0 9px; color: var(--ink); background: white; border: 1px solid var(--line-strong); border-radius: 5px; outline: none; font-size: 11px; }
 .argument-binding-row select:focus, .argument-binding-row input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(8, 127, 91, .1); }
+/* The binding editor's header carries usage guidance, so it stacks instead of
+   sitting on one line next to the title like the argument definition editor. */
+.argument-bindings-editor > header { flex-direction: column; align-items: flex-start; gap: 3px; }
+.argument-bindings-editor > header span { line-height: 1.7; }
+.argument-bindings-editor > header code { padding: 1px 4px; color: #3d4a41; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 3px; font-size: 9px; }
 .argument-binding-preview { overflow: hidden; color: var(--muted); text-overflow: ellipsis; white-space: nowrap; }
 .argument-binding-preview-hint { font-family: inherit; font-size: 9px; font-style: italic; }
 .execution-variable-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) 76px; align-items: center; gap: 8px; }
@@ -620,8 +625,13 @@ tbody tr:hover td { background: #fbfcfb; }
 .execution-variable-name-label { color: var(--muted); font-size: 12px; font-weight: 450; overflow-wrap: anywhere; }
 .execution-variable-value-label { color: var(--ink); font-size: 12px; font-weight: 450; overflow-wrap: anywhere; }
 .execution-variable-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 2px; }
-.script-argument-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 2fr) auto 34px; align-items: center; gap: 8px; }
+.script-argument-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 2fr) auto minmax(34px, auto); align-items: center; gap: 8px; }
 .script-argument-delete-field { align-items: flex-start; }
+.script-argument-row-actions { display: flex; align-items: center; gap: 2px; }
+.script-argument-row-display { min-height: 36px; }
+.script-argument-name-label { color: var(--muted); font-size: 12px; font-weight: 450; overflow-wrap: anywhere; }
+.script-argument-value-label { color: var(--ink); font-size: 12px; font-weight: 450; overflow-wrap: anywhere; }
+.script-argument-required-label { color: var(--muted); font-size: 9px; font-weight: 800; text-transform: uppercase; white-space: nowrap; }
 .script-argument-required { display: flex; align-items: center; height: 38px; gap: 6px; color: #445047; font-size: 10px; font-weight: 700; white-space: nowrap; }
 .script-argument-required input { width: 15px; height: 15px; margin: 0; accent-color: var(--green); cursor: pointer; }
 .built-in-variable-note { display: flex; align-items: center; flex-wrap: wrap; gap: 7px; color: var(--muted); font-size: 9px; }

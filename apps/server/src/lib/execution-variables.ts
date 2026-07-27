@@ -62,6 +62,91 @@ function normalizedVariables(variables: ExecutionVariables): ExecutionVariables 
   return Object.fromEntries(Object.entries(variables).map(([name, value]) => [name.toUpperCase(), value]));
 }
 
+// A variable value or an argument value may reference other variables as $NAME
+// or ${NAME}. Expansion happens here, in TypeScript, against already-resolved
+// values - never by handing the reference to the shell. applyScriptArguments
+// still single-quotes every emitted value, so an expanded result can never
+// become executable text: a value of $(rm -rf /) stays the literal characters
+// "$(rm -rf /)". $$ escapes a literal dollar sign for values that need one.
+const VARIABLE_REFERENCE = /\$(?:\$|\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g;
+
+// Guards against a small set of variables expanding into an enormous string
+// (each level multiplying the previous one) before it ever reaches a store.
+const MAX_EXPANDED_LENGTH = 20_000;
+
+export class VariableResolutionError extends Error {}
+
+type ExpansionContext = {
+  raw: ExecutionVariables;
+  // Names resolved from store identity columns. They hold store data, not
+  // templates, so a display name containing $FOO stays literal instead of
+  // turning arbitrary store data into a reference.
+  literals: Set<string>;
+  cache: Map<string, string>;
+  stack: string[];
+};
+
+function expandTemplate(template: string, context: ExpansionContext): string {
+  if (!template.includes("$")) return template;
+  const expanded = template.replace(VARIABLE_REFERENCE, (match, braced?: string, bare?: string) => {
+    if (match === "$$") return "$";
+    const name = (braced ?? bare ?? "").toUpperCase();
+    // An unknown name stays literal: substituting an empty string would quietly
+    // change what a script does, and a typo should be visible in the output.
+    if (!(name in context.raw)) return match;
+    return resolveVariable(name, context);
+  });
+  if (expanded.length > MAX_EXPANDED_LENGTH) {
+    throw new VariableResolutionError(`Variable expansion exceeded ${MAX_EXPANDED_LENGTH} characters`);
+  }
+  return expanded;
+}
+
+function resolveVariable(name: string, context: ExpansionContext): string {
+  const cached = context.cache.get(name);
+  if (cached !== undefined) return cached;
+  if (context.stack.includes(name)) {
+    throw new VariableResolutionError(`Variable reference cycle detected: ${[...context.stack, name].join(" -> ")}`);
+  }
+  const raw = context.raw[name] ?? "";
+  const value = context.literals.has(name) ? raw : (() => {
+    context.stack.push(name);
+    try {
+      return expandTemplate(raw, context);
+    } finally {
+      context.stack.pop();
+    }
+  })();
+  context.cache.set(name, value);
+  return value;
+}
+
+// Expands every variable against every other variable. Resolution is eager so
+// that a cycle is reported when variables are resolved, not later when some
+// unrelated script happens to be the first one to reference it.
+export function expandVariableReferences(raw: ExecutionVariables, sources: Record<string, VariableSource>): ExecutionVariables {
+  const literals = new Set(Object.entries(sources).filter(([, source]) => source === "built-in").map(([name]) => name));
+  const context: ExpansionContext = { raw, literals, cache: new Map(), stack: [] };
+  return Object.fromEntries(Object.keys(raw).map((name) => [name, resolveVariable(name, context)]));
+}
+
+// Expands references inside a single argument value. The variables passed in
+// are already fully expanded, so this is deliberately one pass: a $ that came
+// out of a variable's value is data and must never be re-read as a reference.
+export function expandArgumentValue(value: string, variables: ExecutionVariables): string {
+  if (!value.includes("$")) return value;
+  const expanded = value.replace(VARIABLE_REFERENCE, (match, braced?: string, bare?: string) => {
+    if (match === "$$") return "$";
+    const name = (braced ?? bare ?? "").toUpperCase();
+    if (!(name in variables)) return match;
+    return variables[name] ?? "";
+  });
+  if (expanded.length > MAX_EXPANDED_LENGTH) {
+    throw new VariableResolutionError(`Variable expansion exceeded ${MAX_EXPANDED_LENGTH} characters`);
+  }
+  return expanded;
+}
+
 function parseStoredVariables(value: unknown): ExecutionVariables {
   const parsed = executionVariablesSchema.safeParse(value ?? {});
   return parsed.success ? normalizedVariables(parsed.data) : {};
@@ -100,7 +185,9 @@ function resolveAvailableVariables(
   merge(parseStoredVariables(scope.storeVariables), "store");
   merge({ TENANT_CODE: scope.tenantCode, STORE_NAME: scope.storeName, STORE_CODE: scope.storeCode }, "built-in");
   merge(parseStoredVariables(scope.computerVariables), "computer");
-  return { variables, sources };
+  // Expansion runs per store: the same $STORE_NAME reference resolves to a
+  // different value on every store of a bulk run.
+  return { variables: expandVariableReferences(variables, sources), sources };
 }
 
 export async function resolveAvailableVariablesForStore(storeId: string): Promise<{ variables: ExecutionVariables; sources: Record<string, VariableSource> }> {
@@ -155,9 +242,12 @@ export function resolveArgumentValues(
   for (const argument of argumentsList) {
     const key = argument.name.toUpperCase();
     const binding = normalizedBindings[key];
+    // A "variable" binding is a direct reference, so its value is taken as-is.
+    // Custom values and declared defaults are templates and may reference
+    // variables themselves.
     if (binding?.type === "variable") values[key] = availableVariables[binding.variable.toUpperCase()] ?? "";
-    else if (binding?.type === "custom") values[key] = binding.value;
-    else values[key] = argument.defaultValue;
+    else if (binding?.type === "custom") values[key] = expandArgumentValue(binding.value, availableVariables);
+    else values[key] = expandArgumentValue(argument.defaultValue, availableVariables);
   }
   // Built-in store identity values are always available to every script,
   // regardless of what arguments it declares or how they're mapped.

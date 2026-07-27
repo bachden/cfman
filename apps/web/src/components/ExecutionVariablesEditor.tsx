@@ -1,6 +1,28 @@
 import { Check, Pencil, Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import type { ArgumentBindings, ExecutionVariables, ScriptArgument } from "../types";
+import { FieldHelp } from "./FieldHelp";
+
+// Mirrors the server's expansion rule (apps/server/src/lib/execution-variables.ts)
+// so the operator sees the value a store will actually receive. The server stays
+// the authority: this only previews it. A fresh RegExp per call keeps lastIndex
+// from leaking between rows.
+const variableReference = () => /\$(?:\$|\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g;
+
+function expandPreview(value: string, variables: ExecutionVariables): string {
+  if (!value.includes("$")) return value;
+  return value.replace(variableReference(), (match, braced?: string, bare?: string) => {
+    if (match === "$$") return "$";
+    const name = (braced ?? bare ?? "").toUpperCase();
+    return name in variables ? variables[name] ?? "" : match;
+  });
+}
+
+function referencedVariableNames(value: string): string[] {
+  return [...value.matchAll(variableReference())]
+    .filter((match) => match[0] !== "$$")
+    .map((match) => (match[1] ?? match[2] ?? "").toUpperCase());
+}
 
 export function nextVariableName(variables: ExecutionVariables): string {
   let index = Object.keys(variables).length + 1;
@@ -82,16 +104,53 @@ export function ExecutionVariablesEditor({
   </div>;
 }
 
+// Declared arguments are shown read-only until the operator opens a row with the
+// pencil, matching how variables are edited. Removing an argument is only
+// reachable from that opened row, so a definition the current version's runs
+// depend on cannot be dropped with a single stray click.
 export function ScriptArgumentsEditor({ argumentsList, onChange }: { argumentsList: ScriptArgument[]; onChange: (argumentsList: ScriptArgument[]) => void }) {
+  const [editingIndexes, setEditingIndexes] = useState<Set<number>>(new Set());
+  const startEditing = (index: number) => setEditingIndexes((current) => new Set(current).add(index));
+  const stopEditing = (index: number) => setEditingIndexes((current) => {
+    if (!current.has(index)) return current;
+    const next = new Set(current);
+    next.delete(index);
+    return next;
+  });
+  const update = (index: number, patch: Partial<ScriptArgument>) =>
+    onChange(argumentsList.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item));
+  const add = () => {
+    onChange([...argumentsList, { name: `ARGUMENT_${argumentsList.length + 1}`, defaultValue: "", description: "", required: false }]);
+    startEditing(argumentsList.length);
+  };
+  const remove = (index: number) => {
+    onChange(argumentsList.filter((_, itemIndex) => itemIndex !== index));
+    // Rows after the removed one shift down, so the open-row set shifts with them.
+    setEditingIndexes((current) => new Set(
+      [...current].filter((entry) => entry !== index).map((entry) => entry > index ? entry - 1 : entry)
+    ));
+  };
   return <section className="script-arguments-editor">
-    <header><div><h3>Script arguments</h3><span>The default value is used unless an operator maps this argument to a resolved variable or a custom value when preparing a run.</span></div><button className="button button-secondary button-small" type="button" onClick={() => onChange([...argumentsList, { name: `ARGUMENT_${argumentsList.length + 1}`, defaultValue: "", description: "", required: false }])}><Plus size={14} />Argument</button></header>
-    {argumentsList.length ? <div className="script-argument-list">{argumentsList.map((argument, index) => <div className="script-argument-row" key={index}>
-      <label className="field"><span className="field-label">Name</span><input className="mono-input" value={argument.name} onChange={(event) => onChange(argumentsList.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value.toUpperCase() } : item))} /></label>
-      <label className="field"><span className="field-label">Default value</span><input value={argument.defaultValue} onChange={(event) => onChange(argumentsList.map((item, itemIndex) => itemIndex === index ? { ...item, defaultValue: event.target.value } : item))} /></label>
-      <label className="field script-argument-description"><span className="field-label">Description</span><input value={argument.description} placeholder="Optional operator context" onChange={(event) => onChange(argumentsList.map((item, itemIndex) => itemIndex === index ? { ...item, description: event.target.value } : item))} /></label>
-      <div className="field script-argument-required-field"><span className="field-label" aria-hidden="true">&nbsp;</span><label className="script-argument-required"><input type="checkbox" checked={argument.required} onChange={(event) => onChange(argumentsList.map((item, itemIndex) => itemIndex === index ? { ...item, required: event.target.checked } : item))} />Required</label></div>
-      <div className="field script-argument-delete-field"><span className="field-label" aria-hidden="true">&nbsp;</span><button className="icon-button account-delete" type="button" title={`Remove ${argument.name}`} aria-label={`Remove ${argument.name}`} onClick={() => onChange(argumentsList.filter((_, itemIndex) => itemIndex !== index))}><Trash2 size={15} /></button></div>
-    </div>)}</div> : <div className="quiet-empty">This script has no declared arguments.</div>}
+    <header><div><h3>Script arguments</h3><span>Defined per version: saving a change to this list creates a new script version. The default value is used unless an operator maps the argument to a resolved variable or a custom value when preparing a run.</span></div><button className="button button-secondary button-small" type="button" onClick={add}><Plus size={14} />Argument</button></header>
+    {argumentsList.length ? <div className="script-argument-list">{argumentsList.map((argument, index) => {
+      if (!editingIndexes.has(index)) return <div className="script-argument-row script-argument-row-display" key={index}>
+        <code className="script-argument-name-label">{argument.name}</code>
+        <span className="script-argument-value-label">{argument.defaultValue || "—"}</span>
+        <span className="script-argument-value-label script-argument-description">{argument.description || "—"}</span>
+        <span className="script-argument-required-label">{argument.required ? "Required" : ""}</span>
+        <button className="icon-button" type="button" title={`Edit ${argument.name}`} aria-label={`Edit ${argument.name}`} onClick={() => startEditing(index)}><Pencil size={14} /></button>
+      </div>;
+      return <div className="script-argument-row" key={index}>
+        <label className="field"><span className="field-label">Name</span><input className="mono-input" value={argument.name} onChange={(event) => update(index, { name: event.target.value.toUpperCase() })} /></label>
+        <label className="field"><span className="field-label">Default value</span><input value={argument.defaultValue} onChange={(event) => update(index, { defaultValue: event.target.value })} /></label>
+        <label className="field script-argument-description"><span className="field-label">Description</span><input value={argument.description} placeholder="Optional operator context" onChange={(event) => update(index, { description: event.target.value })} /></label>
+        <div className="field script-argument-required-field"><span className="field-label" aria-hidden="true">&nbsp;</span><label className="script-argument-required"><input type="checkbox" checked={argument.required} onChange={(event) => update(index, { required: event.target.checked })} />Required</label></div>
+        <div className="field script-argument-delete-field"><span className="field-label" aria-hidden="true">&nbsp;</span><div className="script-argument-row-actions">
+          <button className="icon-button" type="button" title={`Done editing ${argument.name}`} aria-label={`Done editing ${argument.name}`} onClick={() => stopEditing(index)}><Check size={14} /></button>
+          <button className="icon-button account-delete" type="button" title={`Remove ${argument.name}`} aria-label={`Remove ${argument.name}`} onClick={() => remove(index)}><Trash2 size={15} /></button>
+        </div></div>
+      </div>;
+    })}</div> : <div className="quiet-empty">This script has no declared arguments.</div>}
   </section>;
 }
 
@@ -117,11 +176,22 @@ export function ArgumentBindingsEditor({
   const variableNames = Object.keys(availableVariables).sort();
   if (!argumentsList.length) return <div className="quiet-empty">This script has no declared arguments.</div>;
   return <section className="argument-bindings-editor">
-    <header><h3>Script arguments</h3><span>Fill each argument with a custom value, or map it to one of the store's resolved environment variables.</span></header>
+    <header>
+      <h3>Script arguments</h3>
+      <span>
+        Fill each argument with a custom value, or map it to one of the store's resolved environment variables.
+        A custom value may embed variables as <code>$NAME</code> or <code>{"${NAME}"}</code> - for example <code>hello from $STORE_NAME</code>.
+        {" "}<FieldHelp text="Variables are resolved per store at execution time, so one bulk run gives each store its own value. Variables may reference other variables; a reference cycle is rejected and the run fails instead of executing. An unknown name is left as literal text rather than becoming empty. Write $$ for a literal dollar sign. Values are always passed as inert text: a value can never turn into executable script." />
+      </span>
+    </header>
     <div className="argument-binding-list">{argumentsList.map((argument) => {
       const binding = bindings[argument.name] ?? { type: "custom" as const, value: argument.defaultValue };
-      const variesPerStore = binding.type === "variable" && variesPerStoreNames.includes(binding.variable);
-      const effectiveValue = binding.type === "variable" ? availableVariables[binding.variable] ?? "" : binding.value;
+      const variesPerStore = binding.type === "variable"
+        ? variesPerStoreNames.includes(binding.variable)
+        : referencedVariableNames(binding.value).some((name) => variesPerStoreNames.includes(name));
+      const effectiveValue = binding.type === "variable"
+        ? availableVariables[binding.variable] ?? ""
+        : expandPreview(binding.value, availableVariables);
       return <div className="argument-binding-row" key={argument.name}>
         <span className="field-label argument-binding-label">{argument.name}{argument.required && <small> · required</small>}</span>
         <div className="argument-binding-type" role="radiogroup" aria-label={`Value source for ${argument.name}`}>

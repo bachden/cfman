@@ -391,7 +391,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     const { storeId, ...body } = args;
     return callApi(app, token, "DELETE", `/api/stores/${storeId}`, body);
   });
-  registerApiTool(server, app, token, "cfman_create_script", "Create a reusable Windows or Unix script with immutable version 1.", {
+  registerApiTool(server, app, token, "cfman_create_script", "Create a reusable Windows or Unix script with immutable version 1. The argument definitions are recorded on version 1.", {
     name: z.string().min(1),
     platform: z.enum(["windows", "unix"]),
     language: z.enum(["powershell", "bash", "sh"]),
@@ -400,13 +400,12 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     arguments: scriptArgumentsSchema.optional(),
     content: z.string().min(1)
   }, (args) => callApi(app, token, "POST", "/api/scripts", args));
-  registerApiTool(server, app, token, "cfman_update_script", "Update saved script metadata without changing its immutable versions.", {
+  registerApiTool(server, app, token, "cfman_update_script", "Update saved script metadata without changing its immutable versions. Argument definitions belong to a version, so change them with cfman_create_script_version.", {
     scriptId: z.string().uuid(),
     name: z.string().min(1).optional(),
     language: z.enum(["powershell", "bash", "sh"]).optional(),
     description: z.string().optional(),
-    defaultTimeoutMs: z.number().int().min(1000).max(300000).optional(),
-    arguments: scriptArgumentsSchema.optional()
+    defaultTimeoutMs: z.number().int().min(1000).max(300000).optional()
   }, (args) => {
     const { scriptId, ...body } = args;
     return callApi(app, token, "PATCH", `/api/scripts/${scriptId}`, body);
@@ -435,9 +434,10 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
   registerApiTool(server, app, token, "cfman_delete_script", "Permanently delete a saved script, all of its versions, and every related execution history record.", {
     scriptId: z.string().uuid()
   }, (args) => callApi(app, token, "DELETE", `/api/scripts/${args.scriptId}`));
-  registerApiTool(server, app, token, "cfman_create_script_version", "Append a new immutable version to a saved script.", {
+  registerApiTool(server, app, token, "cfman_create_script_version", "Append a new immutable version to a saved script, carrying the argument definitions that version declares. Omitting arguments creates a version with none, so pass the current list when only the content changes.", {
     scriptId: z.string().uuid(),
-    content: z.string().min(1)
+    content: z.string().min(1),
+    arguments: scriptArgumentsSchema.optional()
   }, (args) => {
     const { scriptId, ...body } = args;
     return callApi(app, token, "POST", `/api/scripts/${scriptId}/versions`, body);

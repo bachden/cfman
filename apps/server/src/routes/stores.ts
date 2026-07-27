@@ -1315,8 +1315,8 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     let resolvedTimeoutMs = body.timeoutMs ?? 60_000;
     if (body.scriptVersionId) {
       const scriptVersionResult = await pool.query(
-        `SELECT v.id, v.content, v.version, s.id AS script_id, s.name, s.platform, s.language,
-                s.default_timeout_ms AS "defaultTimeoutMs", s.arguments
+        `SELECT v.id, v.content, v.version, v.arguments, s.id AS script_id, s.name, s.platform, s.language,
+                s.default_timeout_ms AS "defaultTimeoutMs"
           FROM managed_script_versions v
            JOIN managed_scripts s ON s.id = v.script_id
           WHERE v.id = $1`,
@@ -1412,10 +1412,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     let argumentsList: ScriptArgument[] = [];
     if (body.scriptVersionId) {
       const result = await pool.query(
-        `SELECT s.arguments
-           FROM managed_script_versions v
-           JOIN managed_scripts s ON s.id = v.script_id
-          WHERE v.id = $1`,
+        `SELECT v.arguments FROM managed_script_versions v WHERE v.id = $1`,
         [body.scriptVersionId]
       );
       if (!result.rowCount) return reply.code(404).send({ error: "Script version not found" });

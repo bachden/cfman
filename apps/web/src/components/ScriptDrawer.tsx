@@ -37,6 +37,7 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
   const [defaultTimeoutSeconds, setDefaultTimeoutSeconds] = useState(60);
   const [content, setContent] = useState("");
   const [argumentsList, setArgumentsList] = useState<ScriptArgument[]>([]);
+  const [originalArguments, setOriginalArguments] = useState<ScriptArgument[]>([]);
   const [originalContent, setOriginalContent] = useState("");
   const [selectedVersion, setSelectedVersion] = useState<number | null>(null);
   const [executionPage, setExecutionPage] = useState(1);
@@ -168,7 +169,8 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
     setSelectedVersion(initialVersion?.version ?? null);
     setContent(initialVersion?.content ?? "");
     setOriginalContent(initialVersion?.content ?? "");
-    setArgumentsList(detail.arguments);
+    setArgumentsList(initialVersion?.arguments ?? []);
+    setOriginalArguments(initialVersion?.arguments ?? []);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [detail?.id]);
 
@@ -176,14 +178,23 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
     if (selectedVersionData) {
       setContent(selectedVersionData.content);
       setOriginalContent(selectedVersionData.content);
+      // Arguments are pinned to the version, so selecting one shows the
+      // definition that version's runs were prepared against.
+      setArgumentsList(selectedVersionData.arguments);
+      setOriginalArguments(selectedVersionData.arguments);
     }
   }, [selectedVersionData]);
 
+  const argumentsChanged = JSON.stringify(argumentsList) !== JSON.stringify(originalArguments);
   const save = useMutation({
     mutationFn: async () => {
       if (!scriptId) throw new Error("No script selected");
-      await api.patch(`/api/scripts/${scriptId}`, { name, language, description, defaultTimeoutMs: defaultTimeoutSeconds * 1000, arguments: argumentsList });
-      if (content !== originalContent) return api.post<{ id: string; version: number }>(`/api/scripts/${scriptId}/versions`, { content });
+      await api.patch(`/api/scripts/${scriptId}`, { name, language, description, defaultTimeoutMs: defaultTimeoutSeconds * 1000 });
+      // A version is immutable, so a changed argument definition creates a new
+      // one exactly like changed content does.
+      if (content !== originalContent || argumentsChanged) {
+        return api.post<{ id: string; version: number }>(`/api/scripts/${scriptId}/versions`, { content, arguments: argumentsList });
+      }
       return null;
     },
     onSuccess: async (created) => {

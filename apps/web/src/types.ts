@@ -237,7 +237,6 @@ export type ManagedScriptSummary = {
   language: "powershell" | "bash" | "sh";
   description: string;
   defaultTimeoutMs: number;
-  arguments: ScriptArgument[];
   latestVersion: number | null;
   latestVersionId: string | null;
   versionCount: number;
@@ -271,6 +270,9 @@ export type ManagedScript = ManagedScriptSummary & {
     id: string;
     version: number;
     content: string;
+    // Argument definitions are pinned to the version, not the script: an
+    // immutable version keeps the arguments its runs were prepared against.
+    arguments: ScriptArgument[];
     createdAt: string;
     createdBy: string | null;
   }>;
