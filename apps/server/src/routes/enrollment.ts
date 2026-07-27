@@ -607,6 +607,7 @@ ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
 export function windowsAgentProgram(agentToken: string): string {
   return `param([string]$WorkerPayloadPath)
 $ErrorActionPreference = "Stop"
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072
 $Token = "${agentToken}"
 $Port = 47831
 $TaskDirectory = Join-Path (Split-Path -Parent $PSCommandPath) "command-executions"
