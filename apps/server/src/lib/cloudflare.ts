@@ -197,6 +197,14 @@ export class CloudflareClient {
     });
   }
 
+  async renameTunnel(cfTunnelId: string, name: string): Promise<CloudflareTunnel> {
+    if (this.mode === "mock") return { id: cfTunnelId, name, status: "inactive" };
+    return this.request<CloudflareTunnel>(`/accounts/${this.accountId}/cfd_tunnel/${cfTunnelId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ name })
+    });
+  }
+
   async ensureTunnel(name: string): Promise<CloudflareTunnel> {
     if (this.mode === "mock") return this.createTunnel(name);
     const findExisting = async () => {
