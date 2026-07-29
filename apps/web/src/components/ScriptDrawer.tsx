@@ -3,7 +3,7 @@ import { AlertTriangle, ChevronLeft, ChevronRight, ChevronsLeft, ChevronsRight, 
 import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { api } from "../api";
-import { emptyExecutionStats, type AppSettings, type ArgumentBindings, type BulkScriptRun, type ExecutionStats, type ExecutionVariables, type ManagedScript, type ScriptArgument, type ScriptCommandExecution, type Store } from "../types";
+import { emptyExecutionStats, type AppSettings, type ArgumentBindings, type BulkScriptRun, type ExecutionStats, type ExecutionVariables, type ManagedScript, type ScriptArgument, type ScriptCommandExecution, type Tunnel } from "../types";
 import { useDrawers } from "./DrawerContext";
 import { ArgumentBindingsEditor, ScriptArgumentsEditor } from "./ExecutionVariablesEditor";
 import { ExecutionLog } from "./ExecutionLog";
@@ -30,7 +30,7 @@ type ScriptExecutionHistoryPage = {
 
 export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIndex }: { scriptId: string | null; version: number | null; initialBulkRunId?: string | null; onClose: () => void; zIndex?: number | undefined }) {
   const queryClient = useQueryClient();
-  const { openStoreDrawer } = useDrawers();
+  const { openTunnelDrawer } = useDrawers();
   const [name, setName] = useState("");
   const [language, setLanguage] = useState<"powershell" | "bash" | "sh">("powershell");
   const [description, setDescription] = useState("");
@@ -52,12 +52,12 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
   const [bulkTimeoutSeconds, setBulkTimeoutSeconds] = useState(60);
   const [bulkNameFilter, setBulkNameFilter] = useState("");
   const [bulkTenantCode, setBulkTenantCode] = useState("");
-  const [bulkTunnelStatus, setBulkTunnelStatus] = useState("");
+  const [bulkCfTunnelStatus, setBulkCfTunnelStatus] = useState("");
   const [bulkEnrollmentStatus, setBulkEnrollmentStatus] = useState("");
-  const [bulkStorePage, setBulkStorePage] = useState(1);
+  const [bulkTunnelPage, setBulkTunnelPage] = useState(1);
   const [bulkSelectAll, setBulkSelectAll] = useState(false);
-  const [bulkSelectedStores, setBulkSelectedStores] = useState<Record<string, Store>>({});
-  const [bulkExcludedStores, setBulkExcludedStores] = useState<Record<string, Store>>({});
+  const [bulkSelectedTunnels, setBulkSelectedTunnels] = useState<Record<string, Tunnel>>({});
+  const [bulkExcludedTunnels, setBulkExcludedTunnels] = useState<Record<string, Tunnel>>({});
   const [bulkLeftChecked, setBulkLeftChecked] = useState<string[]>([]);
   const [bulkRightChecked, setBulkRightChecked] = useState<string[]>([]);
   const [bulkRightPage, setBulkRightPage] = useState(1);
@@ -66,10 +66,10 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
   const [bulkDetailRun, setBulkDetailRun] = useState<BulkScriptRun | null>(null);
   const [bulkDetailPage, setBulkDetailPage] = useState(1);
   const [bulkDetailStatus, setBulkDetailStatus] = useState("");
-  const [bulkDetailStoreSearch, setBulkDetailStoreSearch] = useState("");
+  const [bulkDetailTunnelSearch, setBulkDetailTunnelSearch] = useState("");
   const [expandedBulkExecutionId, setExpandedBulkExecutionId] = useState<string | null>(null);
   const deferredExecutionSearch = useDeferredValue(executionSearch.trim());
-  const deferredBulkDetailStoreSearch = useDeferredValue(bulkDetailStoreSearch.trim());
+  const deferredBulkDetailTunnelSearch = useDeferredValue(bulkDetailTunnelSearch.trim());
   const handledInitialBulkRunId = useRef<string | null>(null);
   const { data: initialBulkDetailData } = useQuery({
     queryKey: ["bulk-script-execution-deep-link", scriptId, initialBulkRunId],
@@ -85,19 +85,19 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
   const detail = detailData?.script;
   const selectedVersionData = useMemo(() => detail?.versions.find((entry) => entry.version === selectedVersion) ?? detail?.versions[0], [detail, selectedVersion]);
   const bulkListPageSize = 5;
-  const bulkFilterParams = new URLSearchParams({ page: String(bulkStorePage), pageSize: String(bulkListPageSize) });
+  const bulkFilterParams = new URLSearchParams({ page: String(bulkTunnelPage), pageSize: String(bulkListPageSize) });
   if (bulkNameFilter) bulkFilterParams.set("name", bulkNameFilter);
   if (bulkTenantCode) bulkFilterParams.set("tenantCode", bulkTenantCode);
-  if (bulkTunnelStatus) bulkFilterParams.set("tunnelStatus", bulkTunnelStatus);
+  if (bulkCfTunnelStatus) bulkFilterParams.set("cfTunnelStatus", bulkCfTunnelStatus);
   if (bulkEnrollmentStatus) bulkFilterParams.set("enrollmentStatus", bulkEnrollmentStatus);
-  const { data: bulkStoreData } = useQuery({
-    queryKey: ["bulk-store-matches", bulkNameFilter, bulkTenantCode, bulkTunnelStatus, bulkEnrollmentStatus, bulkStorePage],
-    queryFn: () => api.get<{ stores: Store[]; pagination: { page: number; pageSize: number; total: number; totalPages: number } }>(`/api/stores?${bulkFilterParams}`),
+  const { data: bulkTunnelData } = useQuery({
+    queryKey: ["bulk-tunnel-matches", bulkNameFilter, bulkTenantCode, bulkCfTunnelStatus, bulkEnrollmentStatus, bulkTunnelPage],
+    queryFn: () => api.get<{ tunnels: Tunnel[]; pagination: { page: number; pageSize: number; total: number; totalPages: number } }>(`/api/tunnels?${bulkFilterParams}`),
     enabled: bulkOpen
   });
   const { data: bulkTenantCodesData } = useQuery({
     queryKey: ["tenant-codes"],
-    queryFn: () => api.get<{ tenantCodes: string[] }>("/api/stores/tenant-codes"),
+    queryFn: () => api.get<{ tenantCodes: string[] }>("/api/tunnels/tenant-codes"),
     enabled: bulkOpen
   });
   const { data: bulkSettingsData } = useQuery({
@@ -108,8 +108,8 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
   const bulkTenantCodeOptions = useMemo(() => [{ value: "", label: "Any tenant" }, ...(bulkTenantCodesData?.tenantCodes ?? []).map((code) => ({ value: code, label: code }))], [bulkTenantCodesData]);
   const bulkDetailPageSize = 10;
   const { data: bulkDetailData } = useQuery({
-    queryKey: ["bulk-script-execution-detail", scriptId, bulkDetailRun?.id, bulkDetailStatus, deferredBulkDetailStoreSearch, bulkDetailPage, bulkDetailPageSize],
-    queryFn: () => api.get<{ run: BulkScriptRun; summary: ExecutionStats; executions: ScriptCommandExecution[]; pagination: { page: number; pageSize: number; total: number; totalPages: number } }>(`/api/scripts/${scriptId}/bulk-executions/${bulkDetailRun!.id}?page=${bulkDetailPage}&pageSize=${bulkDetailPageSize}${bulkDetailStatus ? `&status=${bulkDetailStatus}` : ""}${deferredBulkDetailStoreSearch ? `&storeSearch=${encodeURIComponent(deferredBulkDetailStoreSearch)}` : ""}`),
+    queryKey: ["bulk-script-execution-detail", scriptId, bulkDetailRun?.id, bulkDetailStatus, deferredBulkDetailTunnelSearch, bulkDetailPage, bulkDetailPageSize],
+    queryFn: () => api.get<{ run: BulkScriptRun; summary: ExecutionStats; executions: ScriptCommandExecution[]; pagination: { page: number; pageSize: number; total: number; totalPages: number } }>(`/api/scripts/${scriptId}/bulk-executions/${bulkDetailRun!.id}?page=${bulkDetailPage}&pageSize=${bulkDetailPageSize}${bulkDetailStatus ? `&status=${bulkDetailStatus}` : ""}${deferredBulkDetailTunnelSearch ? `&tunnelSearch=${encodeURIComponent(deferredBulkDetailTunnelSearch)}` : ""}`),
     enabled: Boolean(scriptId && bulkDetailRun),
     refetchInterval: (query) => query.state.data?.summary && (query.state.data.summary.scheduled > 0 || query.state.data.summary.running > 0) ? 2000 : false
   });
@@ -132,10 +132,10 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
     setExpandedExecutionId(null);
   }, [scriptId, selectedVersion, deferredExecutionSearch, executionFrom, executionTo]);
   useEffect(() => {
-    setBulkStorePage(1);
+    setBulkTunnelPage(1);
     setBulkLeftChecked([]);
     setBulkRightPage(1);
-  }, [bulkNameFilter, bulkTenantCode, bulkTunnelStatus, bulkEnrollmentStatus]);
+  }, [bulkNameFilter, bulkTenantCode, bulkCfTunnelStatus, bulkEnrollmentStatus]);
   useEffect(() => {
     setBulkRightPage(1);
     setBulkRightChecked([]);
@@ -149,10 +149,10 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
     handledInitialBulkRunId.current = initialBulkRunId;
     setBulkDetailRun({ ...initialBulkDetailData.run, selectedCount: initialBulkDetailData.summary.total, ...initialBulkDetailData.summary });
     setBulkDetailStatus("");
-    setBulkDetailStoreSearch("");
+    setBulkDetailTunnelSearch("");
     setBulkDetailPage(1);
   }, [initialBulkDetailData, initialBulkRunId]);
-  useEffect(() => { setBulkDetailPage(1); setExpandedBulkExecutionId(null); }, [bulkDetailRun?.id, bulkDetailStatus, deferredBulkDetailStoreSearch]);
+  useEffect(() => { setBulkDetailPage(1); setExpandedBulkExecutionId(null); }, [bulkDetailRun?.id, bulkDetailStatus, deferredBulkDetailTunnelSearch]);
   useEffect(() => { setExpandedBulkExecutionId(null); }, [bulkDetailPage]);
   useEffect(() => {
     if (bulkDetailData?.pagination && bulkDetailPage > bulkDetailData.pagination.totalPages) setBulkDetailPage(bulkDetailData.pagination.totalPages);
@@ -220,7 +220,7 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["scripts"] }),
         queryClient.invalidateQueries({ queryKey: ["command-executions"] }),
-        queryClient.invalidateQueries({ queryKey: ["store-detail"] })
+        queryClient.invalidateQueries({ queryKey: ["tunnel-detail"] })
       ]);
       toast.success(`${result.scriptName} deleted with ${result.deletedExecutionCount} execution record${result.deletedExecutionCount === 1 ? "" : "s"}`);
       onClose();
@@ -240,11 +240,11 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
       scriptVersionId: selectedVersionData?.id,
       name: bulkName,
       description: bulkDescription,
-      filters: { name: bulkNameFilter || undefined, tenantCode: bulkTenantCode || undefined, tunnelStatus: bulkTunnelStatus || undefined, enrollmentStatus: bulkEnrollmentStatus || undefined },
+      filters: { name: bulkNameFilter || undefined, tenantCode: bulkTenantCode || undefined, cfTunnelStatus: bulkCfTunnelStatus || undefined, enrollmentStatus: bulkEnrollmentStatus || undefined },
       selectAll: bulkSelectAll,
       timeoutMs: bulkTimeoutSeconds * 1000,
       argumentBindings: bulkArgumentBindings,
-      ...(bulkSelectAll ? { excludeStoreIds: Object.keys(bulkExcludedStores) } : { storeIds: Object.keys(bulkSelectedStores) })
+      ...(bulkSelectAll ? { excludeTunnelIds: Object.keys(bulkExcludedTunnels) } : { tunnelIds: Object.keys(bulkSelectedTunnels) })
     }),
     onSuccess: async () => {
       setBulkOpen(false);
@@ -254,37 +254,37 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to start bulk execution")
   });
-  const bulkSelectedList = useMemo(() => Object.values(bulkSelectedStores).sort((left, right) => left.displayName.localeCompare(right.displayName)), [bulkSelectedStores]);
+  const bulkSelectedList = useMemo(() => Object.values(bulkSelectedTunnels).sort((left, right) => left.displayName.localeCompare(right.displayName)), [bulkSelectedTunnels]);
   // A single "available variables" list can't be authoritative across many
-  // stores - account/zone/store-scoped values can differ per target. This is
+  // tunnels - account/zone/tunnel-scoped values can differ per target. This is
   // a best-effort union (global settings + built-ins + whatever the
-  // currently-visible matched/selected stores themselves define) to populate
+  // currently-visible matched/selected tunnels themselves define) to populate
   // the variable picker; the actual value used for a "variable" binding is
-  // still resolved fresh per store at execution time.
+  // still resolved fresh per tunnel at execution time.
   const bulkAvailableVariables = useMemo(() => {
     const merged: ExecutionVariables = { ...(bulkSettingsData?.settings.executionVariables ?? {}) };
-    for (const store of [...(bulkStoreData?.stores ?? []), ...bulkSelectedList]) Object.assign(merged, store.executionVariables ?? {});
-    for (const name of ["TENANT_CODE", "STORE_NAME", "STORE_CODE"]) merged[name] ??= "";
+    for (const tunnel of [...(bulkTunnelData?.tunnels ?? []), ...bulkSelectedList]) Object.assign(merged, tunnel.executionVariables ?? {});
+    for (const name of ["TENANT_CODE", "TUNNEL_NAME", "TUNNEL_CODE"]) merged[name] ??= "";
     return merged;
-  }, [bulkSettingsData, bulkStoreData, bulkSelectedList]);
+  }, [bulkSettingsData, bulkTunnelData, bulkSelectedList]);
   // Global values are the same everywhere, so they're safe to preview
-  // literally. Everything else (built-ins, and any store's own variables)
-  // came from one specific store and isn't representative of the whole
+  // literally. Everything else (built-ins, and any tunnel's own variables)
+  // came from one specific tunnel and isn't representative of the whole
   // selection, so its preview should say so instead of showing that one
   // sampled value as if it applied to every target.
-  const bulkVariesPerStoreNames = useMemo(
+  const bulkVariesPerTunnelNames = useMemo(
     () => Object.keys(bulkAvailableVariables).filter((name) => !(name in (bulkSettingsData?.settings.executionVariables ?? {}))),
     [bulkAvailableVariables, bulkSettingsData]
   );
-  const matchesBulkFilter = (store: Store) =>
-    (!bulkNameFilter.trim() || store.displayName.toLowerCase().includes(bulkNameFilter.trim().toLowerCase()) || store.storeCode.toLowerCase().includes(bulkNameFilter.trim().toLowerCase()))
-    && (!bulkTenantCode.trim() || store.tenantCode.toLowerCase().includes(bulkTenantCode.trim().toLowerCase()))
-    && (!bulkTunnelStatus || store.tunnelStatus === bulkTunnelStatus)
-    && (!bulkEnrollmentStatus || store.onboardingStatus === bulkEnrollmentStatus);
+  const matchesBulkFilter = (tunnel: Tunnel) =>
+    (!bulkNameFilter.trim() || tunnel.displayName.toLowerCase().includes(bulkNameFilter.trim().toLowerCase()) || tunnel.tunnelCode.toLowerCase().includes(bulkNameFilter.trim().toLowerCase()))
+    && (!bulkTenantCode.trim() || tunnel.tenantCode.toLowerCase().includes(bulkTenantCode.trim().toLowerCase()))
+    && (!bulkCfTunnelStatus || tunnel.cfTunnelStatus === bulkCfTunnelStatus)
+    && (!bulkEnrollmentStatus || tunnel.onboardingStatus === bulkEnrollmentStatus);
   const bulkSelectedVisibleList = bulkFilterAppliesToSelected ? bulkSelectedList.filter(matchesBulkFilter) : bulkSelectedList;
-  const bulkExcludedMatchingCount = Object.values(bulkExcludedStores).filter(matchesBulkFilter).length;
-  const bulkSelectAllCount = Math.max(0, (bulkStoreData?.pagination.total ?? 0) - bulkExcludedMatchingCount);
-  const bulkLeftMatchedCount = bulkSelectAll ? bulkExcludedMatchingCount : Math.max(0, (bulkStoreData?.pagination.total ?? 0) - bulkSelectedList.filter(matchesBulkFilter).length);
+  const bulkExcludedMatchingCount = Object.values(bulkExcludedTunnels).filter(matchesBulkFilter).length;
+  const bulkSelectAllCount = Math.max(0, (bulkTunnelData?.pagination.total ?? 0) - bulkExcludedMatchingCount);
+  const bulkLeftMatchedCount = bulkSelectAll ? bulkExcludedMatchingCount : Math.max(0, (bulkTunnelData?.pagination.total ?? 0) - bulkSelectedList.filter(matchesBulkFilter).length);
   const bulkRightPageCount = Math.max(1, Math.ceil(bulkSelectedVisibleList.length / bulkListPageSize));
   const bulkRightPageItems = bulkSelectedVisibleList.slice((bulkRightPage - 1) * bulkListPageSize, bulkRightPage * bulkListPageSize);
   useEffect(() => {
@@ -292,15 +292,15 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
   }, [bulkRightPage, bulkRightPageCount]);
   const addBulkChecked = () => {
     if (bulkSelectAll) {
-      setBulkExcludedStores((current) => {
+      setBulkExcludedTunnels((current) => {
         const next = { ...current };
         for (const id of bulkLeftChecked) delete next[id];
         return next;
       });
     } else {
-      setBulkSelectedStores((current) => {
+      setBulkSelectedTunnels((current) => {
         const next = { ...current };
-        for (const store of bulkStoreData?.stores ?? []) if (bulkLeftChecked.includes(store.id)) next[store.id] = store;
+        for (const tunnel of bulkTunnelData?.tunnels ?? []) if (bulkLeftChecked.includes(tunnel.id)) next[tunnel.id] = tunnel;
         return next;
       });
     }
@@ -308,21 +308,21 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
   };
   const addAllBulkMatched = () => {
     setBulkSelectAll(true);
-    setBulkSelectedStores({});
-    setBulkExcludedStores({});
+    setBulkSelectedTunnels({});
+    setBulkExcludedTunnels({});
     setBulkLeftChecked([]);
     setBulkRightChecked([]);
     setBulkRightPage(1);
   };
   const removeBulkChecked = () => {
     if (bulkSelectAll) {
-      setBulkExcludedStores((current) => {
+      setBulkExcludedTunnels((current) => {
         const next = { ...current };
-        for (const store of bulkStoreData?.stores ?? []) if (bulkRightChecked.includes(store.id)) next[store.id] = store;
+        for (const tunnel of bulkTunnelData?.tunnels ?? []) if (bulkRightChecked.includes(tunnel.id)) next[tunnel.id] = tunnel;
         return next;
       });
     } else {
-      setBulkSelectedStores((current) => {
+      setBulkSelectedTunnels((current) => {
         const next = { ...current };
         for (const id of bulkRightChecked) delete next[id];
         return next;
@@ -332,8 +332,8 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
   };
   const removeAllBulkSelected = () => {
     setBulkSelectAll(false);
-    setBulkSelectedStores({});
-    setBulkExcludedStores({});
+    setBulkSelectedTunnels({});
+    setBulkExcludedTunnels({});
     setBulkRightChecked([]);
     setBulkLeftChecked([]);
     setBulkRightPage(1);
@@ -341,9 +341,9 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
 
   return <>
     <SideDrawer open={Boolean(scriptId)} zIndex={zIndex} title={<div className="drawer-heading">{detail ? <HostPlatformIcon platform={detail.platform} size={18} /> : null}<strong>{detail?.name ?? "Script details"}</strong></div>} onClose={onClose}>
-      {detail && <div className="store-drawer-tab">
+      {detail && <div className="tunnel-drawer-tab">
         <div className="script-metadata-grid">
-          <label className="field"><span className="field-label">Name <FieldHelp text="The reusable script name shown when an operator selects a script for a store. Names must be unique within the same platform." /></span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
+          <label className="field"><span className="field-label">Name <FieldHelp text="The reusable script name shown when an operator selects a script for a tunnel. Names must be unique within the same platform." /></span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
           <label className="field"><span className="field-label">Platform</span><select value={detail.platform} disabled><option value="windows">Windows</option><option value="unix">Unix</option></select></label>
           <label className="field"><span className="field-label">Language <FieldHelp text="Controls syntax highlighting and identifies the shell expected on the enrolled host." /></span><select value={language} onChange={(event) => setLanguage(event.target.value as typeof language)}>{detail.platform === "windows" ? <option value="powershell">PowerShell</option> : <><option value="bash">Bash</option><option value="sh">POSIX sh</option></>}</select></label>
           <label className="field"><span className="field-label">Description <FieldHelp text="Optional operator-facing context about the script's purpose, prerequisites, or expected effect." /></span><input value={description} onChange={(event) => setDescription(event.target.value)} placeholder="Optional description" /></label>
@@ -360,22 +360,22 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
         <ScriptEditor value={content} language={language} readOnly={selectedVersionData?.version !== detail.latestVersion} onChange={setContent} />
         <ScriptArgumentsEditor argumentsList={argumentsList} onChange={setArgumentsList} />
         <div className="script-editor-hint-row"><span className="script-editor-hint">{content !== originalContent ? `Creates version ${(detail.latestVersion ?? 0) + 1}` : "No content changes"}</span></div>
-        <div className="form-actions script-editor-actions"><div className="critical-actions"><button className="button button-danger" type="button" disabled={deleteScript.isPending} onClick={() => setDeleteOpen(true)}><Trash2 size={15} />Delete script</button><button className="button button-danger" type="button" onClick={() => { setBulkName(`${name} bulk`); setBulkDescription(""); setBulkTimeoutSeconds(defaultTimeoutSeconds); setBulkNameFilter(""); setBulkTenantCode(""); setBulkTunnelStatus("healthy"); setBulkEnrollmentStatus("active"); setBulkStorePage(1); setBulkSelectAll(false); setBulkSelectedStores({}); setBulkLeftChecked([]); setBulkRightChecked([]); setBulkRightPage(1); setBulkFilterAppliesToSelected(false); setBulkArgumentBindings({}); setBulkOpen(true); }}><Layers3 size={15} />Bulk execute</button></div><label className="script-save-timeout"><span className="script-editor-hint">Default timeout (seconds)</span><input type="number" min={1} max={300} value={defaultTimeoutSeconds} onChange={(event) => setDefaultTimeoutSeconds(Math.min(300, Math.max(1, Number(event.target.value) || 1)))} /></label><button className="button button-primary" type="button" disabled={!name.trim() || !content.trim() || save.isPending || deleteScript.isPending} onClick={() => save.mutate()}><Save size={15} />{save.isPending ? "Saving..." : "Save changes"}</button></div>
-        {selectedVersion && <section className="script-execution-history"><header><div><h3>Execution history</h3><span>Version {selectedVersion}</span></div><div className="command-history-head-actions"><ExecutionStatsSummary stats={executionSummary} /><span>{executionPagination?.total ?? 0} run{executionPagination?.total === 1 ? "" : "s"}</span><button className="icon-button" type="button" title="Refresh execution history" aria-label="Refresh execution history" disabled={refreshExecutions.isPending || executionsFetching} onClick={() => refreshExecutions.mutate()}><RefreshCw size={14} className={refreshExecutions.isPending || executionsFetching ? "spin-icon" : undefined} /></button></div></header><div className="execution-history-filters"><label className="execution-history-search"><Search size={14} /><input type="search" value={executionSearch} onChange={(event) => setExecutionSearch(event.target.value)} placeholder="Search script, description, store, tenant, or code" aria-label="Search script execution history" /></label><label><span>From</span><input type="datetime-local" step="60" value={executionFrom} onChange={(event) => setExecutionFrom(event.target.value)} aria-label="Filter script execution history from time" /></label><label><span>To</span><input type="datetime-local" step="60" value={executionTo} onChange={(event) => setExecutionTo(event.target.value)} aria-label="Filter script execution history to time" /></label></div>{executionHistory.length ? <div className="script-execution-list">{executionHistory.map((item) => {
+        <div className="form-actions script-editor-actions"><div className="critical-actions"><button className="button button-danger" type="button" disabled={deleteScript.isPending} onClick={() => setDeleteOpen(true)}><Trash2 size={15} />Delete script</button><button className="button button-danger" type="button" onClick={() => { setBulkName(`${name} bulk`); setBulkDescription(""); setBulkTimeoutSeconds(defaultTimeoutSeconds); setBulkNameFilter(""); setBulkTenantCode(""); setBulkCfTunnelStatus("healthy"); setBulkEnrollmentStatus("active"); setBulkTunnelPage(1); setBulkSelectAll(false); setBulkSelectedTunnels({}); setBulkLeftChecked([]); setBulkRightChecked([]); setBulkRightPage(1); setBulkFilterAppliesToSelected(false); setBulkArgumentBindings({}); setBulkOpen(true); }}><Layers3 size={15} />Bulk execute</button></div><label className="script-save-timeout"><span className="script-editor-hint">Default timeout (seconds)</span><input type="number" min={1} max={300} value={defaultTimeoutSeconds} onChange={(event) => setDefaultTimeoutSeconds(Math.min(300, Math.max(1, Number(event.target.value) || 1)))} /></label><button className="button button-primary" type="button" disabled={!name.trim() || !content.trim() || save.isPending || deleteScript.isPending} onClick={() => save.mutate()}><Save size={15} />{save.isPending ? "Saving..." : "Save changes"}</button></div>
+        {selectedVersion && <section className="script-execution-history"><header><div><h3>Execution history</h3><span>Version {selectedVersion}</span></div><div className="command-history-head-actions"><ExecutionStatsSummary stats={executionSummary} /><span>{executionPagination?.total ?? 0} run{executionPagination?.total === 1 ? "" : "s"}</span><button className="icon-button" type="button" title="Refresh execution history" aria-label="Refresh execution history" disabled={refreshExecutions.isPending || executionsFetching} onClick={() => refreshExecutions.mutate()}><RefreshCw size={14} className={refreshExecutions.isPending || executionsFetching ? "spin-icon" : undefined} /></button></div></header><div className="execution-history-filters"><label className="execution-history-search"><Search size={14} /><input type="search" value={executionSearch} onChange={(event) => setExecutionSearch(event.target.value)} placeholder="Search script, description, tunnel, tenant, or code" aria-label="Search script execution history" /></label><label><span>From</span><input type="datetime-local" step="60" value={executionFrom} onChange={(event) => setExecutionFrom(event.target.value)} aria-label="Filter script execution history from time" /></label><label><span>To</span><input type="datetime-local" step="60" value={executionTo} onChange={(event) => setExecutionTo(event.target.value)} aria-label="Filter script execution history to time" /></label></div>{executionHistory.length ? <div className="script-execution-list">{executionHistory.map((item) => {
           if (item.kind === "bulk") {
             const run = item.run;
             const active = run.scheduled > 0 || run.running > 0;
             const itemId = `bulk:${run.id}`;
             const isExpanded = expandedExecutionId === itemId;
             const runStats = { total: run.selectedCount, scheduled: run.scheduled, running: run.running, succeeded: run.succeeded, failed: run.failed, timedOut: run.timedOut, cancelled: run.cancelled };
-            return <details className={`command-execution command-execution-${active ? "running" : "succeeded"}`} key={itemId} open={isExpanded} onToggle={(event) => { if (event.currentTarget.open) setExpandedExecutionId(itemId); else if (isExpanded) setExpandedExecutionId(null); }}><summary><span className="command-execution-summary-main"><StatusBadge status={active ? "running" : "succeeded"} label={active ? "Running" : "Complete"} /><span className="command-execution-source-tag">bulk</span><strong className="command-execution-inline-name">{run.name}</strong>{!isExpanded && <ExecutionStatsSummary compact stats={runStats} />}</span><span className="command-execution-timing"><time>{new Date(run.createdAt).toLocaleString()}</time><code>{active ? `${run.scheduled + run.running} active` : `${run.selectedCount} complete`}</code></span></summary>{isExpanded && <div className="bulk-run-group-body"><p>{run.description || "No description"}</p><div className="bulk-run-stats-row"><ExecutionStatsSummary stats={runStats} /><button className="button button-secondary button-small" type="button" onClick={() => { setBulkDetailRun(run); setBulkDetailStatus(""); setBulkDetailStoreSearch(""); setBulkDetailPage(1); }}><Layers3 size={14} />Open bulk run details</button></div></div>}</details>;
+            return <details className={`command-execution command-execution-${active ? "running" : "succeeded"}`} key={itemId} open={isExpanded} onToggle={(event) => { if (event.currentTarget.open) setExpandedExecutionId(itemId); else if (isExpanded) setExpandedExecutionId(null); }}><summary><span className="command-execution-summary-main"><StatusBadge status={active ? "running" : "succeeded"} label={active ? "Running" : "Complete"} /><span className="command-execution-source-tag">bulk</span><strong className="command-execution-inline-name">{run.name}</strong>{!isExpanded && <ExecutionStatsSummary compact stats={runStats} />}</span><span className="command-execution-timing"><time>{new Date(run.createdAt).toLocaleString()}</time><code>{active ? `${run.scheduled + run.running} active` : `${run.selectedCount} complete`}</code></span></summary>{isExpanded && <div className="bulk-run-group-body"><p>{run.description || "No description"}</p><div className="bulk-run-stats-row"><ExecutionStatsSummary stats={runStats} /><button className="button button-secondary button-small" type="button" onClick={() => { setBulkDetailRun(run); setBulkDetailStatus(""); setBulkDetailTunnelSearch(""); setBulkDetailPage(1); }}><Layers3 size={14} />Open bulk run details</button></div></div>}</details>;
           }
           const execution = item.execution;
           const itemId = `execution:${execution.id}`;
           const statusLabel = execution.status === "succeeded" ? "Succeeded" : execution.status === "failed" ? "Error" : execution.status === "timed_out" ? "Timeout" : execution.status === "cancelled" ? "Cancelled" : execution.status === "scheduled" ? "Scheduled" : execution.status === "never_run" ? "Never run" : "Running";
           const environment = scriptExecutionEnvironment(execution);
           const executionTime = execution.startedAt ?? execution.createdAt;
-          return <details className={`command-execution command-execution-${execution.status}`} key={itemId} open={expandedExecutionId === itemId} onToggle={(event) => { if (event.currentTarget.open) setExpandedExecutionId(itemId); else if (expandedExecutionId === itemId) setExpandedExecutionId(null); }}><summary><span className="command-execution-summary-main"><StatusBadge status={execution.status} label={statusLabel} /><button className="script-execution-store-link" type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); openStoreDrawer(execution.storeId, "connect"); }}>{execution.storeDisplayName}</button><code className="command-execution-store-code">{execution.tenantCode} / {execution.storeCode}</code><span className="host-identity" title={environment}><HostPlatformIcon environment={execution.environment} platform={execution.enrollmentPlatform} osName={execution.osName} /><code>{execution.computerName ?? "N/A"}</code></span></span><span className="command-execution-timing"><time>{new Date(executionTime).toLocaleString()}</time><code>{execution.elapsedMs !== null ? `${execution.elapsedMs} ms` : execution.status}</code></span></summary>{expandedExecutionId === itemId && <div className="command-execution-body"><ExecutionLog storeId={execution.storeId} execution={execution} /></div>}</details>;
+          return <details className={`command-execution command-execution-${execution.status}`} key={itemId} open={expandedExecutionId === itemId} onToggle={(event) => { if (event.currentTarget.open) setExpandedExecutionId(itemId); else if (expandedExecutionId === itemId) setExpandedExecutionId(null); }}><summary><span className="command-execution-summary-main"><StatusBadge status={execution.status} label={statusLabel} /><button className="script-execution-tunnel-link" type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); openTunnelDrawer(execution.tunnelId, "connect"); }}>{execution.tunnelDisplayName}</button><code className="command-execution-tunnel-code">{execution.tenantCode} / {execution.tunnelCode}</code><span className="host-identity" title={environment}><HostPlatformIcon environment={execution.environment} platform={execution.enrollmentPlatform} osName={execution.osName} /><code>{execution.computerName ?? "N/A"}</code></span></span><span className="command-execution-timing"><time>{new Date(executionTime).toLocaleString()}</time><code>{execution.elapsedMs !== null ? `${execution.elapsedMs} ms` : execution.status}</code></span></summary>{expandedExecutionId === itemId && <div className="command-execution-body"><ExecutionLog tunnelId={execution.tunnelId} execution={execution} /></div>}</details>;
         })}</div> : <div className="quiet-empty">This script version has not been executed.</div>}{executionPagination && executionPagination.totalPages > 1 && <div className="command-history-pagination"><button className="icon-button" type="button" title="Previous execution page" aria-label="Previous execution page" disabled={executionPagination.page <= 1} onClick={() => { setExpandedExecutionId(null); setExecutionPage((page) => Math.max(1, page - 1)); }}><ChevronLeft size={15} /></button><span>Page {executionPagination.page} of {executionPagination.totalPages}</span><button className="icon-button" type="button" title="Next execution page" aria-label="Next execution page" disabled={executionPagination.page >= executionPagination.totalPages} onClick={() => { setExpandedExecutionId(null); setExecutionPage((page) => page + 1); }}><ChevronRight size={15} /></button></div>}</section>}
       </div>}
     </SideDrawer>
@@ -384,53 +384,53 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
       <div className="bulk-execute-form">
         <div className="bulk-run-metadata-grid"><label className="field"><span className="field-label">Run name</span><input value={bulkName} maxLength={120} onChange={(event) => setBulkName(event.target.value)} /></label><label className="field"><span className="field-label">Description</span><input value={bulkDescription} maxLength={1000} onChange={(event) => setBulkDescription(event.target.value)} placeholder="Change ticket, purpose, or rollout context" /></label></div>
         <section className="bulk-filter-bar">
-          <div className="bulk-filter-grid"><label className="field"><span className="field-label">Name</span><input value={bulkNameFilter} onChange={(event) => setBulkNameFilter(event.target.value)} placeholder="Store name or code" /></label><label className="field"><span className="field-label">Tenant code</span><SearchableSelect name="bulkTenantCode" options={bulkTenantCodeOptions} value={bulkTenantCode} ariaLabel="Filter by tenant code" emptyMessage="No matching tenant" onValueChange={setBulkTenantCode} /></label><label className="field"><span className="field-label">Tunnel status</span><select value={bulkTunnelStatus} onChange={(event) => setBulkTunnelStatus(event.target.value)}><option value="">Any tunnel status</option><option value="not_created">Not created</option><option value="inactive">Inactive</option><option value="healthy">Healthy</option><option value="degraded">Degraded</option><option value="down">Down</option><option value="unknown">Unknown</option></select></label><label className="field"><span className="field-label">Enrollment status</span><select value={bulkEnrollmentStatus} onChange={(event) => setBulkEnrollmentStatus(event.target.value)}><option value="">Any enrollment status</option><option value="active">Active</option><option value="waiting_for_new_enrollment">Waiting for new enrollment</option><option value="url_issued">URL issued</option><option value="claimed">Claimed</option><option value="provisioning">Provisioning</option><option value="expired">Expired</option><option value="failed">Failed</option><option value="revoked">Revoked</option></select></label></div>
+          <div className="bulk-filter-grid"><label className="field"><span className="field-label">Name</span><input value={bulkNameFilter} onChange={(event) => setBulkNameFilter(event.target.value)} placeholder="Tunnel name or code" /></label><label className="field"><span className="field-label">Tenant code</span><SearchableSelect name="bulkTenantCode" options={bulkTenantCodeOptions} value={bulkTenantCode} ariaLabel="Filter by tenant code" emptyMessage="No matching tenant" onValueChange={setBulkTenantCode} /></label><label className="field"><span className="field-label">Connectivity status</span><select value={bulkCfTunnelStatus} onChange={(event) => setBulkCfTunnelStatus(event.target.value)}><option value="">Any connectivity status</option><option value="not_created">Not created</option><option value="inactive">Inactive</option><option value="healthy">Healthy</option><option value="degraded">Degraded</option><option value="down">Down</option><option value="unknown">Unknown</option></select></label><label className="field"><span className="field-label">Enrollment status</span><select value={bulkEnrollmentStatus} onChange={(event) => setBulkEnrollmentStatus(event.target.value)}><option value="">Any enrollment status</option><option value="active">Active</option><option value="waiting_for_new_enrollment">Waiting for new enrollment</option><option value="url_issued">URL issued</option><option value="claimed">Claimed</option><option value="provisioning">Provisioning</option><option value="expired">Expired</option><option value="failed">Failed</option><option value="revoked">Revoked</option></select></label></div>
           <label className="bulk-filter-apply-selected"><input type="checkbox" checked={bulkFilterAppliesToSelected} onChange={(event) => setBulkFilterAppliesToSelected(event.target.checked)} />Also apply for selected</label>
         </section>
         <div className="bulk-transfer-layout">
           <section className="bulk-transfer-panel">
-            <header className="bulk-transfer-panel-header"><h3>Matched stores</h3><span>The filter above is just a helper to find stores — use Add or Add all to build the run.</span></header>
-            <div className="bulk-store-list">{(() => {
-              const visibleStores = (bulkStoreData?.stores ?? []).filter((store) => bulkSelectAll ? Boolean(bulkExcludedStores[store.id]) : !bulkSelectedStores[store.id]);
-              if (!bulkStoreData) return null;
-              if (!visibleStores.length) return <div className="bulk-store-list-empty">{bulkStoreData.stores.length ? "Every store on this page is already selected." : "No stores match these filters."}</div>;
-              return visibleStores.map((store) => <label className="bulk-store-list-row" key={store.id}><input type="checkbox" checked={bulkLeftChecked.includes(store.id)} aria-label={`Check ${store.displayName} to add`} onChange={(event) => setBulkLeftChecked((current) => event.target.checked ? [...new Set([...current, store.id])] : current.filter((id) => id !== store.id))} /><span className="bulk-store-list-info"><strong>{store.displayName}</strong><code>{store.tenantCode} / {store.storeCode}</code></span><StatusBadge status={store.onboardingStatus} /></label>);
+            <header className="bulk-transfer-panel-header"><h3>Matched tunnels</h3><span>The filter above is just a helper to find tunnels — use Add or Add all to build the run.</span></header>
+            <div className="bulk-tunnel-list">{(() => {
+              const visibleTunnels = (bulkTunnelData?.tunnels ?? []).filter((tunnel) => bulkSelectAll ? Boolean(bulkExcludedTunnels[tunnel.id]) : !bulkSelectedTunnels[tunnel.id]);
+              if (!bulkTunnelData) return null;
+              if (!visibleTunnels.length) return <div className="bulk-tunnel-list-empty">{bulkTunnelData.tunnels.length ? "Every tunnel on this page is already selected." : "No tunnels match these filters."}</div>;
+              return visibleTunnels.map((tunnel) => <label className="bulk-tunnel-list-row" key={tunnel.id}><input type="checkbox" checked={bulkLeftChecked.includes(tunnel.id)} aria-label={`Check ${tunnel.displayName} to add`} onChange={(event) => setBulkLeftChecked((current) => event.target.checked ? [...new Set([...current, tunnel.id])] : current.filter((id) => id !== tunnel.id))} /><span className="bulk-tunnel-list-info"><strong>{tunnel.displayName}</strong><code>{tunnel.tenantCode} / {tunnel.tunnelCode}</code></span><StatusBadge status={tunnel.onboardingStatus} /></label>);
             })()}</div>
             <div className="bulk-match-footer">
-              <span className="bulk-match-footer-text"><strong>{bulkLeftMatchedCount} store{bulkLeftMatchedCount === 1 ? "" : "s"} matched</strong></span>
-              {bulkStoreData && <div className="command-history-pagination"><button className="icon-button" type="button" title="Previous store page" aria-label="Previous store page" disabled={bulkStorePage <= 1} onClick={() => setBulkStorePage((page) => Math.max(1, page - 1))}><ChevronLeft size={15} /></button><span>Page {bulkStorePage} of {bulkStoreData.pagination.totalPages}</span><button className="icon-button" type="button" title="Next store page" aria-label="Next store page" disabled={bulkStorePage >= bulkStoreData.pagination.totalPages} onClick={() => setBulkStorePage((page) => page + 1)}><ChevronRight size={15} /></button></div>}
+              <span className="bulk-match-footer-text"><strong>{bulkLeftMatchedCount} tunnel{bulkLeftMatchedCount === 1 ? "" : "s"} matched</strong></span>
+              {bulkTunnelData && <div className="command-history-pagination"><button className="icon-button" type="button" title="Previous tunnel page" aria-label="Previous tunnel page" disabled={bulkTunnelPage <= 1} onClick={() => setBulkTunnelPage((page) => Math.max(1, page - 1))}><ChevronLeft size={15} /></button><span>Page {bulkTunnelPage} of {bulkTunnelData.pagination.totalPages}</span><button className="icon-button" type="button" title="Next tunnel page" aria-label="Next tunnel page" disabled={bulkTunnelPage >= bulkTunnelData.pagination.totalPages} onClick={() => setBulkTunnelPage((page) => page + 1)}><ChevronRight size={15} /></button></div>}
             </div>
           </section>
           <div className="bulk-transfer-controls">
-            <button type="button" className="button button-secondary" disabled={!bulkLeftChecked.length} onClick={addBulkChecked} title="Add checked stores"><ChevronRight size={15} />Add ({bulkLeftChecked.length})</button>
-            <button type="button" className="button button-secondary" disabled={!bulkStoreData?.pagination.total} onClick={addAllBulkMatched} title="Add all stores matching the current filter"><ChevronsRight size={15} />Add all</button>
-            <button type="button" className="button button-secondary" disabled={!bulkRightChecked.length} onClick={removeBulkChecked} title="Remove checked stores"><ChevronLeft size={15} />Remove ({bulkRightChecked.length})</button>
-            <button type="button" className="button button-secondary" disabled={!bulkSelectAll && !bulkSelectedList.length} onClick={removeAllBulkSelected} title="Remove every selected store"><ChevronsLeft size={15} />Remove all</button>
+            <button type="button" className="button button-secondary" disabled={!bulkLeftChecked.length} onClick={addBulkChecked} title="Add checked tunnels"><ChevronRight size={15} />Add ({bulkLeftChecked.length})</button>
+            <button type="button" className="button button-secondary" disabled={!bulkTunnelData?.pagination.total} onClick={addAllBulkMatched} title="Add all tunnels matching the current filter"><ChevronsRight size={15} />Add all</button>
+            <button type="button" className="button button-secondary" disabled={!bulkRightChecked.length} onClick={removeBulkChecked} title="Remove checked tunnels"><ChevronLeft size={15} />Remove ({bulkRightChecked.length})</button>
+            <button type="button" className="button button-secondary" disabled={!bulkSelectAll && !bulkSelectedList.length} onClick={removeAllBulkSelected} title="Remove every selected tunnel"><ChevronsLeft size={15} />Remove all</button>
           </div>
           <section className="bulk-transfer-panel">
-            <header className="bulk-transfer-panel-header"><h3>Selected</h3><span>{bulkSelectAll ? "All stores matching the filter above will run, including stores on other pages" : "Stores picked from the filter on the left"}</span></header>
+            <header className="bulk-transfer-panel-header"><h3>Selected</h3><span>{bulkSelectAll ? "All tunnels matching the filter above will run, including tunnels on other pages" : "Tunnels picked from the filter on the left"}</span></header>
             {bulkSelectAll ? <>
-              <div className="bulk-store-list">{(() => {
-                const includedStores = (bulkStoreData?.stores ?? []).filter((store) => !bulkExcludedStores[store.id]);
-                if (!bulkStoreData) return null;
-                if (!includedStores.length) return <div className="bulk-store-list-empty">{bulkStoreData.stores.length ? "Every store on this page has been removed from the run." : "No stores match these filters."}</div>;
-                return includedStores.map((store) => <label className="bulk-store-list-row bulk-store-list-row-added" key={store.id}><input type="checkbox" checked={bulkRightChecked.includes(store.id)} aria-label={`Check ${store.displayName} to remove`} onChange={(event) => setBulkRightChecked((current) => event.target.checked ? [...new Set([...current, store.id])] : current.filter((id) => id !== store.id))} /><span className="bulk-store-list-info"><strong>{store.displayName}</strong><code>{store.tenantCode} / {store.storeCode}</code></span><StatusBadge status={store.onboardingStatus} /></label>);
+              <div className="bulk-tunnel-list">{(() => {
+                const includedTunnels = (bulkTunnelData?.tunnels ?? []).filter((tunnel) => !bulkExcludedTunnels[tunnel.id]);
+                if (!bulkTunnelData) return null;
+                if (!includedTunnels.length) return <div className="bulk-tunnel-list-empty">{bulkTunnelData.tunnels.length ? "Every tunnel on this page has been removed from the run." : "No tunnels match these filters."}</div>;
+                return includedTunnels.map((tunnel) => <label className="bulk-tunnel-list-row bulk-tunnel-list-row-added" key={tunnel.id}><input type="checkbox" checked={bulkRightChecked.includes(tunnel.id)} aria-label={`Check ${tunnel.displayName} to remove`} onChange={(event) => setBulkRightChecked((current) => event.target.checked ? [...new Set([...current, tunnel.id])] : current.filter((id) => id !== tunnel.id))} /><span className="bulk-tunnel-list-info"><strong>{tunnel.displayName}</strong><code>{tunnel.tenantCode} / {tunnel.tunnelCode}</code></span><StatusBadge status={tunnel.onboardingStatus} /></label>);
               })()}</div>
               <div className="bulk-match-footer">
-                <span className="bulk-match-footer-text"><strong>{bulkSelectAllCount} store{bulkSelectAllCount === 1 ? "" : "s"} selected</strong></span>
-                {bulkStoreData && <div className="command-history-pagination"><button className="icon-button" type="button" title="Previous store page" aria-label="Previous store page" disabled={bulkStorePage <= 1} onClick={() => setBulkStorePage((page) => Math.max(1, page - 1))}><ChevronLeft size={15} /></button><span>Page {bulkStorePage} of {bulkStoreData.pagination.totalPages}</span><button className="icon-button" type="button" title="Next store page" aria-label="Next store page" disabled={bulkStorePage >= bulkStoreData.pagination.totalPages} onClick={() => setBulkStorePage((page) => page + 1)}><ChevronRight size={15} /></button></div>}
+                <span className="bulk-match-footer-text"><strong>{bulkSelectAllCount} tunnel{bulkSelectAllCount === 1 ? "" : "s"} selected</strong></span>
+                {bulkTunnelData && <div className="command-history-pagination"><button className="icon-button" type="button" title="Previous tunnel page" aria-label="Previous tunnel page" disabled={bulkTunnelPage <= 1} onClick={() => setBulkTunnelPage((page) => Math.max(1, page - 1))}><ChevronLeft size={15} /></button><span>Page {bulkTunnelPage} of {bulkTunnelData.pagination.totalPages}</span><button className="icon-button" type="button" title="Next tunnel page" aria-label="Next tunnel page" disabled={bulkTunnelPage >= bulkTunnelData.pagination.totalPages} onClick={() => setBulkTunnelPage((page) => page + 1)}><ChevronRight size={15} /></button></div>}
               </div>
             </> : <>
-              <div className="bulk-store-list">{bulkRightPageItems.length ? bulkRightPageItems.map((store) => <label className="bulk-store-list-row" key={store.id}><input type="checkbox" checked={bulkRightChecked.includes(store.id)} aria-label={`Check ${store.displayName} to remove`} onChange={(event) => setBulkRightChecked((current) => event.target.checked ? [...new Set([...current, store.id])] : current.filter((id) => id !== store.id))} /><span className="bulk-store-list-info"><strong>{store.displayName}</strong><code>{store.tenantCode} / {store.storeCode}</code></span><StatusBadge status={store.onboardingStatus} /></label>) : <div className="bulk-store-list-empty">{bulkFilterAppliesToSelected && bulkSelectedList.length ? "No selected stores match the current filter." : "No stores picked yet. Filter and Add stores from the left, or Add all."}</div>}</div>
+              <div className="bulk-tunnel-list">{bulkRightPageItems.length ? bulkRightPageItems.map((tunnel) => <label className="bulk-tunnel-list-row" key={tunnel.id}><input type="checkbox" checked={bulkRightChecked.includes(tunnel.id)} aria-label={`Check ${tunnel.displayName} to remove`} onChange={(event) => setBulkRightChecked((current) => event.target.checked ? [...new Set([...current, tunnel.id])] : current.filter((id) => id !== tunnel.id))} /><span className="bulk-tunnel-list-info"><strong>{tunnel.displayName}</strong><code>{tunnel.tenantCode} / {tunnel.tunnelCode}</code></span><StatusBadge status={tunnel.onboardingStatus} /></label>) : <div className="bulk-tunnel-list-empty">{bulkFilterAppliesToSelected && bulkSelectedList.length ? "No selected tunnels match the current filter." : "No tunnels picked yet. Filter and Add tunnels from the left, or Add all."}</div>}</div>
               <div className="bulk-match-footer">
-                <span className="bulk-match-footer-text"><strong>{bulkSelectedList.length} store{bulkSelectedList.length === 1 ? "" : "s"} selected</strong></span>
+                <span className="bulk-match-footer-text"><strong>{bulkSelectedList.length} tunnel{bulkSelectedList.length === 1 ? "" : "s"} selected</strong></span>
                 <div className="command-history-pagination"><button className="icon-button" type="button" title="Previous selected page" aria-label="Previous selected page" disabled={bulkRightPage <= 1} onClick={() => setBulkRightPage((page) => Math.max(1, page - 1))}><ChevronLeft size={15} /></button><span>Page {bulkRightPage} of {bulkRightPageCount}</span><button className="icon-button" type="button" title="Next selected page" aria-label="Next selected page" disabled={bulkRightPage >= bulkRightPageCount} onClick={() => setBulkRightPage((page) => page + 1)}><ChevronRight size={15} /></button></div>
               </div>
             </>}
           </section>
         </div>
-        <ArgumentBindingsEditor argumentsList={argumentsList} bindings={bulkArgumentBindings} availableVariables={bulkAvailableVariables} variesPerStoreNames={bulkVariesPerStoreNames} onChange={setBulkArgumentBindings} />
-        <div className="form-actions"><button className="button button-secondary bulk-cancel-button" type="button" onClick={() => setBulkOpen(false)}>Cancel</button><span>{bulkSelectAll ? `${bulkSelectAllCount} selected` : `${bulkSelectedList.length} selected`}</span><label className="field bulk-timeout-field"><span className="field-label">Timeout (s) <FieldHelp text="The maximum time the command agent may let each per-store execution run before terminating it. Allowed range: 1 to 300 seconds." /></span><input type="number" min={1} max={300} value={bulkTimeoutSeconds} onChange={(event) => setBulkTimeoutSeconds(Math.min(300, Math.max(1, Number(event.target.value) || 1)))} /></label><button className="button button-primary" type="button" disabled={!bulkName.trim() || !selectedVersionData || bulkExecute.isPending || (bulkSelectAll ? !bulkSelectAllCount : !bulkSelectedList.length)} onClick={() => bulkExecute.mutate()}><Play size={15} />{bulkExecute.isPending ? "Starting..." : "Execute selected"}</button></div>
+        <ArgumentBindingsEditor argumentsList={argumentsList} bindings={bulkArgumentBindings} availableVariables={bulkAvailableVariables} variesPerTunnelNames={bulkVariesPerTunnelNames} onChange={setBulkArgumentBindings} />
+        <div className="form-actions"><button className="button button-secondary bulk-cancel-button" type="button" onClick={() => setBulkOpen(false)}>Cancel</button><span>{bulkSelectAll ? `${bulkSelectAllCount} selected` : `${bulkSelectedList.length} selected`}</span><label className="field bulk-timeout-field"><span className="field-label">Timeout (s) <FieldHelp text="The maximum time the command agent may let each per-tunnel execution run before terminating it. Allowed range: 1 to 300 seconds." /></span><input type="number" min={1} max={300} value={bulkTimeoutSeconds} onChange={(event) => setBulkTimeoutSeconds(Math.min(300, Math.max(1, Number(event.target.value) || 1)))} /></label><button className="button button-primary" type="button" disabled={!bulkName.trim() || !selectedVersionData || bulkExecute.isPending || (bulkSelectAll ? !bulkSelectAllCount : !bulkSelectedList.length)} onClick={() => bulkExecute.mutate()}><Play size={15} />{bulkExecute.isPending ? "Starting..." : "Execute selected"}</button></div>
       </div>
     </Modal>
     <SideDrawer open={Boolean(bulkDetailRun)} zIndex={(zIndex ?? 100) + 2} title={<div className="drawer-heading"><Layers3 size={18} /><strong>{bulkDetailRun?.name ?? "Bulk execution"}</strong></div>} onClose={() => setBulkDetailRun(null)}>
@@ -439,11 +439,11 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
         const bindingEntries = Object.entries(bulkDetailRun.argumentBindings).sort(([left], [right]) => left.localeCompare(right));
         return previewVersion ? <div className="command-script-preview bulk-script-preview"><header><div><strong>Script preview</strong><span>{detail?.name ?? "Script"} · Version {previewVersion.version}</span></div><code>{detail?.language ?? ""}</code></header><ScriptEditor value={previewVersion.content} language={detail?.language ?? "powershell"} height="220px" readOnly /><details className="execution-applied-variables resolved-variables-preview" open><summary>Argument bindings for this run{bindingEntries.length ? ` (${bindingEntries.length})` : ""}</summary><div className="execution-applied-variable-list">{bindingEntries.length ? bindingEntries.map(([name, binding]) => <div className="execution-applied-variable-row" key={name}><code className="execution-applied-variable-name">{name}</code><code className="execution-applied-variable-value">{binding.type === "variable" ? `→ ${binding.variable}` : binding.value}</code></div>) : <div className="quiet-empty">No explicit bindings; every argument used its own declared default value.</div>}</div></details></div> : null;
       })()}<ExecutionStatsSummary stats={bulkDetailData?.summary ?? { total: bulkDetailRun.selectedCount, scheduled: bulkDetailRun.scheduled, running: bulkDetailRun.running, succeeded: bulkDetailRun.succeeded, failed: bulkDetailRun.failed, timedOut: bulkDetailRun.timedOut, cancelled: bulkDetailRun.cancelled }} />
-        <div className="bulk-detail-filters"><select value={bulkDetailStatus} onChange={(event) => setBulkDetailStatus(event.target.value)} aria-label="Filter bulk executions by status"><option value="">All statuses</option><option value="scheduled">Scheduled</option><option value="running">Running</option><option value="succeeded">Succeeded</option><option value="failed">Error</option><option value="timed_out">Timeout</option><option value="cancelled">Cancelled</option></select><input type="search" value={bulkDetailStoreSearch} onChange={(event) => setBulkDetailStoreSearch(event.target.value)} aria-label="Filter bulk executions by store name, tenant code, or store code" placeholder="Filter store name, tenant, or code" /></div>
+        <div className="bulk-detail-filters"><select value={bulkDetailStatus} onChange={(event) => setBulkDetailStatus(event.target.value)} aria-label="Filter bulk executions by status"><option value="">All statuses</option><option value="scheduled">Scheduled</option><option value="running">Running</option><option value="succeeded">Succeeded</option><option value="failed">Error</option><option value="timed_out">Timeout</option><option value="cancelled">Cancelled</option></select><input type="search" value={bulkDetailTunnelSearch} onChange={(event) => setBulkDetailTunnelSearch(event.target.value)} aria-label="Filter bulk executions by tunnel name, tenant code, or tunnel code" placeholder="Filter tunnel name, tenant, or code" /></div>
         <div className="script-execution-list">{bulkDetailData?.executions.map((execution) => {
           const environment = scriptExecutionEnvironment(execution);
           const isOpen = expandedBulkExecutionId === execution.id;
-          return <details className={`command-execution command-execution-${execution.status}`} key={execution.id} open={isOpen} onToggle={(event) => { if (event.currentTarget.open) setExpandedBulkExecutionId(execution.id); else if (expandedBulkExecutionId === execution.id) setExpandedBulkExecutionId(null); }}><summary><span className="command-execution-summary-main"><StatusBadge status={execution.status} /><button className="script-execution-store-link" type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); openStoreDrawer(execution.storeId, "connect"); }}>{execution.storeDisplayName}</button><code className="command-execution-store-code">{execution.tenantCode} / {execution.storeCode}</code><span className="host-identity" title={environment}><HostPlatformIcon environment={execution.environment} platform={execution.enrollmentPlatform} osName={execution.osName} /><code>{execution.computerName ?? "N/A"}</code></span></span><span className="command-execution-timing"><time>{new Date(execution.startedAt ?? execution.createdAt).toLocaleString()}</time><code>{execution.elapsedMs === null ? execution.status : `${execution.elapsedMs} ms`}</code></span></summary>{isOpen && <div className="command-execution-body"><ExecutionLog storeId={execution.storeId} execution={execution} /></div>}</details>;
+          return <details className={`command-execution command-execution-${execution.status}`} key={execution.id} open={isOpen} onToggle={(event) => { if (event.currentTarget.open) setExpandedBulkExecutionId(execution.id); else if (expandedBulkExecutionId === execution.id) setExpandedBulkExecutionId(null); }}><summary><span className="command-execution-summary-main"><StatusBadge status={execution.status} /><button className="script-execution-tunnel-link" type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); openTunnelDrawer(execution.tunnelId, "connect"); }}>{execution.tunnelDisplayName}</button><code className="command-execution-tunnel-code">{execution.tenantCode} / {execution.tunnelCode}</code><span className="host-identity" title={environment}><HostPlatformIcon environment={execution.environment} platform={execution.enrollmentPlatform} osName={execution.osName} /><code>{execution.computerName ?? "N/A"}</code></span></span><span className="command-execution-timing"><time>{new Date(execution.startedAt ?? execution.createdAt).toLocaleString()}</time><code>{execution.elapsedMs === null ? execution.status : `${execution.elapsedMs} ms`}</code></span></summary>{isOpen && <div className="command-execution-body"><ExecutionLog tunnelId={execution.tunnelId} execution={execution} /></div>}</details>;
         })}</div>{bulkDetailData && bulkDetailData.pagination.totalPages > 1 && <div className="command-history-pagination"><button className="icon-button" type="button" title="Previous bulk execution log page" aria-label="Previous bulk execution log page" disabled={bulkDetailData.pagination.page <= 1} onClick={() => setBulkDetailPage((page) => Math.max(1, page - 1))}><ChevronLeft size={15} /></button><span>Page {bulkDetailData.pagination.page} of {bulkDetailData.pagination.totalPages}</span><button className="icon-button" type="button" title="Next bulk execution log page" aria-label="Next bulk execution log page" disabled={bulkDetailData.pagination.page >= bulkDetailData.pagination.totalPages} onClick={() => setBulkDetailPage((page) => page + 1)}><ChevronRight size={15} /></button></div>}
       </div>}
     </SideDrawer>

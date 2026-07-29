@@ -6,10 +6,10 @@ export type User = {
 
 export type ExecutionVariables = Record<string, string>;
 
-// Store identity values the server injects into every execution. A script that
+// Tunnel identity values the server injects into every execution. A script that
 // declares an argument under one of these names replaces it for that run, so
 // the UI warns wherever an operator can create that collision.
-export const STORE_BUILT_IN_VARIABLES = ["TENANT_CODE", "STORE_NAME", "STORE_CODE"];
+export const TUNNEL_BUILT_IN_VARIABLES = ["TENANT_CODE", "TUNNEL_NAME", "TUNNEL_CODE"];
 
 export type ScriptArgument = {
   name: string;
@@ -34,12 +34,21 @@ export type ArgumentBindings = Record<string, ArgumentBinding>;
 export type ArgumentValueSource =
   | { origin: "custom" }
   | { origin: "default" }
-  | { origin: "variable"; variable: string; scope: "global" | "account" | "zone" | "store" | "built-in" | "computer" };
+  | { origin: "variable"; variable: string; scope: "global" | "account" | "zone" | "tunnel" | "built-in" | "computer" };
+
+export type BrandIcon = "cloud-cog" | "cloud" | "cable" | "globe" | "shield-check" | "server" | "zap";
+
+export type Branding = {
+  icon: BrandIcon;
+  title: string;
+  subtitle: string;
+};
 
 export type AppSettings = {
   publicBaseUrl: string;
   configured: boolean;
   executionVariables: ExecutionVariables;
+  branding: Branding;
   mcp: {
     enabled: boolean;
     endpoint: string;
@@ -55,8 +64,8 @@ export type Zone = {
   cfZoneId: string | null;
   status: string;
   dnsRecordLimit: number;
-  softStoreLimit: number;
-  storeCount: number;
+  softTunnelLimit: number;
+  tunnelCount: number;
   executionVariables: ExecutionVariables;
 };
 
@@ -69,14 +78,14 @@ export type CloudflareAccount = {
   tunnelLimit: number;
   softTunnelLimit: number;
   rdpAllowedEmails: string[];
-  storeCount: number;
+  tunnelCount: number;
   lastSyncedAt: string | null;
   lastError: string | null;
   zones: Zone[];
   executionVariables: ExecutionVariables;
 };
 
-export type StoreRoute = {
+export type TunnelRoute = {
   id: string;
   path: string;
   serviceUrl: string;
@@ -87,25 +96,26 @@ export type StoreRoute = {
   wafRuleId: string | null;
 };
 
-export type StorePublication = {
+export type TunnelPublication = {
   id: string;
   suffix: string;
+  customLabel: string | null;
   hostname: string;
   status: string;
   lastError: string | null;
-  routes: StoreRoute[];
+  routes: TunnelRoute[];
 };
 
-export type Store = {
+export type Tunnel = {
   id: string;
   tenantCode: string;
-  storeCode: string;
+  tunnelCode: string;
   displayName: string;
   originUrl: string;
   hostname: string;
-  tunnelId: string | null;
-  tunnelName: string | null;
-  tunnelStatus: string;
+  cfTunnelId: string | null;
+  cfTunnelName: string | null;
+  cfTunnelStatus: string;
   onboardingStatus: string;
   latestEnrollmentStatus?: string | null;
   hasPendingActivity?: boolean;
@@ -122,10 +132,10 @@ export type Store = {
   rdpTargetIp: string | null;
   rdpUrl: string | null;
   rdpLastError: string | null;
-  publications: StorePublication[];
+  publications: TunnelPublication[];
   executionVariables: ExecutionVariables;
-  enrollments?: StoreEnrollment[];
-  commandExecutions?: StoreCommandExecution[];
+  enrollments?: TunnelEnrollment[];
+  commandExecutions?: TunnelCommandExecution[];
   commandAgent?: {
     enabled: boolean;
     hostname: string;
@@ -137,7 +147,7 @@ export type Store = {
   } | null;
 };
 
-export type StoreDeleteCheck = {
+export type TunnelDeleteCheck = {
   id: "tunnel" | "enrollments" | "commands" | "cloudflare";
   label: string;
   ok: boolean;
@@ -145,15 +155,15 @@ export type StoreDeleteCheck = {
   resolution: string;
 };
 
-export type StoreDeletePreflight = {
-  storeId: string;
+export type TunnelDeletePreflight = {
+  tunnelId: string;
   displayName: string;
   canDelete: boolean;
-  checks: StoreDeleteCheck[];
+  checks: TunnelDeleteCheck[];
   checkedAt: string;
 };
 
-export type StoreEnrollment = {
+export type TunnelEnrollment = {
   id: string;
   computerName: string | null;
   isCurrent: boolean;
@@ -191,7 +201,7 @@ export type StoreEnrollment = {
   }>;
 };
 
-export type StoreCommandExecution = {
+export type TunnelCommandExecution = {
   id: string;
   enrollmentId: string | null;
   scriptType: "managed" | "inline";
@@ -223,11 +233,11 @@ export type StoreCommandExecution = {
   argumentSources: Record<string, ArgumentValueSource>;
 };
 
-export type ScriptCommandExecution = StoreCommandExecution & {
-  storeId: string;
-  storeDisplayName: string;
+export type ScriptCommandExecution = TunnelCommandExecution & {
+  tunnelId: string;
+  tunnelDisplayName: string;
   tenantCode: string;
-  storeCode: string;
+  tunnelCode: string;
   computerName: string | null;
   osName: string | null;
   environment: "windows" | "linux" | "darwin" | "unix" | null;
@@ -311,7 +321,7 @@ export type EnrollmentResult = {
 };
 
 export type UnenrollmentResult = {
-  storeId: string;
+  tunnelId: string;
   enrollmentId: string;
   createdAt: string;
   expiresAt: string;

@@ -1,10 +1,10 @@
 import { Check, Pencil, Plus, Trash2, X } from "lucide-react";
 import { useState } from "react";
-import { STORE_BUILT_IN_VARIABLES, type ArgumentBindings, type ExecutionVariables, type ScriptArgument } from "../types";
+import { TUNNEL_BUILT_IN_VARIABLES, type ArgumentBindings, type ExecutionVariables, type ScriptArgument } from "../types";
 import { FieldHelp } from "./FieldHelp";
 
 // Mirrors the server's expansion rule (apps/server/src/lib/execution-variables.ts)
-// so the operator sees the value a store will actually receive. The server stays
+// so the operator sees the value a tunnel will actually receive. The server stays
 // the authority: this only previews it. A fresh RegExp per call keeps lastIndex
 // from leaking between rows.
 const variableReference = () => /\$(?:\$|\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g;
@@ -214,11 +214,11 @@ export function ScriptArgumentsEditor({ argumentsList, onChange }: { argumentsLi
     shiftAfterRemoval(index);
   };
   return <section className="script-arguments-editor">
-    <header><div><h3>Script arguments</h3><span>Defined per version: saving a change to this list creates a new script version. The default value is used unless an operator maps the argument to a resolved variable or a custom value when preparing a run. Avoid naming an argument after a built-in ({STORE_BUILT_IN_VARIABLES.join(", ")}) - the argument replaces it inside the script. <FieldHelp text="The server injects the store identity built-ins into every execution. If a script declares an argument under one of those names, that argument's mapped value wins and the script no longer sees the store identity value under that name. Pick a different argument name when the script needs both." /></span></div><button className="button button-secondary button-small" type="button" onClick={add}><Plus size={14} />Argument</button></header>
+    <header><div><h3>Script arguments</h3><span>Defined per version: saving a change to this list creates a new script version. The default value is used unless an operator maps the argument to a resolved variable or a custom value when preparing a run. Avoid naming an argument after a built-in ({TUNNEL_BUILT_IN_VARIABLES.join(", ")}) - the argument replaces it inside the script. <FieldHelp text="The server injects the tunnel identity built-ins into every execution. If a script declares an argument under one of those names, that argument's mapped value wins and the script no longer sees the tunnel identity value under that name. Pick a different argument name when the script needs both." /></span></div><button className="button button-secondary button-small" type="button" onClick={add}><Plus size={14} />Argument</button></header>
     {argumentsList.length ? <div className="script-argument-list">{argumentsList.map((argument, index) => {
-      const shadowsBuiltIn = STORE_BUILT_IN_VARIABLES.includes(argument.name.toUpperCase());
+      const shadowsBuiltIn = TUNNEL_BUILT_IN_VARIABLES.includes(argument.name.toUpperCase());
       if (!editingIndexes.has(index)) return <div className="script-argument-row script-argument-row-display" key={index}>
-        <code className="script-argument-name-label">{argument.name}{shadowsBuiltIn && <span className="script-argument-shadow-flag" title={`${argument.name} is a built-in store identity variable. This argument replaces it inside the script.`}>shadows built-in</span>}</code>
+        <code className="script-argument-name-label">{argument.name}{shadowsBuiltIn && <span className="script-argument-shadow-flag" title={`${argument.name} is a built-in tunnel identity variable. This argument replaces it inside the script.`}>shadows built-in</span>}</code>
         <span className="script-argument-value-label">{argument.defaultValue || "—"}</span>
         <span className="script-argument-value-label script-argument-description">{argument.description || "—"}</span>
         <span className="script-argument-required-label">{argument.required ? "Required" : ""}</span>
@@ -240,7 +240,7 @@ export function ScriptArgumentsEditor({ argumentsList, onChange }: { argumentsLi
 }
 
 // Lets an operator decide, per declared argument, how it gets its value for
-// one run: a literal custom value, or a mapping to one of the store's
+// one run: a literal custom value, or a mapping to one of the tunnel's
 // resolved environment variables. Script arguments and environment variables
 // are otherwise independent - this mapping only exists here, for this run.
 export function ArgumentBindingsEditor({
@@ -249,14 +249,14 @@ export function ArgumentBindingsEditor({
   onChange,
   availableVariables,
   sources,
-  variesPerStoreNames = []
+  variesPerTunnelNames = []
 }: {
   argumentsList: ScriptArgument[];
   bindings: ArgumentBindings;
   onChange: (bindings: ArgumentBindings) => void;
   availableVariables: ExecutionVariables;
   sources?: Record<string, string>;
-  variesPerStoreNames?: string[];
+  variesPerTunnelNames?: string[];
 }) {
   const variableNames = Object.keys(availableVariables).sort();
   if (!argumentsList.length) return <div className="quiet-empty">This script has no declared arguments.</div>;
@@ -264,16 +264,16 @@ export function ArgumentBindingsEditor({
     <header>
       <h3>Script arguments</h3>
       <span>
-        Fill each argument with a custom value, or map it to one of the store's resolved environment variables.
-        A custom value may embed variables as <code>$NAME</code> or <code>{"${NAME}"}</code> - for example <code>hello from $STORE_NAME</code>.
-        {" "}<FieldHelp text="Variables are resolved per store at execution time, so one bulk run gives each store its own value. Variables may reference other variables; a reference cycle is rejected and the run fails instead of executing. An unknown name is left as literal text rather than becoming empty. Write $$ for a literal dollar sign. Values are always passed as inert text: a value can never turn into executable script." />
+        Fill each argument with a custom value, or map it to one of the tunnel's resolved environment variables.
+        A custom value may embed variables as <code>$NAME</code> or <code>{"${NAME}"}</code> - for example <code>hello from $TUNNEL_NAME</code>.
+        {" "}<FieldHelp text="Variables are resolved per tunnel at execution time, so one bulk run gives each tunnel its own value. Variables may reference other variables; a reference cycle is rejected and the run fails instead of executing. An unknown name is left as literal text rather than becoming empty. Write $$ for a literal dollar sign. Values are always passed as inert text: a value can never turn into executable script." />
       </span>
     </header>
     <div className="argument-binding-list">{argumentsList.map((argument) => {
       const binding = bindings[argument.name] ?? { type: "custom" as const, value: argument.defaultValue };
-      const variesPerStore = binding.type === "variable"
-        ? variesPerStoreNames.includes(binding.variable)
-        : referencedVariableNames(binding.value).some((name) => variesPerStoreNames.includes(name));
+      const variesPerTunnel = binding.type === "variable"
+        ? variesPerTunnelNames.includes(binding.variable)
+        : referencedVariableNames(binding.value).some((name) => variesPerTunnelNames.includes(name));
       const effectiveValue = binding.type === "variable"
         ? availableVariables[binding.variable] ?? ""
         : expandPreview(binding.value, availableVariables);
@@ -288,8 +288,8 @@ export function ArgumentBindingsEditor({
               {variableNames.map((name) => <option key={name} value={name}>{name}{sources?.[name] ? ` · ${sources[name]}` : ""}</option>)}
             </select>
           : <input value={binding.value} placeholder={argument.description || undefined} onChange={(event) => onChange({ ...bindings, [argument.name]: { type: "custom", value: event.target.value } })} aria-label={`Custom value for ${argument.name}`} />}
-        {variesPerStore
-          ? <span className="argument-binding-preview argument-binding-preview-hint">Resolved per store</span>
+        {variesPerTunnel
+          ? <span className="argument-binding-preview argument-binding-preview-hint">Resolved per tunnel</span>
           : <code className="argument-binding-preview mono" title="Effective value at execution time">{effectiveValue || "—"}</code>}
       </div>;
     })}</div>

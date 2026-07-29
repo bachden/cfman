@@ -5,29 +5,50 @@ import {
   Menu,
   ScrollText,
   Settings,
-  Store as StoreIcon,
+  Cable as TunnelIcon,
   X
 } from "lucide-react";
-import { useState, type ReactNode } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { NavLink } from "react-router-dom";
+import { useQuery } from "@tanstack/react-query";
+import { api } from "../api";
+import type { AppSettings } from "../types";
+import { BRAND_ICON_COMPONENTS, brandFaviconHref } from "./brand-icons";
 
 const navigation = [
   { to: "/", label: "Overview", icon: Activity },
-  { to: "/accounts", label: "Account pool", icon: CloudCog },
-  { to: "/stores", label: "Stores", icon: StoreIcon },
-  { to: "/scripts", label: "Script library", icon: Code2 },
+  { to: "/accounts", label: "Accounts", icon: CloudCog },
+  { to: "/tunnels", label: "Tunnels", icon: TunnelIcon },
+  { to: "/scripts", label: "Scripts", icon: Code2 },
   { to: "/audit", label: "Audit log", icon: ScrollText },
   { to: "/settings", label: "Settings", icon: Settings }
 ];
 
 export function AppShell({ children, username }: { children: ReactNode; username: string }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const { data } = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => api.get<{ settings: AppSettings }>("/api/settings")
+  });
+  const branding = data?.settings.branding;
+  const BrandIconComponent = branding ? BRAND_ICON_COMPONENTS[branding.icon] : CloudCog;
+  useEffect(() => {
+    if (!branding) return;
+    document.title = `${branding.title} — ${branding.subtitle}`;
+    let link = document.querySelector<HTMLLinkElement>('link[rel="icon"]');
+    if (!link) {
+      link = document.createElement("link");
+      link.rel = "icon";
+      document.head.appendChild(link);
+    }
+    link.href = brandFaviconHref(branding.icon);
+  }, [branding]);
   return (
     <div className="app-shell">
       <aside className={`sidebar ${menuOpen ? "sidebar-open" : ""}`}>
         <div className="brand">
-          <div className="brand-mark"><CloudCog size={21} /></div>
-          <div><strong>cloudflare-man</strong><span>DCorp operations</span></div>
+          <div className="brand-mark"><BrandIconComponent size={21} /></div>
+          <div><strong>{branding?.title ?? "cfman"}</strong><span>{branding?.subtitle ?? "Control plane"}</span></div>
           <button className="sidebar-close" type="button" onClick={() => setMenuOpen(false)} aria-label="Close navigation"><X size={19} /></button>
         </div>
         <nav>
@@ -43,7 +64,7 @@ export function AppShell({ children, username }: { children: ReactNode; username
       <div className="main-frame">
         <header className="mobile-header">
           <button className="icon-button" onClick={() => setMenuOpen(true)} aria-label="Open navigation"><Menu size={20} /></button>
-          <strong>cloudflare-man</strong>
+          <strong>{branding?.title ?? "cfman"}</strong>
         </header>
         <main>{children}</main>
       </div>

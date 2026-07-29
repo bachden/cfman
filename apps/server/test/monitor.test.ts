@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { checkBrowserRdpGateway, checkStoreEndpoint } from "../src/lib/monitor.js";
+import { checkBrowserRdpGateway, checkTunnelEndpoint } from "../src/lib/monitor.js";
 
-test("retries a store endpoint while Cloudflare provisioning settles", async () => {
+test("retries a tunnel endpoint while Cloudflare provisioning settles", async () => {
   const originalFetch = globalThis.fetch;
   let calls = 0;
   globalThis.fetch = async () => {
@@ -11,7 +11,7 @@ test("retries a store endpoint while Cloudflare provisioning settles", async () 
     return new Response("ok", { status: 200 });
   };
   try {
-    const result = await checkStoreEndpoint("store.example.com", { attempts: 2, retryDelayMs: 0 });
+    const result = await checkTunnelEndpoint("tunnel.example.com", { attempts: 2, retryDelayMs: 0 });
     assert.equal(result.reachable, true);
     assert.equal(result.statusCode, 200);
     assert.equal(result.attempts, 2);
@@ -28,8 +28,8 @@ test("verifies a route path and treats server errors as unreachable", async () =
     return new Response("upstream failed", { status: 500 });
   };
   try {
-    const result = await checkStoreEndpoint("store.example.com", { path: "/api/health", attempts: 1, retryDelayMs: 0 });
-    assert.equal(requested[0], "https://store.example.com/api/health");
+    const result = await checkTunnelEndpoint("tunnel.example.com", { path: "/api/health", attempts: 1, retryDelayMs: 0 });
+    assert.equal(requested[0], "https://tunnel.example.com/api/health");
     assert.equal(result.reachable, false);
     assert.equal(result.statusCode, 500);
   } finally {

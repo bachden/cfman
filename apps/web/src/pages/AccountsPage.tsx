@@ -16,7 +16,6 @@ type VariableTarget = { kind: "account"; account: CloudflareAccount } | { kind: 
 export function AccountsPage() {
   const queryClient = useQueryClient();
   const [accountModal, setAccountModal] = useState(false);
-  const [zoneAccount, setZoneAccount] = useState<CloudflareAccount | null>(null);
   const [rdpAccount, setRdpAccount] = useState<CloudflareAccount | null>(null);
   const [variableTarget, setVariableTarget] = useState<VariableTarget | null>(null);
   const [deleteAccount, setDeleteAccount] = useState<CloudflareAccount | null>(null);
@@ -37,7 +36,7 @@ export function AccountsPage() {
       <div className="summary-strip">
         <div><span>Accounts</span><strong>{data?.accounts.length ?? 0}</strong></div>
         <div><span>Zones</span><strong>{data?.accounts.reduce((sum, item) => sum + item.zones.length, 0) ?? 0}</strong></div>
-        <div><span>Allocated stores</span><strong>{data?.accounts.reduce((sum, item) => sum + item.storeCount, 0) ?? 0}</strong></div>
+        <div><span>Allocated tunnels</span><strong>{data?.accounts.reduce((sum, item) => sum + item.tunnelCount, 0) ?? 0}</strong></div>
       </div>
       {isLoading ? <div className="loading-block" /> : data?.accounts.length === 0 ? (
         <section className="full-empty"><CloudCog size={28} /><h2>No Cloudflare accounts</h2><button className="button button-primary" onClick={() => setAccountModal(true)}><Plus size={16} />Add account</button></section>
@@ -47,19 +46,18 @@ export function AccountsPage() {
             <section className="account-section" key={account.id}>
               <header className="account-header">
                 <div className="account-identity"><span className="large-glyph"><CloudCog size={20} /></span><div><div className="title-line"><h2>{account.name}</h2><StatusBadge status={account.status} />{account.providerMode === "mock" && <span className="mode-label">TEST</span>}</div><span className="mono subdued">{account.cfAccountId ?? "Local mock provider"}</span></div></div>
-                <div className="account-capacity"><span>Tunnel allocation</span><CapacityBar value={account.storeCount} limit={account.softTunnelLimit} compact /></div>
+                <div className="account-capacity"><span>Tunnel allocation</span><CapacityBar value={account.tunnelCount} limit={account.softTunnelLimit} compact /></div>
                 <div className="account-actions">
                   <button className="button button-secondary" onClick={() => sync.mutate(account.id)} disabled={sync.isPending}><RefreshCw size={15} />Sync</button>
                   <button className="button button-secondary" onClick={() => setRdpAccount(account)}><MonitorCog size={15} />Support emails</button>
                   <button className="button button-secondary" onClick={() => setVariableTarget({ kind: "account", account })}><Braces size={15} />Variables</button>
-                  <button className="button button-secondary" onClick={() => setZoneAccount(account)}><Plus size={15} />Zone</button>
                   <button className="icon-button account-delete" onClick={() => setDeleteAccount(account)} aria-label={`Delete ${account.name}`} title="Delete account"><Trash2 size={16} /></button>
                 </div>
               </header>
               {account.lastError && <div className="inline-alert">{account.lastError}</div>}
               <div className="table-scroll"><table className="zone-table"><thead><tr><th>Zone</th><th>Zone ID</th><th>DNS allocation</th><th>Status</th><th aria-label="Zone variables" /></tr></thead><tbody>
                 {account.zones.length === 0 ? <tr><td colSpan={5}><div className="quiet-empty">No zones synchronized</div></td></tr> : account.zones.map((zone) => (
-                  <tr key={zone.id}><td><div className="primary-cell"><strong>{zone.name}</strong><span>{zone.dnsRecordLimit.toLocaleString()} record limit</span></div></td><td className="mono subdued">{zone.cfZoneId ?? "mock"}</td><td><CapacityBar value={zone.storeCount} limit={zone.softStoreLimit} compact /></td><td><StatusBadge status={zone.status} /></td><td><button className="button button-secondary button-small" type="button" title={`Manage variables for ${zone.name}`} onClick={() => setVariableTarget({ kind: "zone", account, zone })}><Braces size={15} />Variables</button></td></tr>
+                  <tr key={zone.id}><td><div className="primary-cell"><strong>{zone.name}</strong><span>{zone.dnsRecordLimit.toLocaleString()} record limit</span></div></td><td className="mono subdued">{zone.cfZoneId ?? "mock"}</td><td><CapacityBar value={zone.tunnelCount} limit={zone.softTunnelLimit} compact /></td><td><StatusBadge status={zone.status} /></td><td><button className="button button-secondary button-small" type="button" title={`Manage variables for ${zone.name}`} onClick={() => setVariableTarget({ kind: "zone", account, zone })}><Braces size={15} />Variables</button></td></tr>
                 ))}
               </tbody></table></div>
             </section>
@@ -67,7 +65,6 @@ export function AccountsPage() {
         </div>
       )}
       <AddAccountModal open={accountModal} onClose={() => setAccountModal(false)} />
-      <AddZoneModal account={zoneAccount} onClose={() => setZoneAccount(null)} />
       <RdpSettingsModal account={rdpAccount} onClose={() => setRdpAccount(null)} />
       <ScopeVariablesModal target={variableTarget} onClose={() => setVariableTarget(null)} />
       <DeleteAccountModal account={deleteAccount} onClose={() => setDeleteAccount(null)} />
@@ -163,7 +160,7 @@ function AddAccountModal({ open, onClose }: { open: boolean; onClose: () => void
         <label className="field"><span className="field-label">Cloudflare Account ID <FieldHelp text="The 32-character account identifier shown on the Cloudflare account Overview page and in the dashboard URL after dash.cloudflare.com/." /></span><input name="cfAccountId" className="mono-input" autoComplete="off" value={cfAccountId} onChange={(event) => setCfAccountId(event.target.value)} required /></label>
         <ApiTokenGuide accountId={cfAccountId} />
         <label className={`field token-field token-field-${tokenValidation.status}`}>
-          <span className="field-label">Cloudflare API token <FieldHelp text="Create an account-owned custom API token with the permissions listed above. Cloudflare shows its value once; Cloudflare Man validates it now and stores it encrypted after the account is added." /></span>
+          <span className="field-label">Cloudflare API token <FieldHelp text="Create an account-owned custom API token with the permissions listed above. Cloudflare shows its value once; CFMan validates it now and tunnels it encrypted after the account is added." /></span>
           <div className="input-status-control">
             <input name="apiToken" type="password" autoComplete="new-password" value={apiToken} onChange={(event) => setApiToken(event.target.value)} aria-describedby="token-validation-message" required />
             {tokenValidation.status === "validating" && <LoaderCircle className="spin-icon" size={16} />}
@@ -172,8 +169,8 @@ function AddAccountModal({ open, onClose }: { open: boolean; onClose: () => void
           </div>
           {tokenValidation.status !== "idle" && <small id="token-validation-message" className="token-validation-message">{tokenValidation.message}</small>}
         </label>
-        <label className="field"><span className="field-label">Support emails <FieldHelp text="One identity email per line. Each email is granted a Cloudflare Access policy to open browser RDP sessions for stores on this account - this is the account's only email list, not a separate contact address. Use the operators' login emails." /></span><textarea name="rdpAllowedEmails" rows={4} placeholder="operator@example.com" required /></label>
-        <label className="field"><span className="field-label">Soft tunnel limit <FieldHelp text="A local allocation threshold for this account. Cloudflare Man stops assigning new stores at this number; it does not change the Cloudflare quota." /></span><input name="softTunnelLimit" type="number" min="1" max="1000" defaultValue="750" required /></label>
+        <label className="field"><span className="field-label">Support emails <FieldHelp text="One identity email per line. Each email is granted a Cloudflare Access policy to open browser RDP sessions for tunnels on this account - this is the account's only email list, not a separate contact address. Use the operators' login emails." /></span><textarea name="rdpAllowedEmails" rows={4} placeholder="operator@example.com" required /></label>
+        <label className="field"><span className="field-label">Soft tunnel limit <FieldHelp text="A local allocation threshold for this account. CFMan stops assigning new tunnels at this number; it does not change the Cloudflare quota." /></span><input name="softTunnelLimit" type="number" min="1" max="1000" defaultValue="750" required /></label>
         <div className="form-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button><button className="button button-primary" type="submit" disabled={mutation.isPending || tokenValidation.status !== "valid"}>{mutation.isPending ? "Adding..." : "Add account"}</button></div>
       </form>
     </Modal>
@@ -186,7 +183,7 @@ const apiTokenPermissions = [
   ["Account", "Cloudflare One Networks", "Write", "Manage tunnel routes and virtual networks"],
   ["Account", "Zero Trust", "Write", "Create browser RDP targets"],
   ["Account", "Access: Apps and Policies", "Write", "Protect browser RDP sessions"],
-  ["Zone", "DNS", "Write", "Create and update store hostnames"],
+  ["Zone", "DNS", "Write", "Create and update tunnel hostnames"],
   ["Zone", "Zone", "Read", "Synchronize available zones"],
   ["Zone", "WAF", "Write", "Manage per-route source IP policies"],
 ] as const;
@@ -239,19 +236,19 @@ function DeleteAccountModal({ account, onClose }: { account: CloudflareAccount |
     },
     onError: (requestError) => setError(requestError instanceof Error ? requestError.message : "Unable to delete account")
   });
-  const hasStores = (account?.storeCount ?? 0) > 0;
+  const hasTunnels = (account?.tunnelCount ?? 0) > 0;
   return (
     <Modal open={Boolean(account)} title={`Delete ${account?.name ?? "account"}`} onClose={onClose}>
       <div className="delete-confirmation">
         {error && <div className="form-error">{error}</div>}
-        {hasStores ? (
-          <div className="inline-alert">This account is assigned to {account?.storeCount} store{account?.storeCount === 1 ? "" : "s"}. Reassign or delete them first.</div>
+        {hasTunnels ? (
+          <div className="inline-alert">This account is assigned to {account?.tunnelCount} tunnel{account?.tunnelCount === 1 ? "" : "s"}. Reassign or delete them first.</div>
         ) : (
-          <p>This removes the account and its synchronized zones from Cloudflare Man. Existing Cloudflare tunnels, DNS records, and Access policies are not deleted.</p>
+          <p>This removes the account and its synchronized zones from CFMan. Existing Cloudflare tunnels, DNS records, and Access policies are not deleted.</p>
         )}
         <div className="form-actions">
           <button className="button button-secondary" type="button" onClick={onClose}>Cancel</button>
-          <button className="button button-danger" type="button" onClick={() => mutation.mutate()} disabled={mutation.isPending || hasStores}><Trash2 size={15} />{mutation.isPending ? "Deleting..." : "Delete account"}</button>
+          <button className="button button-danger" type="button" onClick={() => mutation.mutate()} disabled={mutation.isPending || hasTunnels}><Trash2 size={15} />{mutation.isPending ? "Deleting..." : "Delete account"}</button>
         </div>
       </div>
     </Modal>
@@ -276,21 +273,6 @@ function RdpSettingsModal({ account, onClose }: { account: CloudflareAccount | n
     const form = new FormData(event.currentTarget);
     mutation.mutate(parseEmails(form.get("rdpAllowedEmails")));
   };
-  return <Modal open={Boolean(account)} title={`Support emails · ${account?.name ?? "account"}`} onClose={onClose}><form className="form-stack" onSubmit={submit}>{error && <div className="form-error">{error}</div>}<label className="field"><span className="field-label">Support emails <FieldHelp text="One identity email per line. Each email is granted a Cloudflare Access policy to open browser RDP sessions for stores on this account - this is the account's only email list, not a separate contact address." /></span><textarea name="rdpAllowedEmails" rows={4} defaultValue={account?.rdpAllowedEmails.join("\n") ?? ""} placeholder="operator@example.com" required /></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={mutation.isPending}>{mutation.isPending ? "Updating..." : "Update policy"}</button></div></form></Modal>;
+  return <Modal open={Boolean(account)} title={`Support emails · ${account?.name ?? "account"}`} onClose={onClose}><form className="form-stack" onSubmit={submit}>{error && <div className="form-error">{error}</div>}<label className="field"><span className="field-label">Support emails <FieldHelp text="One identity email per line. Each email is granted a Cloudflare Access policy to open browser RDP sessions for tunnels on this account - this is the account's only email list, not a separate contact address." /></span><textarea name="rdpAllowedEmails" rows={4} defaultValue={account?.rdpAllowedEmails.join("\n") ?? ""} placeholder="operator@example.com" required /></label><div className="form-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={mutation.isPending}>{mutation.isPending ? "Updating..." : "Update policy"}</button></div></form></Modal>;
 }
 
-function AddZoneModal({ account, onClose }: { account: CloudflareAccount | null; onClose: () => void }) {
-  const queryClient = useQueryClient();
-  const [error, setError] = useState("");
-  const mutation = useMutation({
-    mutationFn: (body: unknown) => api.post(`/api/accounts/${account!.id}/zones`, body),
-    onSuccess: async () => { toast.success("Zone added"); await queryClient.invalidateQueries({ queryKey: ["accounts"] }); onClose(); },
-    onError: (requestError) => setError(requestError instanceof Error ? requestError.message : "Unable to add zone")
-  });
-  const submit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    const form = new FormData(event.currentTarget);
-    mutation.mutate({ name: form.get("name"), cfZoneId: form.get("cfZoneId") || undefined, dnsRecordLimit: Number(form.get("dnsRecordLimit")), softStoreLimit: Number(form.get("softStoreLimit")) });
-  };
-  return <Modal open={Boolean(account)} title={`Add zone to ${account?.name ?? "account"}`} onClose={onClose}><form className="form-stack" onSubmit={submit}>{error && <div className="form-error">{error}</div>}<label className="field"><span className="field-label">Zone name <FieldHelp text="The active DNS zone name already added to this Cloudflare account. Find it under Websites in the Cloudflare dashboard." /></span><input name="name" placeholder="stores.example.com" required /></label>{account?.providerMode === "live" && <label className="field"><span className="field-label">Cloudflare Zone ID <FieldHelp text="The zone identifier shown on that domain's Overview page in the Cloudflare dashboard API section." /></span><input name="cfZoneId" className="mono-input" required /></label>}<div className="field-grid"><label className="field"><span className="field-label">DNS record limit <FieldHelp text="The planning ceiling used by Cloudflare Man for records in this zone. It does not change the actual Cloudflare DNS quota." /></span><input name="dnsRecordLimit" type="number" defaultValue="200" min="1" required /></label><label className="field"><span className="field-label">Soft store limit <FieldHelp text="Automatic allocation stops assigning stores to this zone at this number, leaving room below the DNS record limit." /></span><input name="softStoreLimit" type="number" defaultValue="150" min="1" required /></label></div><div className="form-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button><button className="button button-primary" disabled={mutation.isPending}>Add zone</button></div></form></Modal>;
-}

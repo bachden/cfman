@@ -15,7 +15,7 @@ import { enrollmentRoutes } from "./routes/enrollment.js";
 import { mcpRoutes } from "./routes/mcp.js";
 import { settingsRoutes } from "./routes/settings.js";
 import { scriptRoutes } from "./routes/scripts.js";
-import { storeRoutes } from "./routes/stores.js";
+import { tunnelRoutes } from "./routes/tunnels.js";
 
 export async function buildApp() {
   const app = Fastify({
@@ -26,6 +26,26 @@ export async function buildApp() {
 
   await app.register(cookie);
   await app.register(rateLimit, { global: false });
+
+  // Registered before routes and the static-file fallback below: a
+  // fastify-static + setNotFoundHandler registration that runs after
+  // setErrorHandler silently prevents it from firing for prior routes.
+  app.setErrorHandler((error, request, reply) => {
+    request.log.error(error);
+    if (error instanceof ZodError) {
+      return reply.code(400).send({
+        error: "Validation failed",
+        fields: error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message }))
+      });
+    }
+    const pgError = error as Error & { code?: string; constraint?: string; statusCode?: number };
+    if (pgError.code === "23505") {
+      return reply.code(409).send({ error: "A record with the same unique value already exists" });
+    }
+    const statusCode = typeof pgError.statusCode === "number" ? pgError.statusCode : 500;
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return reply.code(statusCode).send({ error: statusCode >= 500 ? "Internal server error" : message });
+  });
 
   app.addHook("onRequest", async (request, reply) => {
     const hostname = request.hostname.toLowerCase();
@@ -47,7 +67,7 @@ export async function buildApp() {
   app.get("/health", async () => ({ status: "ok" }));
   await authRoutes(app);
   await accountRoutes(app);
-  await storeRoutes(app);
+  await tunnelRoutes(app);
   await scriptRoutes(app);
   await enrollmentRoutes(app);
   await dashboardRoutes(app);
@@ -69,23 +89,6 @@ export async function buildApp() {
       app.log.warn("Web build not found; API-only mode enabled");
     }
   }
-
-  app.setErrorHandler((error, request, reply) => {
-    request.log.error(error);
-    if (error instanceof ZodError) {
-      return reply.code(400).send({
-        error: "Validation failed",
-        fields: error.issues.map((issue) => ({ path: issue.path.join("."), message: issue.message }))
-      });
-    }
-    const pgError = error as Error & { code?: string; constraint?: string; statusCode?: number };
-    if (pgError.code === "23505") {
-      return reply.code(409).send({ error: "A record with the same unique value already exists" });
-    }
-    const statusCode = typeof pgError.statusCode === "number" ? pgError.statusCode : 500;
-    const message = error instanceof Error ? error.message : "Unknown error";
-    return reply.code(statusCode).send({ error: statusCode >= 500 ? "Internal server error" : message });
-  });
 
   return app;
 }

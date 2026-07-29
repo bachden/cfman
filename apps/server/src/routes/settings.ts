@@ -1,7 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { writeAudit } from "../lib/audit.js";
-import { getPublicBaseUrlSetting, normalizePublicBaseUrl, setPublicBaseUrl } from "../lib/app-settings.js";
+import { BRAND_ICONS, getBranding, getPublicBaseUrlSetting, normalizePublicBaseUrl, setBranding, setPublicBaseUrl } from "../lib/app-settings.js";
 import { requireAuth, requireSessionAuth } from "../lib/auth.js";
 import { withTransaction } from "../lib/database.js";
 import { getMcpAccessSetting, rotateMcpToken, setMcpEnabled } from "../lib/mcp-access.js";
@@ -20,12 +20,18 @@ const settingsSchema = z.object({
 
 const mcpSettingsSchema = z.object({ enabled: z.boolean() });
 const executionVariableSettingsSchema = z.object({ variables: executionVariablesSchema });
+const brandingSchema = z.object({
+  icon: z.enum(BRAND_ICONS),
+  title: z.string().trim().min(1).max(40),
+  subtitle: z.string().trim().min(1).max(80)
+});
 
 async function settingsResponse() {
-  const [publicSetting, mcpAccess, executionVariables] = await Promise.all([getPublicBaseUrlSetting(), getMcpAccessSetting(), getGlobalExecutionVariables()]);
+  const [publicSetting, mcpAccess, executionVariables, branding] = await Promise.all([getPublicBaseUrlSetting(), getMcpAccessSetting(), getGlobalExecutionVariables(), getBranding()]);
   return {
     ...publicSetting,
     executionVariables,
+    branding,
     mcp: {
       ...mcpAccess,
       endpoint: `${publicSetting.publicBaseUrl}/mcp`
@@ -50,8 +56,7 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       }, client);
       return value;
     });
-    const mcpAccess = await getMcpAccessSetting();
-    return { settings: { publicBaseUrl, configured: true, mcp: { ...mcpAccess, endpoint: `${publicBaseUrl}/mcp` } } };
+    return { settings: await settingsResponse() };
   });
 
   app.put("/api/settings/execution-variables", { preHandler: requireAuth }, async (request) => {
@@ -73,6 +78,23 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       }, client);
     });
     return { variables: body.variables };
+  });
+
+  app.put("/api/settings/branding", { preHandler: requireAuth }, async (request) => {
+    const body = brandingSchema.parse(request.body);
+    const branding = await withTransaction(async (client) => {
+      const value = await setBranding(body, request.authUser!.id, client);
+      await writeAudit({
+        actorUserId: request.authUser!.id,
+        action: "settings.branding_updated",
+        entityType: "settings",
+        entityId: "branding",
+        details: value,
+        ipAddress: request.ip
+      }, client);
+      return value;
+    });
+    return { branding };
   });
 
   app.patch("/api/settings/mcp", { preHandler: requireSessionAuth }, async (request) => {

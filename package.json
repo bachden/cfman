@@ -1,5 +1,5 @@
 {
-  "name": "cloudflare-man",
+  "name": "cfman",
   "version": "0.1.0",
   "private": true,
   "workspaces": [
@@ -9,13 +9,13 @@
     "node": ">=24.18.0 <25"
   },
   "scripts": {
-    "dev": "concurrently --kill-others --names api,web --prefix-colors green,cyan \"npm run dev -w @cloudflare-man/server\" \"npm run dev -w @cloudflare-man/web\"",
-    "build": "npm run build -w @cloudflare-man/server && npm run build -w @cloudflare-man/web",
-    "typecheck": "npm run typecheck -w @cloudflare-man/server && npm run typecheck -w @cloudflare-man/web",
-    "test": "npm run test -w @cloudflare-man/server",
-    "db:create": "npm run db:create -w @cloudflare-man/server",
-    "db:migrate": "npm run db:migrate -w @cloudflare-man/server",
-    "db:seed": "npm run db:seed -w @cloudflare-man/server"
+    "dev": "concurrently --kill-others --names api,web --prefix-colors green,cyan \"npm run dev -w @cfman/server\" \"npm run dev -w @cfman/web\"",
+    "build": "npm run build -w @cfman/server && npm run build -w @cfman/web",
+    "typecheck": "npm run typecheck -w @cfman/server && npm run typecheck -w @cfman/web",
+    "test": "npm run test -w @cfman/server",
+    "db:create": "npm run db:create -w @cfman/server",
+    "db:migrate": "npm run db:migrate -w @cfman/server",
+    "db:seed": "npm run db:seed -w @cfman/server"
   },
   "devDependencies": {
     "concurrently": "^9.2.1"

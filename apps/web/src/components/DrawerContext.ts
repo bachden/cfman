@@ -1,9 +1,9 @@
 import { createContext, useContext } from "react";
 
-export type StoreDrawerTab = "overall" | "ingress" | "connect";
+export type TunnelDrawerTab = "overall" | "ingress" | "connect";
 
 export type DrawerApi = {
-  openStoreDrawer: (storeId: string, tab?: StoreDrawerTab) => void;
+  openTunnelDrawer: (tunnelId: string, tab?: TunnelDrawerTab) => void;
   openScriptDrawer: (scriptId: string, version?: number | null, options?: { bulkRunId?: string | undefined }) => void;
 };
 

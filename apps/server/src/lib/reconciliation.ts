@@ -5,7 +5,7 @@ import { pool } from "./database.js";
 // authenticated success report is still allowed to correct this timeout.
 async function reconcileOrphanedCommandExecutions(): Promise<void> {
   await pool.query(
-    `UPDATE store_command_executions
+    `UPDATE tunnel_command_executions
         SET status = 'timed_out', finished_at = now(),
             elapsed_ms = GREATEST(timeout_ms, EXTRACT(EPOCH FROM (now() - COALESCE(started_at, created_at))) * 1000)::int,
             error = 'No final result was reported before the execution deadline.'
@@ -18,7 +18,7 @@ async function reconcileOrphanedCommandExecutions(): Promise<void> {
 // notice - a claim attempt against it, or the read-time fallback expression
 // used for display. Nothing proactively marks it, so the raw status can sit
 // stale at 'url_issued' long after expires_at has passed. Only the
-// enrollment's own status is touched here - stores.onboarding_status is left
+// enrollment's own status is touched here - tunnels.onboarding_status is left
 // alone, since its display already derives the correct value (including
 // falling back to an older still-active enrollment) via
 // onboardingStatusExpression, and duplicating that fallback logic here would

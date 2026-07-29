@@ -8,13 +8,13 @@ export function StatusBadge({ status, label: customLabel }: { status: string; la
   return <span className={`status status-${tone}`}><i />{label}</span>;
 }
 
-const onlineTunnelStatuses = new Set(["healthy", "degraded"]);
+const onlineCfTunnelStatuses = new Set(["healthy", "degraded"]);
 
-export function tunnelOnlineStatus(tunnelStatus: string): "online" | "offline" {
-  return onlineTunnelStatuses.has(tunnelStatus) ? "online" : "offline";
+export function tunnelOnlineStatus(cfTunnelStatus: string): "online" | "offline" {
+  return onlineCfTunnelStatuses.has(cfTunnelStatus) ? "online" : "offline";
 }
 
-// A store's onboarding status (list) or an individual enrollment's status
+// A tunnel's onboarding status (list) or an individual enrollment's status
 // (drawer) is "pending" while it can still resolve to a different outcome on
 // its own - keep polling so the display updates without a manual refresh.
 const pendingOnboardingStatuses = new Set(["url_issued", "claimed", "provisioning", "waiting_for_new_enrollment"]);
@@ -28,11 +28,11 @@ export function isPendingEnrollmentStatus(status: string): boolean {
   return pendingEnrollmentStatuses.has(status);
 }
 
-// Single source of truth for "should this store keep polling for updates" -
-// shared by the store list and the drawer so both refresh on the same signal
+// Single source of truth for "should this tunnel keep polling for updates" -
+// shared by the tunnel list and the drawer so both refresh on the same signal
 // instead of two conditions silently drifting apart.
-export function storeNeedsFastPolling(store: { onboardingStatus: string; latestEnrollmentStatus?: string | null; hasPendingActivity?: boolean }): boolean {
-  return isPendingOnboardingStatus(store.onboardingStatus)
-    || Boolean(store.latestEnrollmentStatus && isPendingEnrollmentStatus(store.latestEnrollmentStatus))
-    || Boolean(store.hasPendingActivity);
+export function tunnelNeedsFastPolling(tunnel: { onboardingStatus: string; latestEnrollmentStatus?: string | null; hasPendingActivity?: boolean }): boolean {
+  return isPendingOnboardingStatus(tunnel.onboardingStatus)
+    || Boolean(tunnel.latestEnrollmentStatus && isPendingEnrollmentStatus(tunnel.latestEnrollmentStatus))
+    || Boolean(tunnel.hasPendingActivity);
 }

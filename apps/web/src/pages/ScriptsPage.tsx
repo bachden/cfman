@@ -16,8 +16,8 @@ import { SearchableSelect } from "../components/SearchableSelect";
 import type { ManagedScriptSummary, ScriptArgument } from "../types";
 
 const defaultContent = {
-  windows: "Write-Output \"Store: $env:COMPUTERNAME\"\n",
-  unix: "printf 'Store: %s\\n' \"$(hostname)\"\n"
+  windows: "Write-Output \"Tunnel: $env:COMPUTERNAME\"\n",
+  unix: "printf 'Tunnel: %s\\n' \"$(hostname)\"\n"
 };
 
 const platformFilterOptions = [
@@ -105,7 +105,7 @@ export function ScriptsPage() {
   });
 
   return <div className="page">
-    <PageHeader title="Script library" eyebrow="Versioned store automation" actions={<><button className="button button-secondary" type="button" onClick={() => refresh.mutate()} disabled={refresh.isPending}><RefreshCw size={15} className={refresh.isPending ? "spin-icon" : undefined} />{refresh.isPending ? "Refreshing..." : "Refresh"}</button><button className="button button-primary" type="button" onClick={openCreate}><FilePlus2 size={16} />New script</button></>} />
+    <PageHeader title="Script library" eyebrow="Versioned tunnel automation" actions={<><button className="button button-secondary" type="button" onClick={() => refresh.mutate()} disabled={refresh.isPending}><RefreshCw size={15} className={refresh.isPending ? "spin-icon" : undefined} />{refresh.isPending ? "Refreshing..." : "Refresh"}</button><button className="button button-primary" type="button" onClick={openCreate}><FilePlus2 size={16} />New script</button></>} />
     <div className="toolbar">
       <label className="search-box"><Search size={15} /><input value={nameFilter} onChange={(event) => setNameFilter(event.target.value)} placeholder="Search script names" /></label>
       <div className="script-platform-filter"><SearchableSelect name="platformFilter" options={platformFilterOptions} ariaLabel="Filter scripts by platform" emptyMessage="No matching platforms" onValueChange={(value) => setPlatformFilter(value as typeof platformFilter)} /></div>
@@ -126,7 +126,7 @@ export function ScriptsPage() {
     <Modal open={createOpen} title="Create new script" onClose={() => setCreateOpen(false)} width="wide">
       <div className="command-quick-create">
         <div className="script-metadata-grid command-quick-create-fields">
-          <label className="field"><span className="field-label">Name <FieldHelp text="The reusable script name shown when an operator selects a script for a store. Names must be unique within the same platform." /></span><input value={createName} onChange={(event) => setCreateName(event.target.value)} placeholder="Inventory refresh" /></label>
+          <label className="field"><span className="field-label">Name <FieldHelp text="The reusable script name shown when an operator selects a script for a tunnel. Names must be unique within the same platform." /></span><input value={createName} onChange={(event) => setCreateName(event.target.value)} placeholder="Inventory refresh" /></label>
           <label className="field"><span className="field-label">Platform <FieldHelp text="The host family this script can run on. Windows scripts use PowerShell; Unix scripts can use Bash or POSIX sh. The platform cannot change after creation." /></span><select value={createPlatform} onChange={(event) => changeCreatePlatform(event.target.value as "windows" | "unix")}><option value="windows">Windows</option><option value="unix">Unix</option></select></label>
           <label className="field"><span className="field-label">Language</span><select value={createLanguage} onChange={(event) => setCreateLanguage(event.target.value as typeof createLanguage)}>{createPlatform === "windows" ? <option value="powershell">PowerShell</option> : <><option value="bash">Bash</option><option value="sh">POSIX sh</option></>}</select></label>
           <label className="field"><span className="field-label">Description</span><input value={createDescription} onChange={(event) => setCreateDescription(event.target.value)} placeholder="Optional description" /></label>

@@ -1,37 +1,37 @@
-# cloudflare-man
+# cfman
 
-`cloudflare-man` is DCorp's control plane for managing Cloudflare Tunnel connectivity across a large store fleet. It gives Head Office operators one place to manage Cloudflare account pools, zones, stores, tunnel ingress routes, onboarding URLs, installation logs, and browser-based RDP access.
+`cfman` is a control plane for managing Cloudflare Tunnel connectivity across a large fleet of remote locations. It gives Head Office operators one place to manage Cloudflare account pools, zones, tunnels, ingress routes, onboarding URLs, installation logs, and browser-based RDP access.
 
 ## What it solves
 
-Store networks normally sit behind NAT and do not have fixed public IP addresses. Each store runs `cloudflared`, which creates an outbound tunnel to Cloudflare. Head Office can then reach the store through a managed hostname without opening inbound firewall ports or manually configuring every Windows machine.
+Each managed location normally sits behind NAT and does not have a fixed public IP address. It runs `cloudflared`, which opens an outbound connection to Cloudflare - this connection is the tunnel cfman manages. Head Office can then reach the location through a managed hostname without opening inbound firewall ports or manually configuring every Windows machine.
 
 The onboarding flow is:
 
-1. An operator creates a store and its hostname/path connectivity in the web UI.
-2. `cloudflare-man` provisions a managed tunnel, DNS records, and ingress configuration through the Cloudflare API.
+1. An operator creates a tunnel and its hostname/path connectivity in the web UI.
+2. `cfman` provisions a managed tunnel, DNS records, and ingress configuration through the Cloudflare API.
 3. The operator issues a one-time enrollment URL.
-4. The store administrator runs the generated PowerShell installer as Administrator, or the shell installer as root.
+4. The tunnel administrator runs the generated PowerShell installer as Administrator, or the shell installer as root.
 5. The installer claims the tunnel, installs `cloudflared`, starts the local command agent, enables Windows Remote Desktop, and sends structured installation logs back to the server.
 6. The server provisions browser RDP resources and retries endpoint checks while Cloudflare resources propagate.
 
 ## Features
 
 - Cloudflare account pool with live token validation and zone synchronization.
-- Per-store account and zone assignment.
-- Multiple public hostnames per store using a store ID plus optional suffix.
+- Per-tunnel account and zone assignment.
+- Multiple public hostnames per tunnel using a tunnel ID plus optional suffix.
 - Ordered ingress paths, each mapped to a different local service.
 - Managed Cloudflare Tunnel creation and configuration.
 - One-time PowerShell and POSIX enrollment URLs.
 - Existing-install detection with explicit cleanup and override confirmation.
-- Authenticated PowerShell or shell execution through a designated store connectivity route.
+- Authenticated PowerShell or shell execution through a designated tunnel connectivity route.
 - Versioned Windows and Unix script library with an embedded syntax-highlighting editor.
 - Server-side enrollment logs and audit logs.
 - Enrollment host inventory (OS name/version/build, architecture, and machine name) captured per attempt.
 - Windows and Unix installer tracking; once one platform claims a link, the other is marked `staled - ignored`.
 - Browser-based RDP through Cloudflare Access, including private network routes and infrastructure targets.
 - RDP gateway readiness checks with retries for Cloudflare propagation delays.
-- Paginated store inventory and bulk refresh for the visible page.
+- Paginated tunnel inventory and bulk refresh for the visible page.
 - Streamable HTTP MCP server with full control-plane read and write tools for AI agents.
 - Local administrator authentication with forced default-password change.
 
@@ -41,13 +41,13 @@ The onboarding flow is:
 Head Office browser
         |
         v
-cloudflare-man (React/Vite + Node/Fastify)
+cfman (React/Vite + Node/Fastify)
         |                    \
         | Cloudflare API       \ PostgreSQL
         v                       \
-Cloudflare account pool         stores, zones, tunnels, audit
+Cloudflare account pool         tunnels, zones, connectivity, audit
 
-Store Windows host              Head Office browser RDP
+Managed Windows host             Head Office browser RDP
   cloudflared  ----------------> Cloudflare edge / Access
        |                                |
        +--> localhost/LAN services      +--> private tunnel route --> Windows RDP
@@ -66,7 +66,7 @@ Store Windows host              Head Office browser RDP
 - Node.js `24.18.x` (the repository contains an `.nvmrc`).
 - PostgreSQL 14 or newer.
 - A Cloudflare account with an active zone.
-- A public HTTPS hostname reachable by store machines for enrollment callbacks.
+- A public HTTPS hostname reachable by tunnel machines for enrollment callbacks.
 - A Cloudflare API token scoped to the account. The application uses these permissions:
 
   - Account Settings: Read
@@ -113,14 +113,14 @@ SERVER_HOST=127.0.0.1
 SERVER_PORT=3000
 WEB_HOST=127.0.0.1
 WEB_PORT=5173
-DATABASE_URL=postgresql://USER:PASSWORD@localhost:5432/cloudflare_man
+DATABASE_URL=postgresql://USER:PASSWORD@localhost:5432/cfman
 DATABASE_SCHEMA=public
 ENCRYPTION_KEY=64_HEX_CHARACTERS
 ```
 
 `WEB_HOST`/`WEB_PORT` configure the Vite dev server (`apps/web`) only; they are unused in production, where the API serves the built frontend from `SERVER_HOST`/`SERVER_PORT`.
 
-`PUBLIC_BASE_URL` is optional and defaults to `http://SERVER_HOST:SERVER_PORT`. Set it explicitly when the store-reachable URL differs, such as in production. It can also be changed later at runtime from the admin UI, which persists the value to PostgreSQL and takes precedence over `.env`.
+`PUBLIC_BASE_URL` is optional and defaults to `http://SERVER_HOST:SERVER_PORT`. Set it explicitly when the tunnel-reachable URL differs, such as in production. It can also be changed later at runtime from the admin UI, which persists the value to PostgreSQL and takes precedence over `.env`.
 
 Prepare and seed PostgreSQL:
 
@@ -160,7 +160,7 @@ npm run build
 Run the API build with:
 
 ```bash
-NODE_ENV=production npm run start -w @cloudflare-man/server
+NODE_ENV=production npm run start -w @cfman/server
 ```
 
 The production API serves the compiled frontend from `apps/web/dist` when that build exists.
@@ -175,23 +175,23 @@ The production API serves the compiled frontend from `apps/web/dist` when that b
 
 The application stores Cloudflare resource IDs in PostgreSQL so provisioning is idempotent and can be retried safely.
 
-## Store onboarding
+## Tunnel onboarding
 
-In **Stores**, create a store and define one or more publications. Each publication contains:
+In **Tunnels**, create a tunnel and define one or more publications. Each publication contains:
 
-- An optional hostname suffix. Without a suffix, the hostname is based on the store code.
+- An optional hostname suffix. Without a suffix, the hostname is based on the tunnel code.
 - One or more ordered ingress paths.
-- An HTTP or HTTPS service URL reachable from the store host.
+- An HTTP or HTTPS service URL reachable from the tunnel host.
 
-Set a route type to **Command agent** to expose the enrollment-installed script runner on that hostname and path. Only one command agent route is allowed per store. The route's local service URL is managed automatically as `http://127.0.0.1:47831`.
+Set a route type to **Command agent** to expose the enrollment-installed script runner on that hostname and path. Only one command agent route is allowed per tunnel. The route's local service URL is managed automatically as `http://127.0.0.1:47831`.
 
-After the store is created:
+After the tunnel is created:
 
-1. Open the store details and select **New enrollment**.
+1. Open the tunnel details and select **New enrollment**.
 2. Copy the PowerShell URL for Windows or the shell URL for Unix-like systems.
 3. Run PowerShell as Administrator, or run the shell command as root.
 4. If a previous enrollment is detected, confirm cleanup and override only when the existing tunnel should be replaced.
-5. Monitor the installation logs from the store detail view and verify the public endpoint.
+5. Monitor the installation logs from the tunnel detail view and verify the public endpoint.
 
 The installer never receives a Cloudflare API token. It receives a one-time enrollment token, claims a server-provisioned tunnel, and installs the resulting tunnel token as a local service credential.
 
@@ -202,23 +202,23 @@ Connectivity is editable after onboarding. Saving the connectivity editor update
 - Cloudflare Tunnel ingress rules.
 - DNS records for added publications.
 - Removed DNS records for deleted publications.
-- The store's primary hostname and origin URL.
+- The tunnel's primary hostname and origin URL.
 
 Ingress routes are evaluated in order. The root path is kept last so more specific paths are evaluated first.
 
-## Store deletion
+## Tunnel deletion
 
-Use **Delete store** from the store details modal. Cloudflare Man runs a server-side preflight that checks the tunnel connection, installed enrollments, running command executions, and the credentials needed to clean store-owned Cloudflare resources. Every check includes its current state and a resolution step.
+Use **Delete tunnel** from the tunnel details modal. CFMan runs a server-side preflight that checks the tunnel connection, installed enrollments, running command executions, and the credentials needed to clean tunnel-owned Cloudflare resources. Every check includes its current state and a resolution step.
 
-When a safety check is not ready, the operator must enter the exact store display name before **Force delete store** is enabled. Force deletion terminates remaining tunnel connections, removes store publication DNS records and RDP network resources, deletes the tunnel, and then removes the PostgreSQL store record. Cleanup is idempotent for resources already missing from Cloudflare.
+When a safety check is not ready, the operator must enter the exact tunnel display name before **Force delete tunnel** is enabled. Force deletion terminates remaining tunnel connections, removes tunnel publication DNS records and RDP network resources, deletes the tunnel, and then removes the PostgreSQL tunnel record. Cleanup is idempotent for resources already missing from Cloudflare.
 
-## Store command agent
+## Tunnel command agent
 
 The enrollment installer registers the command agent as a Windows scheduled task, Linux systemd service, or macOS launch daemon. The agent listens only on `127.0.0.1:47831`; Cloudflare Tunnel publishes it through the connectivity route marked **Command agent**.
 
-Create and version PowerShell, Bash, or POSIX sh scripts in **Script library**. Open a store's details, select a saved script version compatible with the active enrollment platform, and run it through the command agent. Requests are authenticated with a per-store random token. The token is encrypted in PostgreSQL, written only into the protected local agent script, and never returned to the browser. Executions are limited to a five-minute timeout, and completion metadata is written to the audit log.
+Create and version PowerShell, Bash, or POSIX sh scripts in **Script library**. Open a tunnel's details, select a saved script version compatible with the active enrollment platform, and run it through the command agent. Requests are authenticated with a per-tunnel random token. The token is encrypted in PostgreSQL, written only into the protected local agent script, and never returned to the browser. Executions are limited to a five-minute timeout, and completion metadata is written to the audit log.
 
-The command agent runs as `SYSTEM` or root because store administration scripts may need to manage services and machine configuration. Every execution is linked to the active enrollment and exact script version, then persisted with `running`, `succeeded`, `failed`, or `timed_out` status, elapsed time, exit code, stdout, stderr, and error details. Treat access to the cloudflare-man administrator account as privileged infrastructure access.
+The command agent runs as `SYSTEM` or root because tunnel administration scripts may need to manage services and machine configuration. Every execution is linked to the active enrollment and exact script version, then persisted with `running`, `succeeded`, `failed`, or `timed_out` status, elapsed time, exit code, stdout, stderr, and error details. Treat access to the cfman administrator account as privileged infrastructure access.
 
 ## Browser RDP
 
@@ -242,12 +242,12 @@ If Cloudflare is still propagating a newly-created RDP hostname, the UI keeps re
 
 ## MCP server
 
-Cloudflare Man can expose its control-plane capabilities to AI agents over the MCP Streamable HTTP transport. Open **Settings**, enable **MCP server**, and save the generated token immediately. The full token is shown only when it is first issued or rotated; PostgreSQL stores only its SHA-256 hash.
+CFMan can expose its control-plane capabilities to AI agents over the MCP Streamable HTTP transport. Open **Settings**, enable **MCP server**, and save the generated token immediately. The full token is shown only when it is first issued or rotated; PostgreSQL stores only its SHA-256 hash.
 
 The endpoint follows the configured public base URL:
 
 ```text
-https://cloudflare-man.example.com/mcp
+https://cfman.example.com/mcp
 ```
 
 Configure an MCP client with the endpoint and bearer token. Client configuration formats vary, but a common HTTP configuration is:
@@ -255,20 +255,20 @@ Configure an MCP client with the endpoint and bearer token. Client configuration
 ```json
 {
   "mcpServers": {
-    "cloudflare-man": {
+    "cfman": {
       "type": "http",
-      "url": "https://cloudflare-man.example.com/mcp",
+      "url": "https://cfman.example.com/mcp",
       "headers": {
-        "Authorization": "Bearer ${CLOUDFLARE_MAN_MCP_TOKEN}"
+        "Authorization": "Bearer ${CFMAN_MCP_TOKEN}"
       }
     }
   }
 }
 ```
 
-The server exposes read and write tools for dashboard data, account pools, zones, stores, connectivity, route WAF policies, enrollments, logs, endpoint verification, RDP retries, the script library, saved and inline command execution, audit history, and public URL settings. Named inline scripts remain in store execution history unless an operator or MCP client explicitly saves the exact execution snapshot as version 1 of a reusable library script. Store and script-version execution histories are independently paginated and available through MCP with their store, enrollment, script-version, and execution identifiers. These tools call the same internal API handlers as the web UI, so validation, Cloudflare side effects, deletion preflight checks, and audit logging remain consistent.
+The server exposes read and write tools for dashboard data, account pools, zones, tunnels, connectivity, route WAF policies, enrollments, logs, endpoint verification, RDP retries, the script library, saved and inline command execution, audit history, and public URL settings. Named inline scripts remain in tunnel execution history unless an operator or MCP client explicitly saves the exact execution snapshot as version 1 of a reusable library script. Tunnel and script-version execution histories are independently paginated and available through MCP with their tunnel, enrollment, script-version, and execution identifiers. These tools call the same internal API handlers as the web UI, so validation, Cloudflare side effects, deletion preflight checks, and audit logging remain consistent.
 
-Every tool result contains both human-readable JSON and `structuredContent`. The structured payload includes the original response under `data` and a `references` array containing every `id` and `*Id` found in the tool input or response. Agents can therefore carry exact account, zone, store, tunnel, publication, route, enrollment, script, version, and execution identifiers into subsequent calls without matching display names.
+Every tool result contains both human-readable JSON and `structuredContent`. The structured payload includes the original response under `data` and a `references` array containing every `id` and `*Id` found in the tool input or response. Agents can therefore carry exact account, zone, tunnel, publication, route, enrollment, script, version, and execution identifiers into subsequent calls without matching display names.
 
 MCP bearer tokens have full administrator access. Rotating a token immediately invalidates the old value, and disabling the MCP server rejects all MCP requests. Keep the token in a secret store or environment variable, never in source control or agent prompts that may be retained externally.
 
@@ -281,9 +281,9 @@ The `ops/cloudflared` directory contains a macOS launchd example for publishing 
 - `.env` is intentionally ignored and must never be committed.
 - Cloudflare API tokens are encrypted at rest using `ENCRYPTION_KEY`.
 - Enrollment tokens are stored as SHA-256 hashes and are single-use/expiry-bound.
-- Store command-agent tokens are generated independently and encrypted at rest.
+- Tunnel command-agent tokens are generated independently and encrypted at rest.
 - Enrollment and audit events are persisted in PostgreSQL.
-- Store installer logs are capped and accepted through a rate-limited public endpoint.
+- Tunnel installer logs are capped and accepted through a rate-limited public endpoint.
 - Use HTTPS for `PUBLIC_BASE_URL` in any shared or production environment.
 - Restrict PostgreSQL access to the control-plane host and rotate the encryption key only with a planned data re-encryption procedure.
 
@@ -301,11 +301,11 @@ ops/cloudflared/           Local named-tunnel examples
 
 ### The enrollment URL is invalid or expired
 
-Issue a new URL from the store details view. Enrollment tokens are deliberately short-lived and are not reusable after a successful claim unless the installer uses the explicit override flow.
+Issue a new URL from the tunnel details view. Enrollment tokens are deliberately short-lived and are not reusable after a successful claim unless the installer uses the explicit override flow.
 
-### The store hostname is unreachable immediately after installation
+### The tunnel hostname is unreachable immediately after installation
 
-Cloudflare DNS and tunnel configuration are eventually consistent. Wait briefly, then use **Verify endpoint** or the store-list **Refresh** button. Confirm that the local service URL is listening on the store host.
+Cloudflare DNS and tunnel configuration are eventually consistent. Wait briefly, then use **Verify endpoint** or the tunnel-list **Refresh** button. Confirm that the local service URL is listening on the tunnel host.
 
 ### Browser RDP shows a Cloudflare DNS error
 

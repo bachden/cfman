@@ -16,7 +16,7 @@ export function SideDrawer({ open, title, children, onClose, zIndex }: SideDrawe
       <aside className="side-drawer" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
         <header className="side-drawer-header">
           <div className="side-drawer-title" id="drawer-title">{title}</div>
-          <button className="icon-button" type="button" onClick={onClose} aria-label="Close store details" title="Close">
+          <button className="icon-button" type="button" onClick={onClose} aria-label="Close tunnel details" title="Close">
             <X size={18} />
           </button>
         </header>

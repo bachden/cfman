@@ -13,12 +13,12 @@ export type CloudflareZone = {
   status: string;
 };
 
-export type TunnelStatus = "inactive" | "healthy" | "degraded" | "down";
+export type CfTunnelStatus = "inactive" | "healthy" | "degraded" | "down";
 
 export type CloudflareTunnel = {
   id: string;
   name: string;
-  status?: TunnelStatus;
+  status?: CfTunnelStatus;
   token?: string;
   conns_active_at?: string;
 };
@@ -42,7 +42,7 @@ export type CloudflareVirtualNetwork = {
 export type CloudflareTunnelRoute = {
   id: string;
   network: string;
-  tunnel_id: string;
+  cf_tunnel_id: string;
   virtual_network_id?: string;
 };
 
@@ -103,7 +103,7 @@ function retryDelay(response: Response, attempt: number): number {
   return Math.min(250 * 2 ** attempt, 5_000);
 }
 
-function statusOfTunnel(value: string | undefined): TunnelStatus {
+function statusOfTunnel(value: string | undefined): CfTunnelStatus {
   if (value === "healthy" || value === "degraded" || value === "down" || value === "inactive") return value;
   return "inactive";
 }
@@ -216,14 +216,14 @@ export class CloudflareClient {
     }
   }
 
-  async getTunnelToken(tunnelId: string): Promise<string> {
-    if (this.mode === "mock") return `mock-${tunnelId}`;
-    return this.request<string>(`/accounts/${this.accountId}/cfd_tunnel/${tunnelId}/token`);
+  async getTunnelToken(cfTunnelId: string): Promise<string> {
+    if (this.mode === "mock") return `mock-${cfTunnelId}`;
+    return this.request<string>(`/accounts/${this.accountId}/cfd_tunnel/${cfTunnelId}/token`);
   }
 
-  async configureTunnel(tunnelId: string, ingress: CloudflareIngressRule[]): Promise<void> {
+  async configureTunnel(cfTunnelId: string, ingress: CloudflareIngressRule[]): Promise<void> {
     if (this.mode === "mock") return;
-    await this.request(`/accounts/${this.accountId}/cfd_tunnel/${tunnelId}/configurations`, {
+    await this.request(`/accounts/${this.accountId}/cfd_tunnel/${cfTunnelId}/configurations`, {
       method: "PUT",
       body: JSON.stringify({
         config: {
@@ -245,7 +245,7 @@ export class CloudflareClient {
     allowedIps: string[];
     rulesetId?: string | null;
   }): Promise<{ rulesetId: string | null; ruleId: string | null }> {
-    const description = `cloudflare-man route WAF: ${input.hostname}${input.path}`;
+    const description = `cfman route WAF: ${input.hostname}${input.path}`;
     if (this.mode === "mock") {
       return input.enabled
         ? { rulesetId: input.rulesetId ?? randomUUID(), ruleId: randomUUID() }
@@ -313,21 +313,21 @@ export class CloudflareClient {
     return { rulesetId: ruleset.id, ruleId: managedRule?.id ?? null };
   }
 
-  async createDnsRecord(zoneId: string, hostname: string, tunnelId: string): Promise<{ id: string }> {
+  async createDnsRecord(zoneId: string, hostname: string, cfTunnelId: string): Promise<{ id: string }> {
     if (this.mode === "mock") return { id: randomUUID() };
-    return this.upsertDnsRecord(zoneId, hostname, "CNAME", `${tunnelId}.cfargotunnel.com`);
+    return this.upsertDnsRecord(zoneId, hostname, "CNAME", `${cfTunnelId}.cfargotunnel.com`);
   }
 
   async deleteDnsRecord(zoneId: string, recordId: string): Promise<void> {
     await this.deleteResource(`/zones/${zoneId}/dns_records/${recordId}`);
   }
 
-  async deleteTunnelConnections(tunnelId: string): Promise<void> {
-    await this.deleteResource(`/accounts/${this.accountId}/cfd_tunnel/${tunnelId}/connections`);
+  async deleteTunnelConnections(cfTunnelId: string): Promise<void> {
+    await this.deleteResource(`/accounts/${this.accountId}/cfd_tunnel/${cfTunnelId}/connections`);
   }
 
-  async deleteTunnel(tunnelId: string): Promise<void> {
-    await this.deleteResource(`/accounts/${this.accountId}/cfd_tunnel/${tunnelId}`);
+  async deleteTunnel(cfTunnelId: string): Promise<void> {
+    await this.deleteResource(`/accounts/${this.accountId}/cfd_tunnel/${cfTunnelId}`);
   }
 
   async deleteTunnelRoute(routeId: string): Promise<void> {
@@ -359,13 +359,16 @@ export class CloudflareClient {
       content,
       proxied: true,
       ttl: 1,
-      comment: "Managed by cloudflare-man"
+      comment: "Managed by cfman"
     };
     if (record && record.type !== type) {
       throw new Error(`DNS record ${hostname} already exists as ${record.type}`);
     }
-    if (record && record.content !== content && record.comment !== "Managed by cloudflare-man") {
-      throw new Error(`DNS record ${hostname} already exists and is not managed by cloudflare-man`);
+    // Accepts the pre-rename comment too: records created before the
+    // cloudflare-man -> cfman rename still carry the old marker in
+    // Cloudflare, and this check must keep recognizing them as ours.
+    if (record && record.content !== content && record.comment !== "Managed by cfman" && record.comment !== "Managed by cloudflare-man") {
+      throw new Error(`DNS record ${hostname} already exists and is not managed by cfman`);
     }
     if (record) {
       return this.request<{ id: string }>(`/zones/${zoneId}/dns_records/${record.id}`, {
@@ -399,13 +402,13 @@ export class CloudflareClient {
     if (match) return match;
     return this.request<CloudflareVirtualNetwork>(`/accounts/${this.accountId}/teamnet/virtual_networks`, {
       method: "POST",
-      body: JSON.stringify({ name, comment: "Managed by cloudflare-man", is_default_network: false })
+      body: JSON.stringify({ name, comment: "Managed by cfman", is_default_network: false })
     });
   }
 
-  async ensureTunnelRoute(tunnelId: string, virtualNetworkId: string, targetIp: string): Promise<CloudflareTunnelRoute> {
+  async ensureTunnelRoute(cfTunnelId: string, virtualNetworkId: string, targetIp: string): Promise<CloudflareTunnelRoute> {
     if (this.mode === "mock") {
-      return { id: randomUUID(), network: `${targetIp}/32`, tunnel_id: tunnelId, virtual_network_id: virtualNetworkId };
+      return { id: randomUUID(), network: `${targetIp}/32`, cf_tunnel_id: cfTunnelId, virtual_network_id: virtualNetworkId };
     }
     const network = `${targetIp}/32`;
     const query = new URLSearchParams({
@@ -420,16 +423,16 @@ export class CloudflareClient {
     );
     const existing = routes.find((route) => route.network === network && route.virtual_network_id === virtualNetworkId);
     if (existing) {
-      if (existing.tunnel_id !== tunnelId) throw new Error(`RDP route ${network} is assigned to another tunnel`);
+      if (existing.cf_tunnel_id !== cfTunnelId) throw new Error(`RDP route ${network} is assigned to another tunnel`);
       return existing;
     }
     return this.request<CloudflareTunnelRoute>(`/accounts/${this.accountId}/teamnet/routes`, {
       method: "POST",
       body: JSON.stringify({
         network,
-        tunnel_id: tunnelId,
+        cf_tunnel_id: cfTunnelId,
         virtual_network_id: virtualNetworkId,
-        comment: "Managed by cloudflare-man"
+        comment: "Managed by cfman"
       })
     });
   }
@@ -467,8 +470,8 @@ export class CloudflareClient {
   }
 
   async ensureRdpAccessPolicy(existingId: string | null, allowedEmails: string[]): Promise<CloudflareAccessPolicy> {
-    if (this.mode === "mock") return { id: existingId ?? randomUUID(), name: "cloudflare-man RDP operators" };
-    const name = "cloudflare-man RDP operators";
+    if (this.mode === "mock") return { id: existingId ?? randomUUID(), name: "cfman RDP operators" };
+    const name = "cfman RDP operators";
     const body = {
       name,
       decision: "allow",

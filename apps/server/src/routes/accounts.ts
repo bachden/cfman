@@ -46,9 +46,9 @@ const zoneSchema = z.object({
   name: domainName,
   cfZoneId: z.string().trim().max(100).optional(),
   dnsRecordLimit: z.number().int().min(1).max(1_000_000).default(200),
-  softStoreLimit: z.number().int().min(1).max(1_000_000).default(150)
-}).refine((data) => data.softStoreLimit <= data.dnsRecordLimit, {
-  message: "Soft store limit must not exceed DNS record limit"
+  softTunnelLimit: z.number().int().min(1).max(1_000_000).default(150)
+}).refine((data) => data.softTunnelLimit <= data.dnsRecordLimit, {
+  message: "Soft tunnel limit must not exceed DNS record limit"
 });
 
 const accountListQuerySchema = z.object(nameFilterFields).superRefine(validateNameFilter);
@@ -64,7 +64,7 @@ async function accountList(filter: z.infer<typeof accountListQuerySchema>) {
            a.status, a.tunnel_limit AS "tunnelLimit", a.soft_tunnel_limit AS "softTunnelLimit",
            a.rdp_allowed_emails AS "rdpAllowedEmails", a.execution_variables AS "executionVariables",
            a.last_synced_at AS "lastSyncedAt", a.last_error AS "lastError", a.created_at AS "createdAt",
-           COALESCE((SELECT count(*)::int FROM stores s WHERE s.account_id = a.id), 0) AS "storeCount",
+           COALESCE((SELECT count(*)::int FROM tunnels s WHERE s.account_id = a.id), 0) AS "tunnelCount",
            COALESCE((
              SELECT jsonb_agg(jsonb_build_object(
                'id', z.id,
@@ -72,9 +72,9 @@ async function accountList(filter: z.infer<typeof accountListQuerySchema>) {
                'cfZoneId', z.cf_zone_id,
                'status', z.status,
                'dnsRecordLimit', z.dns_record_limit,
-               'softStoreLimit', z.soft_store_limit,
+               'softTunnelLimit', z.soft_tunnel_limit,
                'executionVariables', z.execution_variables,
-               'storeCount', (SELECT count(*) FROM stores s WHERE s.zone_id = z.id)
+               'tunnelCount', (SELECT count(*) FROM tunnels s WHERE s.zone_id = z.id)
              ) ORDER BY z.name)
              FROM zones z WHERE z.account_id = a.id
            ), '[]'::jsonb) AS zones
@@ -93,8 +93,8 @@ export type AccountSyncResult = {
   error?: string;
 };
 
-// Multiple stores usually share one Cloudflare account. When a caller (e.g. the
-// stores list refreshing several rows at once) triggers a sync per store rather
+// Multiple tunnels usually share one Cloudflare account. When a caller (e.g. the
+// tunnels list refreshing several rows at once) triggers a sync per tunnel rather
 // than once per account, concurrent calls for the SAME account share one
 // in-flight request instead of hitting Cloudflare's API redundantly.
 const inFlightAccountSyncs = new Map<string, Promise<AccountSyncResult>>();
@@ -136,10 +136,10 @@ async function synchronizeAccountOnce(id: string): Promise<AccountSyncResult> {
       for (const tunnel of tunnels) {
         const status = tunnel.status ?? "unknown";
         await db.query(
-          `UPDATE stores
-              SET tunnel_status = $1, last_connected_at = $2, updated_at = now(),
+          `UPDATE tunnels
+              SET cf_tunnel_status = $1, last_connected_at = $2, updated_at = now(),
                   rdp_status = CASE WHEN $1 <> 'healthy' AND rdp_status = 'ready' THEN 'failed' ELSE rdp_status END
-            WHERE account_id = $3 AND tunnel_id = $4`,
+            WHERE account_id = $3 AND cf_tunnel_id = $4`,
           [status, tunnel.conns_active_at ?? null, id, tunnel.id]
         );
       }
@@ -236,7 +236,7 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
       const accountId = inserted.rows[0].id as string;
       if (body.providerMode === "mock") {
         await client.query(
-          `INSERT INTO zones(account_id, name, status, dns_record_limit, soft_store_limit)
+          `INSERT INTO zones(account_id, name, status, dns_record_limit, soft_tunnel_limit)
            VALUES ($1, $2, 'active', 200, 150)`,
           [accountId, body.initialZoneName]
         );
@@ -267,7 +267,7 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
     const outcome = await withTransaction(async (client) => {
       const result = await client.query(
         `SELECT id, name, provider_mode,
-                (SELECT count(*)::int FROM stores WHERE account_id = cloudflare_accounts.id) AS store_count,
+                (SELECT count(*)::int FROM tunnels WHERE account_id = cloudflare_accounts.id) AS tunnel_count,
                 (SELECT count(*)::int FROM zones WHERE account_id = cloudflare_accounts.id) AS zone_count
            FROM cloudflare_accounts
           WHERE id = $1
@@ -276,8 +276,8 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
       );
       const account = result.rows[0];
       if (!account) return { status: "not_found" as const };
-      if (account.store_count > 0) {
-        return { status: "in_use" as const, storeCount: account.store_count as number };
+      if (account.tunnel_count > 0) {
+        return { status: "in_use" as const, tunnelCount: account.tunnel_count as number };
       }
 
       await writeAudit({
@@ -299,7 +299,7 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
     if (outcome.status === "not_found") return reply.code(404).send({ error: "Account not found" });
     if (outcome.status === "in_use") {
       return reply.code(409).send({
-        error: `Account is assigned to ${outcome.storeCount} store${outcome.storeCount === 1 ? "" : "s"}. Reassign or delete them first.`
+        error: `Account is assigned to ${outcome.tunnelCount} tunnel${outcome.tunnelCount === 1 ? "" : "s"}. Reassign or delete them first.`
       });
     }
     return reply.code(204).send();
@@ -314,9 +314,9 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(400).send({ error: "Cloudflare Zone ID is required for live accounts" });
     }
     const result = await pool.query(
-      `INSERT INTO zones(account_id, name, cf_zone_id, dns_record_limit, soft_store_limit)
+      `INSERT INTO zones(account_id, name, cf_zone_id, dns_record_limit, soft_tunnel_limit)
        VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-      [id, body.name, body.cfZoneId ?? null, body.dnsRecordLimit, body.softStoreLimit]
+      [id, body.name, body.cfZoneId ?? null, body.dnsRecordLimit, body.softTunnelLimit]
     );
     await writeAudit({
       actorUserId: request.authUser!.id,
@@ -340,7 +340,12 @@ export async function accountRoutes(app: FastifyInstance): Promise<void> {
     if (!account) return reply.code(404).send({ error: "Account not found" });
 
     let policyId = account.rdp_access_policy_id as string | null;
-    if (account.provider_mode === "live" && policyId) {
+    // Always push to Cloudflare here rather than only when a policy already
+    // exists: without this, saving operator emails before any tunnel on the
+    // account has completed RDP provisioning silently only wrote to
+    // PostgreSQL, and Cloudflare wouldn't see the list until that first
+    // provisioning run.
+    if (account.provider_mode === "live") {
       const client = new CloudflareClient(account.cf_account_id, decryptSecret(account.api_token_encrypted), "live");
       const policy = await client.ensureRdpAccessPolicy(policyId, body.rdpAllowedEmails);
       policyId = policy.id;

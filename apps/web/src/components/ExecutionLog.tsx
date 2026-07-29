@@ -3,7 +3,7 @@ import { Ban, RefreshCw } from "lucide-react";
 import { useState } from "react";
 import { toast } from "sonner";
 import { api } from "../api";
-import { STORE_BUILT_IN_VARIABLES, type ArgumentValueSource, type StoreCommandExecution } from "../types";
+import { TUNNEL_BUILT_IN_VARIABLES, type ArgumentValueSource, type TunnelCommandExecution } from "../types";
 import { CopyButton } from "./CopyButton";
 
 type ArgumentValueScope = Extract<ArgumentValueSource, { origin: "variable" }>["scope"];
@@ -12,7 +12,7 @@ const SCOPE_LABELS: Record<ArgumentValueScope, string> = {
   global: "Global",
   account: "Account",
   zone: "Zone",
-  store: "Store",
+  tunnel: "Tunnel",
   "built-in": "Built-in",
   computer: "Computer"
 };
@@ -25,26 +25,26 @@ function formatArgumentSource(source: ArgumentValueSource | undefined): string {
 }
 
 type ExecutionLogResponse = {
-  execution: Pick<StoreCommandExecution, "status" | "taskId" | "processId" | "stdout" | "stderr" | "error">;
+  execution: Pick<TunnelCommandExecution, "status" | "taskId" | "processId" | "stdout" | "stderr" | "error">;
   logs: Array<{ id: number; stream: "stdout" | "stderr"; line: string; createdAt: string }>;
   nextAfter: number;
 };
 
 type LogStreamFilter = "stdout" | "stderr" | "all";
 
-export function ExecutionLog({ storeId, execution }: { storeId: string; execution: StoreCommandExecution }) {
+export function ExecutionLog({ tunnelId, execution }: { tunnelId: string; execution: TunnelCommandExecution }) {
   const queryClient = useQueryClient();
-  const queryKey = ["execution-stream-logs", storeId, execution.id];
+  const queryKey = ["execution-stream-logs", tunnelId, execution.id];
   const { data, isFetching, refetch } = useQuery({
     queryKey,
-    queryFn: () => api.get<ExecutionLogResponse>(`/api/stores/${storeId}/command-executions/${execution.id}/logs?after=0&limit=1000`),
+    queryFn: () => api.get<ExecutionLogResponse>(`/api/tunnels/${tunnelId}/command-executions/${execution.id}/logs?after=0&limit=1000`),
     refetchInterval: (query) => ["scheduled", "running"].includes(query.state.data?.execution.status ?? execution.status) ? 1000 : false
   });
   const cancel = useMutation({
-    mutationFn: () => api.post<{ executionId: string; taskId: string; status: "cancelled" }>(`/api/stores/${storeId}/command-executions/${execution.id}/cancel`),
+    mutationFn: () => api.post<{ executionId: string; taskId: string; status: "cancelled" }>(`/api/tunnels/${tunnelId}/command-executions/${execution.id}/cancel`),
     onSuccess: async () => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["command-executions", storeId] }),
+        queryClient.invalidateQueries({ queryKey: ["command-executions", tunnelId] }),
         queryClient.invalidateQueries({ queryKey: ["script-executions"] }),
         queryClient.invalidateQueries({ queryKey: ["script-execution-history"] }),
         queryClient.invalidateQueries({ queryKey: ["bulk-script-execution-detail"] }),
@@ -77,12 +77,12 @@ export function ExecutionLog({ storeId, execution }: { storeId: string; executio
         const source = execution.argumentSources?.[name];
         // The built-ins are injected under their own name from the built-in
         // scope. Anything else carrying a built-in name is a declared argument
-        // that took the name over for this run, so the store identity value is
+        // that took the name over for this run, so the tunnel identity value is
         // not what the script saw.
-        const shadowsBuiltIn = STORE_BUILT_IN_VARIABLES.includes(name)
+        const shadowsBuiltIn = TUNNEL_BUILT_IN_VARIABLES.includes(name)
           && !(source?.origin === "variable" && source.variable === name && source.scope === "built-in");
         return <div className="execution-applied-variable-row" key={name}>
-          <code className="execution-applied-variable-name mono">{name}{shadowsBuiltIn && <span className="script-argument-shadow-flag" title={`${name} is a built-in store identity variable, but this script declares an argument with the same name. The script received the mapped argument value below instead of the store's ${name}.`}>shadows built-in</span>}</code>
+          <code className="execution-applied-variable-name mono">{name}{shadowsBuiltIn && <span className="script-argument-shadow-flag" title={`${name} is a built-in tunnel identity variable, but this script declares an argument with the same name. The script received the mapped argument value below instead of the tunnel's ${name}.`}>shadows built-in</span>}</code>
           <code className="execution-applied-variable-value mono">{value}</code>
           <span className="execution-applied-variable-source">{formatArgumentSource(source)}</span>
         </div>;

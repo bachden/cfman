@@ -3,36 +3,36 @@ import { z } from "zod";
 import { requireAuth } from "../lib/auth.js";
 import { pool } from "../lib/database.js";
 import { appendNameFilter, nameFilterFields, validateNameFilter } from "../lib/name-filter.js";
-import { latestEnrollmentJoin, onboardingStatusExpression } from "./stores.js";
+import { latestEnrollmentJoin, onboardingStatusExpression } from "./tunnels.js";
 
 const auditListQuerySchema = z.object(nameFilterFields).superRefine(validateNameFilter);
 
 export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/dashboard", { preHandler: requireAuth }, async () => {
-    const [stats, accountCapacity, recentStores, audit] = await Promise.all([
+    const [stats, accountCapacity, recentTunnels, audit] = await Promise.all([
       pool.query(`
-        SELECT (SELECT count(*)::int FROM stores) AS "totalStores",
-               (SELECT count(*)::int FROM stores WHERE tunnel_status = 'healthy') AS "healthyStores",
-               (SELECT count(*)::int FROM stores s ${latestEnrollmentJoin}
+        SELECT (SELECT count(*)::int FROM tunnels) AS "totalTunnels",
+               (SELECT count(*)::int FROM tunnels WHERE cf_tunnel_status = 'healthy') AS "healthyTunnels",
+               (SELECT count(*)::int FROM tunnels s ${latestEnrollmentJoin}
                  WHERE ${onboardingStatusExpression} IN ('url_issued', 'waiting_for_new_enrollment', 'claimed', 'provisioning', 'connector_online')
-               ) AS "onboardingStores",
-               (SELECT count(*)::int FROM stores s ${latestEnrollmentJoin}
-                 WHERE ${onboardingStatusExpression} = 'failed' OR s.tunnel_status IN ('down', 'degraded') OR s.rdp_status = 'failed'
-               ) AS "attentionStores",
+               ) AS "onboardingTunnels",
+               (SELECT count(*)::int FROM tunnels s ${latestEnrollmentJoin}
+                 WHERE ${onboardingStatusExpression} = 'failed' OR s.cf_tunnel_status IN ('down', 'degraded') OR s.rdp_status = 'failed'
+               ) AS "attentionTunnels",
                (SELECT count(*)::int FROM cloudflare_accounts WHERE status = 'active') AS "activeAccounts",
                (SELECT count(*)::int FROM zones WHERE status = 'active') AS "activeZones"
       `),
       pool.query(`
         SELECT a.id, a.name, a.soft_tunnel_limit AS "softLimit",
-               (SELECT count(*)::int FROM stores s WHERE s.account_id = a.id) AS "storeCount",
+               (SELECT count(*)::int FROM tunnels s WHERE s.account_id = a.id) AS "tunnelCount",
                (SELECT count(*)::int FROM zones z WHERE z.account_id = a.id AND z.status = 'active') AS "zoneCount",
                a.status
           FROM cloudflare_accounts a ORDER BY a.created_at ASC
       `),
       pool.query(`
-        SELECT s.id, s.display_name AS "displayName", s.store_code AS "storeCode", s.hostname,
-               ${onboardingStatusExpression} AS "onboardingStatus", s.tunnel_status AS "tunnelStatus", s.created_at AS "createdAt"
-          FROM stores s
+        SELECT s.id, s.display_name AS "displayName", s.tunnel_code AS "tunnelCode", s.hostname,
+               ${onboardingStatusExpression} AS "onboardingStatus", s.cf_tunnel_status AS "cfTunnelStatus", s.created_at AS "createdAt"
+          FROM tunnels s
           ${latestEnrollmentJoin}
          ORDER BY s.created_at DESC LIMIT 6
       `),
@@ -44,7 +44,7 @@ export async function dashboardRoutes(app: FastifyInstance): Promise<void> {
     return {
       stats: stats.rows[0],
       accountCapacity: accountCapacity.rows,
-      recentStores: recentStores.rows,
+      recentTunnels: recentTunnels.rows,
       recentActivity: audit.rows
     };
   });

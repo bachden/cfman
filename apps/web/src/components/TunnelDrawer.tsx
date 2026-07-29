@@ -1,13 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Braces, CheckCircle2, ChevronLeft, ChevronRight, FilePlus2, Layers3, MonitorUp, RefreshCw, Save, Search, Settings2, ShieldAlert, ShieldCheck, TerminalSquare, Trash2, Unplug } from "lucide-react";
+import { AlertTriangle, Braces, CheckCircle2, ChevronLeft, ChevronRight, FilePlus2, Globe2, Layers3, MonitorUp, RefreshCw, Save, Search, Settings2, ShieldAlert, ShieldCheck, TerminalSquare, Trash2, Unplug } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { api } from "../api";
-import { emptyExecutionStats, type AppSettings, type ArgumentBindings, type CloudflareAccount, type DiagnoseResult, type EnrollmentResult, type ExecutionStats, type ExecutionVariables, type ManagedScript, type ManagedScriptSummary, type ScriptArgument, type Store, type StoreCommandExecution, type StoreDeletePreflight, type StoreEnrollment, type StoreRoute, type UnenrollmentResult } from "../types";
+import { emptyExecutionStats, type AppSettings, type ArgumentBindings, type CloudflareAccount, type DiagnoseResult, type EnrollmentResult, type ExecutionStats, type ExecutionVariables, type ManagedScript, type ManagedScriptSummary, type ScriptArgument, type Tunnel, type TunnelCommandExecution, type TunnelDeletePreflight, type TunnelEnrollment, type TunnelRoute, type UnenrollmentResult } from "../types";
 import { ConnectivityEditor, connectivityPayload, validatePublications, type DraftPublication } from "./ConnectivityEditor";
 import { CopyButton } from "./CopyButton";
-import { useDrawers, type StoreDrawerTab } from "./DrawerContext";
+import { useDrawers, type TunnelDrawerTab } from "./DrawerContext";
 import { ExecutionLog } from "./ExecutionLog";
 import { ExecutionStatsSummary } from "./ExecutionStatsSummary";
 import { AddVariableButton, ArgumentBindingsEditor, ExecutionVariablesEditor, ScriptArgumentsEditor } from "./ExecutionVariablesEditor";
@@ -17,92 +17,92 @@ import { Modal } from "./Modal";
 import { ScriptEditor } from "./ScriptEditor";
 import { SearchableSelect } from "./SearchableSelect";
 import { SideDrawer } from "./SideDrawer";
-import { StatusBadge, storeNeedsFastPolling, tunnelOnlineStatus } from "./StatusBadge";
+import { StatusBadge, tunnelNeedsFastPolling, tunnelOnlineStatus } from "./StatusBadge";
 
-export type { StoreDrawerTab };
+export type { TunnelDrawerTab };
 
-export function StoreDrawer({ storeId, tab, onTabChange, onClose, zIndex }: { storeId: string | null; tab: StoreDrawerTab; onTabChange: (tab: StoreDrawerTab) => void; onClose: () => void; zIndex?: number | undefined }) {
+export function TunnelDrawer({ tunnelId, tab, onTabChange, onClose, zIndex }: { tunnelId: string | null; tab: TunnelDrawerTab; onTabChange: (tab: TunnelDrawerTab) => void; onClose: () => void; zIndex?: number | undefined }) {
   const queryClient = useQueryClient();
   const [enrollmentPage, setEnrollmentPage] = useState(1);
   const [autoExpandEnrollmentId, setAutoExpandEnrollmentId] = useState<string | null>(null);
-  const [unenrollTarget, setUnenrollTarget] = useState<StoreEnrollment | null>(null);
+  const [unenrollTarget, setUnenrollTarget] = useState<TunnelEnrollment | null>(null);
   const [automaticUnenroll, setAutomaticUnenroll] = useState(true);
-  const [deleteEnrollmentTarget, setDeleteEnrollmentTarget] = useState<StoreEnrollment | null>(null);
+  const [deleteEnrollmentTarget, setDeleteEnrollmentTarget] = useState<TunnelEnrollment | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
-  const [deletePreflight, setDeletePreflight] = useState<StoreDeletePreflight | null>(null);
+  const [deletePreflight, setDeletePreflight] = useState<TunnelDeletePreflight | null>(null);
   const [deleteName, setDeleteName] = useState("");
   const [editingConnectivity, setEditingConnectivity] = useState(false);
   const [reassigningZone, setReassigningZone] = useState(false);
-  const [wafRoute, setWafRoute] = useState<StoreRoute | null>(null);
+  const [wafRoute, setWafRoute] = useState<TunnelRoute | null>(null);
   const [troubleshootOpen, setTroubleshootOpen] = useState(false);
-  const [storeVariablesOpen, setStoreVariablesOpen] = useState(false);
+  const [tunnelVariablesOpen, setTunnelVariablesOpen] = useState(false);
   const { data: detailData } = useQuery({
-    queryKey: ["store-detail", storeId],
-    queryFn: () => api.get<{ store: Store }>(`/api/stores/${storeId}`),
-    enabled: Boolean(storeId),
+    queryKey: ["tunnel-detail", tunnelId],
+    queryFn: () => api.get<{ tunnel: Tunnel }>(`/api/tunnels/${tunnelId}`),
+    enabled: Boolean(tunnelId),
     refetchInterval: (query) => {
-      const store = query.state.data?.store;
-      return store && storeNeedsFastPolling(store) ? 2000 : false;
+      const tunnel = query.state.data?.tunnel;
+      return tunnel && tunnelNeedsFastPolling(tunnel) ? 2000 : false;
     }
   });
-  const currentStore = detailData?.store;
+  const currentTunnel = detailData?.tunnel;
   const enrollmentPageSize = 5;
   const { data: enrollmentData } = useQuery({
-    queryKey: ["store-enrollments", storeId, enrollmentPage, enrollmentPageSize],
-    queryFn: () => api.get<{ enrollments: StoreEnrollment[]; pagination: { page: number; pageSize: number; total: number; totalPages: number } }>(`/api/stores/${storeId}/enrollments?page=${enrollmentPage}&pageSize=${enrollmentPageSize}`),
-    enabled: Boolean(storeId && tab === "overall"),
+    queryKey: ["tunnel-enrollments", tunnelId, enrollmentPage, enrollmentPageSize],
+    queryFn: () => api.get<{ enrollments: TunnelEnrollment[]; pagination: { page: number; pageSize: number; total: number; totalPages: number } }>(`/api/tunnels/${tunnelId}/enrollments?page=${enrollmentPage}&pageSize=${enrollmentPageSize}`),
+    enabled: Boolean(tunnelId && tab === "overall"),
     refetchInterval: (query) => query.state.data?.enrollments.some((enrollment) => ["never_run", "running", "unenroll_pending"].includes(enrollmentDisplayStatus(enrollment))) ? 2000 : false
   });
   const enrollmentPagination = enrollmentData?.pagination;
-  useEffect(() => { setEditingConnectivity(false); setTroubleshootOpen(false); setEnrollmentPage(1); }, [storeId]);
+  useEffect(() => { setEditingConnectivity(false); setTroubleshootOpen(false); setEnrollmentPage(1); }, [tunnelId]);
   useEffect(() => {
     if (enrollmentPagination && enrollmentPage > enrollmentPagination.totalPages) setEnrollmentPage(enrollmentPagination.totalPages);
   }, [enrollmentPage, enrollmentPagination]);
   const mutation = useMutation({
-    mutationFn: () => api.post<EnrollmentResult>(`/api/stores/${storeId}/enrollments`, { expiresInHours: 24 }),
-    onSuccess: async (result) => { setEnrollmentPage(1); setAutoExpandEnrollmentId(result.id); toast.success("Enrollment URL issued"); await Promise.all([queryClient.invalidateQueries({ queryKey: ["stores"] }), queryClient.invalidateQueries({ queryKey: ["store-detail", storeId] }), queryClient.invalidateQueries({ queryKey: ["store-enrollments", storeId] })]); },
+    mutationFn: () => api.post<EnrollmentResult>(`/api/tunnels/${tunnelId}/enrollments`, { expiresInHours: 24 }),
+    onSuccess: async (result) => { setEnrollmentPage(1); setAutoExpandEnrollmentId(result.id); toast.success("Enrollment URL issued"); await Promise.all([queryClient.invalidateQueries({ queryKey: ["tunnels"] }), queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnelId] }), queryClient.invalidateQueries({ queryKey: ["tunnel-enrollments", tunnelId] })]); },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to issue enrollment")
   });
   const verify = useMutation({
-    mutationFn: (routeId: string) => api.post<{ success: boolean; check: { statusCode: number | null; latencyMs: number; error?: string }; checks: unknown[] }>(`/api/stores/${storeId}/verify`, { routeId }),
-    onSuccess: async (result) => { await Promise.all([queryClient.invalidateQueries({ queryKey: ["stores"] }), queryClient.invalidateQueries({ queryKey: ["store-detail", storeId] })]); if (result.success) toast.success("Endpoint verified"); else toast.error(result.check.error ?? "Endpoint is unreachable"); },
+    mutationFn: (routeId: string) => api.post<{ success: boolean; check: { statusCode: number | null; latencyMs: number; error?: string }; checks: unknown[] }>(`/api/tunnels/${tunnelId}/verify`, { routeId }),
+    onSuccess: async (result) => { await Promise.all([queryClient.invalidateQueries({ queryKey: ["tunnels"] }), queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnelId] })]); if (result.success) toast.success("Endpoint verified"); else toast.error(result.check.error ?? "Endpoint is unreachable"); },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Verification failed")
   });
   const deleteEnrollment = useMutation({
-    mutationFn: (enrollmentId: string) => api.delete<{ hardDeleted: boolean; logCount?: number }>(`/api/stores/${storeId}/enrollments/${enrollmentId}`),
+    mutationFn: (enrollmentId: string) => api.delete<{ hardDeleted: boolean; logCount?: number }>(`/api/tunnels/${tunnelId}/enrollments/${enrollmentId}`),
     onSuccess: async () => {
       setDeleteEnrollmentTarget(null);
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["store-detail", storeId] }),
-        queryClient.invalidateQueries({ queryKey: ["store-enrollments", storeId] }),
-        queryClient.invalidateQueries({ queryKey: ["stores"] })
+        queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnelId] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnel-enrollments", tunnelId] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnels"] })
       ]);
       toast.success("Enrollment permanently deleted; logs are no longer available");
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to delete enrollment")
   });
   const reassignZone = useMutation({
-    mutationFn: (zoneId: string) => api.patch(`/api/stores/${storeId}/zone`, { zoneId }),
+    mutationFn: (zoneId: string) => api.patch(`/api/tunnels/${tunnelId}/zone`, { zoneId }),
     onSuccess: async () => {
       setReassigningZone(false);
       toast.success("Account/zone updated");
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["store-detail", storeId] }),
-        queryClient.invalidateQueries({ queryKey: ["stores"] })
+        queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnelId] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnels"] })
       ]);
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to change account/zone")
   });
   const issueUnenrollment = useMutation({
-    mutationFn: ({ enrollmentId, automatic }: { enrollmentId: string; automatic: boolean }) => api.post<UnenrollmentResult>(`/api/stores/${storeId}/enrollments/${enrollmentId}/unenroll`, { expiresInHours: 24, automatic }),
+    mutationFn: ({ enrollmentId, automatic }: { enrollmentId: string; automatic: boolean }) => api.post<UnenrollmentResult>(`/api/tunnels/${tunnelId}/enrollments/${enrollmentId}/unenroll`, { expiresInHours: 24, automatic }),
     onSuccess: async (result) => {
       setUnenrollTarget(null);
       setEnrollmentPage(1);
       setAutoExpandEnrollmentId(result.enrollmentId);
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["store-detail", storeId] }),
-        queryClient.invalidateQueries({ queryKey: ["store-enrollments", storeId] }),
-        queryClient.invalidateQueries({ queryKey: ["stores"] })
+        queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnelId] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnel-enrollments", tunnelId] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnels"] })
       ]);
       if (result.automatic?.status === "scheduled") toast.success("Automatic unenrollment scheduled");
       else if (result.automatic) toast.warning(`${result.automatic.error ?? "Automatic unenrollment is unavailable"}. Use the manual command.`);
@@ -111,23 +111,23 @@ export function StoreDrawer({ storeId, tab, onTabChange, onClose, zIndex }: { st
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to issue unenrollment command")
   });
   const retryRdp = useMutation({
-    mutationFn: () => api.post(`/api/stores/${storeId}/rdp/retry`),
+    mutationFn: () => api.post(`/api/tunnels/${tunnelId}/rdp/retry`),
     onSuccess: async () => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["stores"] }),
-        queryClient.invalidateQueries({ queryKey: ["store-detail", storeId] })
+        queryClient.invalidateQueries({ queryKey: ["tunnels"] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnelId] })
       ]);
       toast.success("Browser RDP provisioned");
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "RDP provisioning failed")
   });
   const deletePreflightMutation = useMutation({
-    mutationFn: () => api.get<StoreDeletePreflight>(`/api/stores/${storeId}/delete-preflight`),
+    mutationFn: () => api.get<TunnelDeletePreflight>(`/api/tunnels/${tunnelId}/delete-preflight`),
     onSuccess: (result) => setDeletePreflight(result),
-    onError: (error) => { setDeleteOpen(false); toast.error(error instanceof Error ? error.message : "Unable to check store deletion readiness"); }
+    onError: (error) => { setDeleteOpen(false); toast.error(error instanceof Error ? error.message : "Unable to check tunnel deletion readiness"); }
   });
-  const deleteStore = useMutation({
-    mutationFn: () => api.delete(`/api/stores/${storeId}`, {
+  const deleteTunnel = useMutation({
+    mutationFn: () => api.delete(`/api/tunnels/${tunnelId}`, {
       force: Boolean(deletePreflight && !deletePreflight.canDelete),
       ...(deletePreflight && !deletePreflight.canDelete ? { confirmName: deleteName } : {})
     }),
@@ -136,13 +136,13 @@ export function StoreDrawer({ storeId, tab, onTabChange, onClose, zIndex }: { st
       setDeletePreflight(null);
       onClose();
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["stores"] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnels"] }),
         queryClient.invalidateQueries({ queryKey: ["dashboard"] })
       ]);
-      toast.success("Store deleted");
+      toast.success("Tunnel deleted");
     },
     onError: (error) => {
-      toast.error(error instanceof Error ? error.message : "Unable to delete store");
+      toast.error(error instanceof Error ? error.message : "Unable to delete tunnel");
       deletePreflightMutation.mutate();
     }
   });
@@ -152,44 +152,44 @@ export function StoreDrawer({ storeId, tab, onTabChange, onClose, zIndex }: { st
     setDeleteOpen(true);
     deletePreflightMutation.mutate();
   };
-  const openUnenroll = (target: StoreEnrollment) => {
-    setAutomaticUnenroll(Boolean(currentStore?.commandAgent?.status === "ready" && target.platform));
+  const openUnenroll = (target: TunnelEnrollment) => {
+    setAutomaticUnenroll(Boolean(currentTunnel?.commandAgent?.status === "ready" && target.platform));
     setUnenrollTarget(target);
   };
   const close = () => { setAutoExpandEnrollmentId(null); setUnenrollTarget(null); setDeleteEnrollmentTarget(null); setDeleteOpen(false); setDeletePreflight(null); setDeleteName(""); setEditingConnectivity(false); setWafRoute(null); setTroubleshootOpen(false); onClose(); };
   return (
     <>
-    <SideDrawer open={Boolean(storeId)} zIndex={zIndex} title={<div className="drawer-heading"><strong>{currentStore?.displayName ?? "Store details"}</strong>{currentStore && <StatusBadge status={tunnelOnlineStatus(currentStore.tunnelStatus)} />}</div>} onClose={close}>
-      {currentStore && <div className="store-drawer-content">
-        <nav className="store-drawer-tabs" aria-label="Store detail sections">
+    <SideDrawer open={Boolean(tunnelId)} zIndex={zIndex} title={<div className="drawer-heading"><strong>{currentTunnel?.displayName ?? "Tunnel details"}</strong>{currentTunnel && <StatusBadge status={tunnelOnlineStatus(currentTunnel.cfTunnelStatus)} />}</div>} onClose={close}>
+      {currentTunnel && <div className="tunnel-drawer-content">
+        <nav className="tunnel-drawer-tabs" aria-label="Tunnel detail sections">
           <button className={tab === "overall" ? "active" : ""} type="button" onClick={() => onTabChange("overall")}>Overall</button>
           <button className={tab === "ingress" ? "active" : ""} type="button" onClick={() => onTabChange("ingress")}>Ingress routes</button>
           <button className={tab === "connect" ? "active" : ""} type="button" onClick={() => onTabChange("connect")}>Connect</button>
         </nav>
-        {tab === "overall" && <div className="store-drawer-tab">
-          <section className="store-drawer-section">
-            <header className="store-section-heading"><div><h3>Store overview</h3><span>Store assignment and infrastructure</span></div><div className="store-section-heading-actions"><button className="button button-secondary" type="button" onClick={() => setStoreVariablesOpen(true)}><Braces size={15} />Variables</button></div></header>
+        {tab === "overall" && <div className="tunnel-drawer-tab">
+          <section className="tunnel-drawer-section">
+            <header className="tunnel-section-heading"><div><h3>Tunnel overview</h3><span>Tunnel assignment and infrastructure</span></div><div className="tunnel-section-heading-actions"><button className="button button-secondary" type="button" onClick={() => setTunnelVariablesOpen(true)}><Braces size={15} />Variables</button></div></header>
             <dl className="detail-list">
-              <div><dt>Store code</dt><dd>{currentStore.tenantCode} / {currentStore.storeCode}</dd></div>
-              <div><dt>Account</dt><dd>{currentStore.accountName}</dd></div>
+              <div><dt>Tunnel code</dt><dd>{currentTunnel.tenantCode} / {currentTunnel.tunnelCode}</dd></div>
+              <div><dt>Account</dt><dd>{currentTunnel.accountName}</dd></div>
               {/* Reassignment is driven by the zone - the account follows from it - so the
                   action lives on the value it changes instead of in the section header. */}
-              <div><dt>Zone</dt><dd className="detail-value-row"><span>{currentStore.zoneName}</span>{!currentStore.tunnelId && !(currentStore.enrollments ?? []).some((enrollment) => enrollment.isCurrent) && <button className="button button-secondary button-small" type="button" title="Change account/zone" onClick={() => setReassigningZone(true)}><Settings2 size={14} />Change</button>}</dd></div>
-              <div><dt>Tunnel</dt><dd>{currentStore.tunnelId ? currentStore.cfAccountId ? <a className="mono detail-link" href={`https://dash.cloudflare.com/${encodeURIComponent(currentStore.cfAccountId)}/tunnels/${encodeURIComponent(currentStore.tunnelId)}/overview`} target="_blank" rel="noreferrer" title="Open tunnel details in Cloudflare">{currentStore.tunnelName ?? currentStore.tunnelId}</a> : <span className="mono">{currentStore.tunnelName ?? currentStore.tunnelId}</span> : "Not provisioned"}</dd></div>
+              <div><dt>Zone</dt><dd className="detail-value-row"><span>{currentTunnel.zoneName}</span>{!currentTunnel.cfTunnelId && !(currentTunnel.enrollments ?? []).some((enrollment) => enrollment.isCurrent) && <button className="button button-secondary button-small" type="button" title="Change account/zone" onClick={() => setReassigningZone(true)}><Settings2 size={14} />Change</button>}</dd></div>
+              <div><dt>Tunnel</dt><dd>{currentTunnel.cfTunnelId ? currentTunnel.cfAccountId ? <a className="mono detail-link" href={`https://dash.cloudflare.com/${encodeURIComponent(currentTunnel.cfAccountId)}/tunnels/${encodeURIComponent(currentTunnel.cfTunnelId)}/overview`} target="_blank" rel="noreferrer" title="Open tunnel details in Cloudflare">{currentTunnel.cfTunnelName ?? currentTunnel.cfTunnelId}</a> : <span className="mono">{currentTunnel.cfTunnelName ?? currentTunnel.cfTunnelId}</span> : "Not provisioned"}</dd></div>
             </dl>
           </section>
           <div className="detail-actions">
-            <button className="button button-danger" onClick={openDelete} disabled={deletePreflightMutation.isPending || deleteStore.isPending}><Trash2 size={15} />Delete store</button>
+            <button className="button button-danger" onClick={openDelete} disabled={deletePreflightMutation.isPending || deleteTunnel.isPending}><Trash2 size={15} />Delete tunnel</button>
             <div className="detail-actions-secondary"><button className="button button-secondary" onClick={() => setTroubleshootOpen(true)}><RefreshCw size={15} />Troubleshoot</button><button className="button button-primary" onClick={() => mutation.mutate()} disabled={mutation.isPending}><TerminalSquare size={16} />{mutation.isPending ? "Issuing..." : "New enrollment"}</button></div>
           </div>
-          <EnrollmentHistory storeId={currentStore.id} enrollments={enrollmentData?.enrollments ?? []} pagination={enrollmentPagination} autoExpandId={autoExpandEnrollmentId} onPageChange={setEnrollmentPage} onDelete={(enrollment) => setDeleteEnrollmentTarget(enrollment)} onUnenroll={openUnenroll} deleting={deleteEnrollment.isPending} unenrolling={issueUnenrollment.isPending} />
+          <EnrollmentHistory tunnelId={currentTunnel.id} enrollments={enrollmentData?.enrollments ?? []} pagination={enrollmentPagination} autoExpandId={autoExpandEnrollmentId} onPageChange={setEnrollmentPage} onDelete={(enrollment) => setDeleteEnrollmentTarget(enrollment)} onUnenroll={openUnenroll} deleting={deleteEnrollment.isPending} unenrolling={issueUnenrollment.isPending} />
           {(() => {
-            const online = tunnelOnlineStatus(currentStore.tunnelStatus) === "online";
-            const activeEnrollment = (currentStore.enrollments ?? []).find((item) => item.isCurrent);
-            const hasEnrollments = (currentStore.enrollments ?? []).length > 0;
+            const online = tunnelOnlineStatus(currentTunnel.cfTunnelStatus) === "online";
+            const activeEnrollment = (currentTunnel.enrollments ?? []).find((item) => item.isCurrent);
+            const hasEnrollments = (currentTunnel.enrollments ?? []).length > 0;
             if (!online && activeEnrollment) {
               return <div className="inline-alert status-mismatch-hint">
-                <span><AlertTriangle size={14} />Tunnel is offline but this enrollment still shows Active. Check the store machine's network connection, then troubleshoot.</span>
+                <span><AlertTriangle size={14} />Tunnel is offline but this enrollment still shows Active. Check the tunnel machine's network connection, then troubleshoot.</span>
                 <button className="button button-secondary" type="button" onClick={() => setTroubleshootOpen(true)}><RefreshCw size={14} />Troubleshoot</button>
               </div>;
             }
@@ -202,35 +202,35 @@ export function StoreDrawer({ storeId, tab, onTabChange, onClose, zIndex }: { st
             return null;
           })()}
         </div>}
-        {tab === "ingress" && <div className="store-drawer-tab">
-          {editingConnectivity ? <EditConnectivityPanel store={currentStore} onClose={() => setEditingConnectivity(false)} /> : <section className="store-drawer-section publication-summary"><header className="store-section-heading"><div><h3>Published endpoints</h3><span>{currentStore.publications.length} hostname{currentStore.publications.length === 1 ? "" : "s"}</span></div><button className="button button-secondary" type="button" onClick={() => setEditingConnectivity(true)}><Settings2 size={15} />Edit connectivity</button></header>{currentStore.publications.map((publication) => <div className="publication-summary-item" key={publication.id}><div className="publication-summary-head"><code>{publication.hostname}</code><StatusBadge status={publication.status} /></div>{publication.routes.map((route) => <div className="publication-route" key={route.id}><code>{route.path}</code><span>→</span><code>{route.kind === "command_agent" ? "Cloudflare Man command agent" : route.serviceUrl}</code><div className="publication-route-actions"><button className="button button-secondary publication-verify-button" type="button" onClick={() => verify.mutate(route.id)} disabled={verify.isPending}><CheckCircle2 size={15} />{verify.isPending && verify.variables === route.id ? "Checking..." : "Verify endpoint"}</button><button className={`button button-secondary publication-waf-button ${route.wafEnabled && route.wafRuleId ? "waf-active" : ""}`} type="button" title={route.wafEnabled && !route.wafRuleId ? "WAF policy is pending application" : "Manage route WAF"} onClick={() => setWafRoute(route)}><ShieldCheck size={15} />WAF</button></div></div>)}</div>)}</section>}
+        {tab === "ingress" && <div className="tunnel-drawer-tab">
+          {editingConnectivity ? <EditConnectivityPanel tunnel={currentTunnel} onClose={() => setEditingConnectivity(false)} /> : <section className="tunnel-drawer-section publication-summary"><header className="tunnel-section-heading"><div><h3>Published endpoints</h3><span>{currentTunnel.publications.length} hostname{currentTunnel.publications.length === 1 ? "" : "s"}</span></div><button className="button button-secondary" type="button" onClick={() => setEditingConnectivity(true)}><Settings2 size={15} />Edit connectivity</button></header>{currentTunnel.publications.map((publication) => <div className="publication-summary-item" key={publication.id}><div className="publication-summary-head"><code>{publication.hostname}</code><StatusBadge status={publication.status} /></div>{publication.routes.map((route) => <div className="publication-route" key={route.id}><code>{route.path}</code><span>→</span><code>{route.kind === "command_agent" ? "CFMan command agent" : route.serviceUrl}</code><div className="publication-route-actions"><button className="button button-secondary publication-verify-button" type="button" onClick={() => verify.mutate(route.id)} disabled={verify.isPending}><CheckCircle2 size={15} />{verify.isPending && verify.variables === route.id ? "Checking..." : "Verify endpoint"}</button><button className={`button button-secondary publication-waf-button ${route.wafEnabled && route.wafRuleId ? "waf-active" : ""}`} type="button" title={route.wafEnabled && !route.wafRuleId ? "WAF policy is pending application" : "Manage route WAF"} onClick={() => setWafRoute(route)}><ShieldCheck size={15} />WAF</button></div></div>)}</div>)}</section>}
         </div>}
-        {tab === "connect" && <div className="store-drawer-tab store-connect-tab">
-          <section className="store-drawer-section rdp-section">
-            <header className="store-section-heading"><div><h3>Remote desktop</h3><span>{currentStore.rdpUrl ? new URL(currentStore.rdpUrl).hostname : "Browser RDP gateway"}</span></div><StatusBadge status={currentStore.rdpStatus} /></header>
+        {tab === "connect" && <div className="tunnel-drawer-tab tunnel-connect-tab">
+          <section className="tunnel-drawer-section rdp-section">
+            <header className="tunnel-section-heading"><div><h3>Remote desktop</h3><span>{currentTunnel.rdpUrl ? new URL(currentTunnel.rdpUrl).hostname : "Browser RDP gateway"}</span></div><StatusBadge status={currentTunnel.rdpStatus} /></header>
             <div className="rdp-connection-row">
-              <div className="rdp-connection-item"><span className="rdp-connection-label">Target</span><code className="rdp-connection-value" title={currentStore.rdpTargetIp ? `${currentStore.rdpTargetIp}:3389` : "Awaiting Windows installer"}>{currentStore.rdpTargetIp ? `${currentStore.rdpTargetIp}:3389` : "Awaiting Windows installer"}</code></div>
-              <div className="rdp-connection-item"><span className="rdp-connection-label">Gateway</span><code className="rdp-connection-value" title={currentStore.rdpUrl ?? "Not provisioned"}>{currentStore.rdpUrl ?? "Not provisioned"}</code></div>
-              <div className="rdp-connection-action">{currentStore.rdpStatus === "ready" && currentStore.rdpUrl && <a className="button button-primary" href={currentStore.rdpUrl} target="_blank" rel="noreferrer"><MonitorUp size={16} />Remote desktop</a>}{currentStore.rdpTargetIp && currentStore.rdpStatus !== "ready" && <button className="button button-secondary" onClick={() => retryRdp.mutate()} disabled={retryRdp.isPending}><RefreshCw size={15} />{retryRdp.isPending ? "Retrying..." : "Retry RDP"}</button>}</div>
+              <div className="rdp-connection-item"><span className="rdp-connection-label">Target</span><code className="rdp-connection-value" title={currentTunnel.rdpTargetIp ? `${currentTunnel.rdpTargetIp}:3389` : "Awaiting Windows installer"}>{currentTunnel.rdpTargetIp ? `${currentTunnel.rdpTargetIp}:3389` : "Awaiting Windows installer"}</code></div>
+              <div className="rdp-connection-item"><span className="rdp-connection-label">Gateway</span><code className="rdp-connection-value" title={currentTunnel.rdpUrl ?? "Not provisioned"}>{currentTunnel.rdpUrl ?? "Not provisioned"}</code></div>
+              <div className="rdp-connection-action">{currentTunnel.rdpStatus === "ready" && currentTunnel.rdpUrl && <a className="button button-primary" href={currentTunnel.rdpUrl} target="_blank" rel="noreferrer"><MonitorUp size={16} />Remote desktop</a>}{currentTunnel.rdpTargetIp && currentTunnel.rdpStatus !== "ready" && <button className="button button-secondary" onClick={() => retryRdp.mutate()} disabled={retryRdp.isPending}><RefreshCw size={15} />{retryRdp.isPending ? "Retrying..." : "Retry RDP"}</button>}</div>
             </div>
-            {currentStore.rdpLastError && <div className="inline-alert">{currentStore.rdpLastError}</div>}
+            {currentTunnel.rdpLastError && <div className="inline-alert">{currentTunnel.rdpLastError}</div>}
           </section>
-          {currentStore.commandAgent ? <CommandExecutionPanel store={currentStore} /> : <div className="inline-alert">This store does not have a command agent endpoint.</div>}
+          {currentTunnel.commandAgent ? <CommandExecutionPanel tunnel={currentTunnel} /> : <div className="inline-alert">This tunnel does not have a command agent endpoint.</div>}
         </div>}
       </div>}
     </SideDrawer>
-    <UnenrollDialog enrollment={unenrollTarget} commandAgent={currentStore?.commandAgent ?? null} automatic={automaticUnenroll} onAutomaticChange={setAutomaticUnenroll} onClose={() => setUnenrollTarget(null)} onConfirm={() => unenrollTarget && issueUnenrollment.mutate({ enrollmentId: unenrollTarget.id, automatic: automaticUnenroll })} submitting={issueUnenrollment.isPending} />
+    <UnenrollDialog enrollment={unenrollTarget} commandAgent={currentTunnel?.commandAgent ?? null} automatic={automaticUnenroll} onAutomaticChange={setAutomaticUnenroll} onClose={() => setUnenrollTarget(null)} onConfirm={() => unenrollTarget && issueUnenrollment.mutate({ enrollmentId: unenrollTarget.id, automatic: automaticUnenroll })} submitting={issueUnenrollment.isPending} />
     <EnrollmentDeleteDialog enrollment={deleteEnrollmentTarget} onClose={() => setDeleteEnrollmentTarget(null)} onConfirm={() => deleteEnrollmentTarget && deleteEnrollment.mutate(deleteEnrollmentTarget.id)} deleting={deleteEnrollment.isPending} />
-    <StoreDeleteDialog open={deleteOpen} preflight={deletePreflight} loading={deletePreflightMutation.isPending} confirmationName={deleteName} onConfirmationNameChange={setDeleteName} onClose={() => { setDeleteOpen(false); setDeletePreflight(null); setDeleteName(""); }} onConfirm={() => deleteStore.mutate()} deleting={deleteStore.isPending} />
-    <RouteWafDialog store={currentStore ?? null} route={wafRoute} onClose={() => setWafRoute(null)} />
-    {currentStore && <TroubleshootDialog store={currentStore} open={troubleshootOpen} onClose={() => setTroubleshootOpen(false)} onManageWaf={(route) => { setTroubleshootOpen(false); setWafRoute(route); }} />}
-    <ReassignZoneDialog open={reassigningZone} currentZoneId={currentStore?.zoneId ?? null} onClose={() => setReassigningZone(false)} onConfirm={(zoneId) => reassignZone.mutate(zoneId)} submitting={reassignZone.isPending} />
-    <StoreVariablesModal store={currentStore ?? null} open={storeVariablesOpen} onClose={() => setStoreVariablesOpen(false)} />
+    <TunnelDeleteDialog open={deleteOpen} preflight={deletePreflight} loading={deletePreflightMutation.isPending} confirmationName={deleteName} onConfirmationNameChange={setDeleteName} onClose={() => { setDeleteOpen(false); setDeletePreflight(null); setDeleteName(""); }} onConfirm={() => deleteTunnel.mutate()} deleting={deleteTunnel.isPending} />
+    <RouteWafDialog tunnel={currentTunnel ?? null} route={wafRoute} onClose={() => setWafRoute(null)} />
+    {currentTunnel && <TroubleshootDialog tunnel={currentTunnel} open={troubleshootOpen} onClose={() => setTroubleshootOpen(false)} onManageWaf={(route) => { setTroubleshootOpen(false); setWafRoute(route); }} />}
+    <ReassignZoneDialog open={reassigningZone} currentZoneId={currentTunnel?.zoneId ?? null} onClose={() => setReassigningZone(false)} onConfirm={(zoneId) => reassignZone.mutate(zoneId)} submitting={reassignZone.isPending} />
+    <TunnelVariablesModal tunnel={currentTunnel ?? null} open={tunnelVariablesOpen} onClose={() => setTunnelVariablesOpen(false)} />
     </>
   );
 }
 
-function StoreDeleteDialog({
+function TunnelDeleteDialog({
   open,
   preflight,
   loading,
@@ -241,7 +241,7 @@ function StoreDeleteDialog({
   deleting
 }: {
   open: boolean;
-  preflight: StoreDeletePreflight | null;
+  preflight: TunnelDeletePreflight | null;
   loading: boolean;
   confirmationName: string;
   onConfirmationNameChange: (value: string) => void;
@@ -251,17 +251,17 @@ function StoreDeleteDialog({
 }) {
   const requiresName = Boolean(preflight && !preflight.canDelete);
   const nameMatches = !requiresName || confirmationName === preflight?.displayName;
-  return <Modal open={open} title={`Delete store · ${preflight?.displayName ?? "Store"}`} onClose={onClose} width="wide">
+  return <Modal open={open} title={`Delete tunnel · ${preflight?.displayName ?? "Tunnel"}`} onClose={onClose} width="wide">
     {loading || !preflight ? <div className="quiet-empty">Checking deletion readiness...</div> : <div className="delete-confirmation">
-      <p>This permanently removes the store from Cloudflare Man and attempts to delete its store-owned Cloudflare DNS, tunnel, and RDP network resources.</p>
+      <p>This permanently removes the tunnel from CFMan and attempts to delete its tunnel-owned Cloudflare DNS, tunnel, and RDP network resources.</p>
       <div className="delete-check-list">{preflight.checks.map((check) => <article className={`delete-check-row ${check.ok ? "delete-check-ok" : "delete-check-blocked"}`} key={check.id}><span className="delete-check-icon">{check.ok ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}</span><div><strong>{check.label}</strong><p>{check.detail}</p><small><b>How to resolve:</b> {check.resolution}</small></div></article>)}</div>
-      {requiresName && <div className="delete-force-panel"><div className="inline-alert"><AlertTriangle size={15} />One or more safety checks are not ready. Force delete will terminate remaining tunnel connections and may interrupt running commands.</div><label className="field"><span className="field-label">Type the store name to confirm <FieldHelp text="Enter the exact display name shown in the store details title. This extra confirmation is required when a tunnel, enrollment, or command is still active." /></span><input value={confirmationName} onChange={(event) => onConfirmationNameChange(event.target.value)} placeholder={preflight.displayName} autoComplete="off" /></label></div>}
-      <div className="form-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button><button className="button button-danger" type="button" disabled={!nameMatches || deleting} onClick={onConfirm}><Trash2 size={15} />{deleting ? "Deleting..." : requiresName ? "Force delete store" : "Delete store"}</button></div>
+      {requiresName && <div className="delete-force-panel"><div className="inline-alert"><AlertTriangle size={15} />One or more safety checks are not ready. Force delete will terminate remaining tunnel connections and may interrupt running commands.</div><label className="field"><span className="field-label">Type the tunnel name to confirm <FieldHelp text="Enter the exact display name shown in the tunnel details title. This extra confirmation is required when a tunnel, enrollment, or command is still active." /></span><input value={confirmationName} onChange={(event) => onConfirmationNameChange(event.target.value)} placeholder={preflight.displayName} autoComplete="off" /></label></div>}
+      <div className="form-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button><button className="button button-danger" type="button" disabled={!nameMatches || deleting} onClick={onConfirm}><Trash2 size={15} />{deleting ? "Deleting..." : requiresName ? "Force delete tunnel" : "Delete tunnel"}</button></div>
     </div>}
   </Modal>;
 }
 
-function EnrollmentDeleteDialog({ enrollment, onClose, onConfirm, deleting }: { enrollment: StoreEnrollment | null; onClose: () => void; onConfirm: () => void; deleting: boolean }) {
+function EnrollmentDeleteDialog({ enrollment, onClose, onConfirm, deleting }: { enrollment: TunnelEnrollment | null; onClose: () => void; onConfirm: () => void; deleting: boolean }) {
   return <Modal open={Boolean(enrollment)} title={enrollment ? <span className="host-identity"><HostPlatformIcon environment={enrollment.environment} platform={enrollment.platform} osName={enrollment.hostInfo.osName} /><span>Delete enrollment · {enrollmentComputerName(enrollment)}</span></span> : "Delete enrollment"} onClose={onClose}>
     <div className="enrollment-delete-dialog">
       <div className="inline-alert enrollment-delete-no-logs"><Trash2 size={15} />This permanently deletes the enrollment. Its logs will no longer be available to view.</div>
@@ -271,8 +271,8 @@ function EnrollmentDeleteDialog({ enrollment, onClose, onConfirm, deleting }: { 
 }
 
 function UnenrollDialog({ enrollment, commandAgent, automatic, onAutomaticChange, onClose, onConfirm, submitting }: {
-  enrollment: StoreEnrollment | null;
-  commandAgent: Store["commandAgent"];
+  enrollment: TunnelEnrollment | null;
+  commandAgent: Tunnel["commandAgent"];
   automatic: boolean;
   onAutomaticChange: (value: boolean) => void;
   onClose: () => void;
@@ -282,7 +282,7 @@ function UnenrollDialog({ enrollment, commandAgent, automatic, onAutomaticChange
   const automaticAvailable = Boolean(commandAgent?.status === "ready" && enrollment?.platform);
   return <Modal open={Boolean(enrollment)} title={enrollment ? <span className="host-identity"><HostPlatformIcon environment={enrollment.environment} platform={enrollment.platform} osName={enrollment.hostInfo.osName} /><span>Unenroll · {enrollmentComputerName(enrollment)}</span></span> : "Unenroll"} onClose={onClose}>
     <div className="enrollment-delete-dialog">
-      <p>Cloudflare Man will revoke this enrollment only after its local services and all store-owned Cloudflare routes, DNS records, RDP resources, and tunnel have been cleaned up.</p>
+      <p>CFMan will revoke this enrollment only after its local services and all tunnel-owned Cloudflare routes, DNS records, RDP resources, and tunnel have been cleaned up.</p>
       <label className={`checkbox-field ${automaticAvailable ? "" : "disabled"}`}>
         <input type="checkbox" checked={automatic && automaticAvailable} disabled={!automaticAvailable} onChange={(event) => onAutomaticChange(event.target.checked)} />
         <span><strong>Run automatically through command agent</strong><small>{automaticAvailable ? `Send a detached cleanup task to ${commandAgent?.endpoint}. Manual commands remain available as fallback.` : "The connected enrollment needs a ready command agent and a detected platform."}</small></span>
@@ -300,18 +300,18 @@ function ReassignZoneDialog({ open, currentZoneId, onClose, onConfirm, submittin
     { value: "", label: "Select account / zone" },
     ...(data?.accounts.flatMap((account) => account.zones
       .filter((zone) => account.status === "active" && zone.status === "active" && zone.id !== currentZoneId)
-      .map((zone) => ({ value: zone.id, label: `${account.name} / ${zone.name} · ${zone.storeCount}/${zone.softStoreLimit}` }))) ?? [])
+      .map((zone) => ({ value: zone.id, label: `${account.name} / ${zone.name} · ${zone.tunnelCount}/${zone.softTunnelLimit}` }))) ?? [])
   ];
   return <Modal open={open} title="Change account/zone" onClose={onClose}>
     <div className="form-stack">
-      <div className="inline-alert"><AlertTriangle size={15} />This regenerates every published hostname for this store using the new zone's domain. Only available because the store has no active enrollment and has been fully unenrolled.</div>
+      <div className="inline-alert"><AlertTriangle size={15} />This regenerates every published hostname for this tunnel using the new zone's domain. Only available because the tunnel has no active enrollment and has been fully unenrolled.</div>
       <label className="field"><span className="field-label">New account / zone</span><SearchableSelect name="reassignZoneId" options={zoneOptions} value={zoneId} ariaLabel="New account and zone assignment" emptyMessage="No matching account or zone" onValueChange={setZoneId} /></label>
       <div className="form-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button><button className="button button-primary" type="button" disabled={!zoneId || submitting} onClick={() => onConfirm(zoneId)}>{submitting ? "Updating..." : "Change account/zone"}</button></div>
     </div>
   </Modal>;
 }
 
-function EnrollmentHistory({ storeId, enrollments, pagination, autoExpandId, onPageChange, onDelete, onUnenroll, deleting, unenrolling }: { storeId: string; enrollments: StoreEnrollment[]; pagination?: { page: number; pageSize: number; total: number; totalPages: number } | undefined; autoExpandId: string | null; onPageChange: (page: number) => void; onDelete: (enrollment: StoreEnrollment) => void; onUnenroll: (enrollment: StoreEnrollment) => void; deleting: boolean; unenrolling: boolean }) {
+function EnrollmentHistory({ tunnelId, enrollments, pagination, autoExpandId, onPageChange, onDelete, onUnenroll, deleting, unenrolling }: { tunnelId: string; enrollments: TunnelEnrollment[]; pagination?: { page: number; pageSize: number; total: number; totalPages: number } | undefined; autoExpandId: string | null; onPageChange: (page: number) => void; onDelete: (enrollment: TunnelEnrollment) => void; onUnenroll: (enrollment: TunnelEnrollment) => void; deleting: boolean; unenrolling: boolean }) {
   const [expandedId, setExpandedId] = useState<string | null>(autoExpandId);
   useEffect(() => { if (autoExpandId) setExpandedId(autoExpandId); }, [autoExpandId]);
   useEffect(() => { setExpandedId(null); }, [pagination?.page]);
@@ -328,12 +328,12 @@ function EnrollmentHistory({ storeId, enrollments, pagination, autoExpandId, onP
         <time className="enrollment-event-time" dateTime={displayTime ?? undefined}>{displayTime ? new Date(displayTime).toLocaleString() : "-"}</time>
         <div className="enrollment-history-actions">{enrollment.isCurrent ? <button className="icon-button enrollment-unenroll-button" type="button" title="Unenroll this computer" aria-label={`Unenroll ${enrollmentComputerName(enrollment)}`} onClick={(event) => { event.preventDefault(); event.stopPropagation(); onUnenroll(enrollment); }} disabled={unenrolling}><Unplug size={16} /></button> : !enrollment.deletedAt ? <button className="icon-button enrollment-delete-button" type="button" title="Delete enrollment permanently" aria-label={`Delete enrollment for ${enrollmentComputerName(enrollment)}`} onClick={(event) => { event.preventDefault(); event.stopPropagation(); onDelete(enrollment); }} disabled={deleting}><Trash2 size={15} /></button> : <span className="enrollment-action-placeholder" aria-hidden="true" />}</div>
       </summary>
-      {isOpen && <div className="enrollment-history-body"><EnrollmentHistoryBody storeId={storeId} enrollment={enrollment} status={displayStatus} onDelete={onDelete} deleting={deleting} /></div>}
+      {isOpen && <div className="enrollment-history-body"><EnrollmentHistoryBody tunnelId={tunnelId} enrollment={enrollment} status={displayStatus} onDelete={onDelete} deleting={deleting} /></div>}
     </details>;
-  })}</div> : <div className="quiet-empty">No enrollment links have been issued for this store.</div>}{pagination && pagination.totalPages > 1 && <div className="command-history-pagination"><button className="icon-button" type="button" title="Previous enrollment page" aria-label="Previous enrollment page" disabled={pagination.page <= 1} onClick={() => onPageChange(Math.max(1, pagination.page - 1))}><ChevronLeft size={15} /></button><span>Page {pagination.page} of {pagination.totalPages}</span><button className="icon-button" type="button" title="Next enrollment page" aria-label="Next enrollment page" disabled={pagination.page >= pagination.totalPages} onClick={() => onPageChange(pagination.page + 1)}><ChevronRight size={15} /></button></div>}</section>;
+  })}</div> : <div className="quiet-empty">No enrollment links have been issued for this tunnel.</div>}{pagination && pagination.totalPages > 1 && <div className="command-history-pagination"><button className="icon-button" type="button" title="Previous enrollment page" aria-label="Previous enrollment page" disabled={pagination.page <= 1} onClick={() => onPageChange(Math.max(1, pagination.page - 1))}><ChevronLeft size={15} /></button><span>Page {pagination.page} of {pagination.totalPages}</span><button className="icon-button" type="button" title="Next enrollment page" aria-label="Next enrollment page" disabled={pagination.page >= pagination.totalPages} onClick={() => onPageChange(pagination.page + 1)}><ChevronRight size={15} /></button></div>}</section>;
 }
 
-function EnrollmentHistoryBody({ storeId, enrollment, status, onDelete, deleting }: { storeId: string; enrollment: StoreEnrollment; status: string; onDelete: (enrollment: StoreEnrollment) => void; deleting: boolean }) {
+function EnrollmentHistoryBody({ tunnelId, enrollment, status, onDelete, deleting }: { tunnelId: string; enrollment: TunnelEnrollment; status: string; onDelete: (enrollment: TunnelEnrollment) => void; deleting: boolean }) {
   if (status === "staled") {
     return <div className="enrollment-history-expired">
       <div className="inline-alert"><AlertTriangle size={15} />This enrollment link expired before it was ever used. It's safe to delete.</div>
@@ -342,30 +342,30 @@ function EnrollmentHistoryBody({ storeId, enrollment, status, onDelete, deleting
   }
   if (status === "never_run" || status === "running") {
     return <>
-      <EnrollmentScriptPanel storeId={storeId} enrollmentId={enrollment.id} expiresAt={enrollment.expiresAt} defaultPlatform={enrollment.platform === "unix" ? "unix" : "windows"} />
+      <EnrollmentScriptPanel tunnelId={tunnelId} enrollmentId={enrollment.id} expiresAt={enrollment.expiresAt} defaultPlatform={enrollment.platform === "unix" ? "unix" : "windows"} />
       {status === "running" && <>
         <div className="enrollment-run-info"><strong>Started</strong> {new Date(enrollment.claimedAt ?? enrollment.createdAt).toLocaleString()}</div>
-        <EnrollmentLogPanel storeId={storeId} enrollmentId={enrollment.id} live />
+        <EnrollmentLogPanel tunnelId={tunnelId} enrollmentId={enrollment.id} live />
       </>}
     </>;
   }
   return <>
-    {(status === "unenroll_pending" || status === "unenroll_failed") && <UnenrollHelperPanel storeId={storeId} enrollment={enrollment} status={status} />}
-    {enrollment.isCurrent && <ComputerVariablesPanel storeId={storeId} enrollment={enrollment} />}
-    <EnrollmentLogPanel storeId={storeId} enrollmentId={enrollment.id} live={status === "unenroll_pending"} />
+    {(status === "unenroll_pending" || status === "unenroll_failed") && <UnenrollHelperPanel tunnelId={tunnelId} enrollment={enrollment} status={status} />}
+    {enrollment.isCurrent && <ComputerVariablesPanel tunnelId={tunnelId} enrollment={enrollment} />}
+    <EnrollmentLogPanel tunnelId={tunnelId} enrollmentId={enrollment.id} live={status === "unenroll_pending"} />
   </>;
 }
 
-function ComputerVariablesPanel({ storeId, enrollment }: { storeId: string; enrollment: StoreEnrollment }) {
+function ComputerVariablesPanel({ tunnelId, enrollment }: { tunnelId: string; enrollment: TunnelEnrollment }) {
   const queryClient = useQueryClient();
   const [variables, setVariables] = useState<ExecutionVariables>(enrollment.executionVariables ?? {});
   useEffect(() => setVariables(enrollment.executionVariables ?? {}), [enrollment.id, enrollment.executionVariables]);
   const mutation = useMutation({
-    mutationFn: () => api.put(`/api/stores/${storeId}/enrollments/${enrollment.id}/execution-variables`, { variables }),
+    mutationFn: () => api.put(`/api/tunnels/${tunnelId}/enrollments/${enrollment.id}/execution-variables`, { variables }),
     onSuccess: async () => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["store-enrollments", storeId] }),
-        queryClient.invalidateQueries({ queryKey: ["store-detail", storeId] })
+        queryClient.invalidateQueries({ queryKey: ["tunnel-enrollments", tunnelId] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnelId] })
       ]);
       toast.success("Computer variables updated");
     },
@@ -374,27 +374,27 @@ function ComputerVariablesPanel({ storeId, enrollment }: { storeId: string; enro
   return <section className="computer-variable-panel"><header><div><h4>Computer variables</h4><span>Applied while this computer is the active enrollment.</span></div></header><ExecutionVariablesEditor variables={variables} savedVariables={enrollment.executionVariables ?? {}} onChange={setVariables} /><div className="form-actions"><AddVariableButton variables={variables} onChange={setVariables} small /><button className="button button-primary button-small" type="button" disabled={mutation.isPending} onClick={() => mutation.mutate()}><Save size={14} />{mutation.isPending ? "Saving..." : "Save variables"}</button></div></section>;
 }
 
-function StoreVariablesModal({ store, open, onClose }: { store: Store | null; open: boolean; onClose: () => void }) {
+function TunnelVariablesModal({ tunnel, open, onClose }: { tunnel: Tunnel | null; open: boolean; onClose: () => void }) {
   const queryClient = useQueryClient();
   const [variables, setVariables] = useState<ExecutionVariables>({});
-  useEffect(() => { if (open) setVariables(store?.executionVariables ?? {}); }, [open, store?.id, store?.executionVariables]);
+  useEffect(() => { if (open) setVariables(tunnel?.executionVariables ?? {}); }, [open, tunnel?.id, tunnel?.executionVariables]);
   const mutation = useMutation({
-    mutationFn: () => api.put(`/api/stores/${store!.id}/execution-variables`, { variables }),
+    mutationFn: () => api.put(`/api/tunnels/${tunnel!.id}/execution-variables`, { variables }),
     onSuccess: async () => {
-      await Promise.all([queryClient.invalidateQueries({ queryKey: ["store-detail", store?.id] }), queryClient.invalidateQueries({ queryKey: ["stores"] })]);
-      toast.success("Store variables updated");
+      await Promise.all([queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnel?.id] }), queryClient.invalidateQueries({ queryKey: ["tunnels"] })]);
+      toast.success("Tunnel variables updated");
       onClose();
     },
-    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to update store variables")
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to update tunnel variables")
   });
-  return <Modal open={open && Boolean(store)} title={<>Environment variables · <span className="scope-badge">Store</span> · {store?.displayName ?? "store"}</>} onClose={onClose}><div className="form-stack"><ExecutionVariablesEditor variables={variables} savedVariables={store?.executionVariables ?? {}} onChange={setVariables} builtIns={["TENANT_CODE", "STORE_NAME", "STORE_CODE"]} /><div className="built-in-variable-note"><strong>Built-ins</strong><code>TENANT_CODE</code><code>STORE_NAME</code><code>STORE_CODE</code></div><div className="form-actions"><button className="button button-secondary cancel-button-left" type="button" onClick={onClose}>Cancel</button><AddVariableButton variables={variables} onChange={setVariables} /><button className="button button-primary" type="button" disabled={mutation.isPending} onClick={() => mutation.mutate()}>{mutation.isPending ? "Saving..." : "Save variables"}</button></div></div></Modal>;
+  return <Modal open={open && Boolean(tunnel)} title={<>Environment variables · <span className="scope-badge">Tunnel</span> · {tunnel?.displayName ?? "tunnel"}</>} onClose={onClose}><div className="form-stack"><ExecutionVariablesEditor variables={variables} savedVariables={tunnel?.executionVariables ?? {}} onChange={setVariables} builtIns={["TENANT_CODE", "TUNNEL_NAME", "TUNNEL_CODE"]} /><div className="built-in-variable-note"><strong>Built-ins</strong><code>TENANT_CODE</code><code>TUNNEL_NAME</code><code>TUNNEL_CODE</code></div><div className="form-actions"><button className="button button-secondary cancel-button-left" type="button" onClick={onClose}>Cancel</button><AddVariableButton variables={variables} onChange={setVariables} /><button className="button button-primary" type="button" disabled={mutation.isPending} onClick={() => mutation.mutate()}>{mutation.isPending ? "Saving..." : "Save variables"}</button></div></div></Modal>;
 }
 
-function EnrollmentScriptPanel({ storeId, enrollmentId, expiresAt, defaultPlatform }: { storeId: string; enrollmentId: string; expiresAt: string; defaultPlatform: "windows" | "unix" }) {
+function EnrollmentScriptPanel({ tunnelId, enrollmentId, expiresAt, defaultPlatform }: { tunnelId: string; enrollmentId: string; expiresAt: string; defaultPlatform: "windows" | "unix" }) {
   const { data, isLoading } = useQuery({
-    queryKey: ["enrollment-install-script", storeId, enrollmentId],
-    queryFn: () => api.get<{ powershell: string | null; shell: string | null }>(`/api/stores/${storeId}/enrollments/${enrollmentId}/install-script`),
-    enabled: Boolean(storeId && enrollmentId)
+    queryKey: ["enrollment-install-script", tunnelId, enrollmentId],
+    queryFn: () => api.get<{ powershell: string | null; shell: string | null }>(`/api/tunnels/${tunnelId}/enrollments/${enrollmentId}/install-script`),
+    enabled: Boolean(tunnelId && enrollmentId)
   });
   if (isLoading) return <div className="quiet-empty">Loading install link...</div>;
   if (!data?.powershell && !data?.shell) return <div className="quiet-empty">The install link is not available for this enrollment.</div>;
@@ -410,11 +410,11 @@ function EnrollmentLogList({ logs, emptyLabel }: { logs: EnrollmentLogEntry[]; e
   return <div className="enrollment-log-list">{logs.map((log) => <article key={log.id} className={`enrollment-log enrollment-log-${log.level}`}><header><StatusBadge status={log.level} /><strong>{log.step ?? "installer"}</strong><time>{new Date(log.createdAt).toLocaleString()}</time></header><p>{log.message}</p></article>)}</div>;
 }
 
-function EnrollmentLogPanel({ storeId, enrollmentId, live }: { storeId: string; enrollmentId: string; live: boolean }) {
+function EnrollmentLogPanel({ tunnelId, enrollmentId, live }: { tunnelId: string; enrollmentId: string; live: boolean }) {
   const { data, isLoading, isFetching, refetch } = useQuery({
-    queryKey: ["enrollment-logs", storeId, enrollmentId],
-    queryFn: () => api.get<EnrollmentLogResponse>(`/api/stores/${storeId}/enrollments/${enrollmentId}/logs`),
-    enabled: Boolean(storeId && enrollmentId),
+    queryKey: ["enrollment-logs", tunnelId, enrollmentId],
+    queryFn: () => api.get<EnrollmentLogResponse>(`/api/tunnels/${tunnelId}/enrollments/${enrollmentId}/logs`),
+    enabled: Boolean(tunnelId && enrollmentId),
     refetchInterval: (query) => live || query.state.data?.hasActiveDiagnostics ? 2000 : false
   });
   const refreshButton = <button className="icon-button" type="button" title="Refresh enrollment and unenrollment logs" aria-label="Refresh enrollment and unenrollment logs" disabled={isFetching} onClick={() => void refetch()}><RefreshCw size={14} className={isFetching ? "spin-icon" : undefined} /></button>;
@@ -435,11 +435,11 @@ function EnrollmentLogPanel({ storeId, enrollmentId, live }: { storeId: string; 
   </div></div>;
 }
 
-function enrollmentComputerName(enrollment: StoreEnrollment): string {
+function enrollmentComputerName(enrollment: TunnelEnrollment): string {
   return enrollment.computerName ?? enrollment.hostInfo.machineName ?? "N/A";
 }
 
-function enrollmentRunStatus(enrollment: StoreEnrollment): "never_run" | "running" | "success" | "failed" {
+function enrollmentRunStatus(enrollment: TunnelEnrollment): "never_run" | "running" | "success" | "failed" {
   const installScripts = enrollment.scripts.filter((script) => script.kind === "install");
   if (installScripts.some((script) => script.status === "failed") || enrollment.status === "failed") return "failed";
   if (installScripts.some((script) => script.status === "running") || ["claimed", "provisioning", "ready"].includes(enrollment.status)) return "running";
@@ -447,7 +447,7 @@ function enrollmentRunStatus(enrollment: StoreEnrollment): "never_run" | "runnin
   return "never_run";
 }
 
-function enrollmentDisplayStatus(enrollment: StoreEnrollment): string {
+function enrollmentDisplayStatus(enrollment: TunnelEnrollment): string {
   if (enrollment.deletedAt) return "deleted";
   // Checked before isCurrent: the current enrollment stays isCurrent=true for
   // the entire time an unenroll is pending or has failed (unenrolled_at only
@@ -461,7 +461,7 @@ function enrollmentDisplayStatus(enrollment: StoreEnrollment): string {
   return enrollmentRunStatus(enrollment);
 }
 
-function enrollmentDisplayTime(enrollment: StoreEnrollment, status: string): string | null {
+function enrollmentDisplayTime(enrollment: TunnelEnrollment, status: string): string | null {
   if (status === "deleted") return enrollment.deletedAt;
   if (status === "active") return enrollment.installedAt ?? enrollment.claimedAt ?? enrollment.createdAt;
   if (status === "unenrolled") return enrollment.unenrolledAt;
@@ -473,7 +473,7 @@ function enrollmentDisplayTime(enrollment: StoreEnrollment, status: string): str
   return finishedScript?.finishedAt ?? enrollment.claimedAt ?? enrollment.createdAt;
 }
 
-function enrollmentEnvironment(enrollment: StoreEnrollment): string {
+function enrollmentEnvironment(enrollment: TunnelEnrollment): string {
   switch (enrollment.environment ?? enrollment.platform) {
     case "windows": return "Windows";
     case "linux": return "Linux";
@@ -495,7 +495,7 @@ type CommandExecutionResult = {
   platform: "windows" | "unix";
   language: "powershell" | "bash" | "sh";
   taskId: string;
-  status: StoreCommandExecution["status"];
+  status: TunnelCommandExecution["status"];
   scheduled: boolean;
   success?: boolean;
   exitCode?: number | null;
@@ -505,24 +505,25 @@ type CommandExecutionResult = {
 };
 
 type CommandExecutionPage = {
-  executions: StoreCommandExecution[];
+  executions: TunnelCommandExecution[];
   summary: ExecutionStats;
   pagination: { page: number; pageSize: number; total: number; totalPages: number };
 };
 
 const quickScriptDefaults = {
-  windows: "Write-Output \"Store: $env:COMPUTERNAME\"\n",
-  unix: "printf 'Store: %s\\n' \"$(hostname)\"\n"
+  windows: "Write-Output \"Tunnel: $env:COMPUTERNAME\"\n",
+  unix: "printf 'Tunnel: %s\\n' \"$(hostname)\"\n"
 };
 
-function ArgumentSummary({ data, loading }: { data: { arguments: ScriptArgument[]; availableVariables: ExecutionVariables } | undefined; loading: boolean }) {
+function ArgumentSummary({ data, loading, error }: { data: { arguments: ScriptArgument[]; availableVariables: ExecutionVariables } | undefined; loading: boolean; error: unknown }) {
   if (loading) return <div className="quiet-empty">Resolving available variables...</div>;
+  if (error) return <div className="inline-alert">{error instanceof Error ? error.message : "Unable to resolve available variables"}</div>;
   if (!data) return null;
   const variableCount = Object.keys(data.availableVariables).length;
   return <div className="argument-summary-hint">{data.arguments.length} argument{data.arguments.length === 1 ? "" : "s"} declared · {variableCount} variable{variableCount === 1 ? "" : "s"} available to map · configure on Execute</div>;
 }
 
-function CommandExecutionPanel({ store }: { store: Store }) {
+function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { openScriptDrawer } = useDrawers();
@@ -548,7 +549,7 @@ function CommandExecutionPanel({ store }: { store: Store }) {
   const [quickArguments, setQuickArguments] = useState<import("../types").ScriptArgument[]>([]);
   const [executeConfirmOpen, setExecuteConfirmOpen] = useState(false);
   const [argumentBindings, setArgumentBindings] = useState<ArgumentBindings>({});
-  const activeEnrollment = [...(store.enrollments ?? [])].filter((enrollment) => enrollment.isCurrent && ["ready", "installed"].includes(enrollment.status) && enrollment.unenrolledAt === null && enrollment.deletedAt === null).sort((left, right) => new Date(right.installedAt ?? right.createdAt).getTime() - new Date(left.installedAt ?? left.createdAt).getTime())[0];
+  const activeEnrollment = [...(tunnel.enrollments ?? [])].filter((enrollment) => enrollment.isCurrent && ["ready", "installed"].includes(enrollment.status) && enrollment.unenrolledAt === null && enrollment.deletedAt === null).sort((left, right) => new Date(right.installedAt ?? right.createdAt).getTime() - new Date(left.installedAt ?? left.createdAt).getTime())[0];
   const hostPlatform = activeEnrollment?.platform ?? null;
   const historyPageSize = 10;
   const historyParams = new URLSearchParams({ page: String(historyPage), pageSize: String(historyPageSize) });
@@ -556,8 +557,8 @@ function CommandExecutionPanel({ store }: { store: Store }) {
   if (historyFrom) historyParams.set("from", new Date(historyFrom).toISOString());
   if (historyTo) historyParams.set("to", new Date(historyTo).toISOString());
   const { data: executionData } = useQuery({
-    queryKey: ["command-executions", store.id, historySearch.trim(), historyFrom, historyTo, historyPage, historyPageSize],
-    queryFn: () => api.get<CommandExecutionPage>(`/api/stores/${store.id}/command-executions?${historyParams.toString()}`),
+    queryKey: ["command-executions", tunnel.id, historySearch.trim(), historyFrom, historyTo, historyPage, historyPageSize],
+    queryFn: () => api.get<CommandExecutionPage>(`/api/tunnels/${tunnel.id}/command-executions?${historyParams.toString()}`),
     refetchInterval: (query) => query.state.data?.summary && (query.state.data.summary.scheduled > 0 || query.state.data.summary.running > 0) ? 2000 : false
   });
   const { data: scriptData } = useQuery({
@@ -572,9 +573,9 @@ function CommandExecutionPanel({ store }: { store: Store }) {
   });
   const selectedScript = selectedScriptData?.script;
   const selectedScriptVersion = selectedScript?.versions.find((version) => version.id === selectedVersionId) ?? selectedScript?.versions[0];
-  const { data: resolvedVariableData, isLoading: variablesLoading } = useQuery({
-    queryKey: ["resolved-execution-variables", store.id, executionMode, selectedVersionId],
-    queryFn: () => api.post<{ arguments: ScriptArgument[]; availableVariables: ExecutionVariables; sources: Record<string, string> }>(`/api/stores/${store.id}/execution-variables/resolve`, executionMode === "saved" ? { scriptVersionId: selectedVersionId } : {}),
+  const { data: resolvedVariableData, isLoading: variablesLoading, isError: variablesErrored, error: variablesError, refetch: refetchVariables } = useQuery({
+    queryKey: ["resolved-execution-variables", tunnel.id, executionMode, selectedVersionId],
+    queryFn: () => api.post<{ arguments: ScriptArgument[]; availableVariables: ExecutionVariables; sources: Record<string, string> }>(`/api/tunnels/${tunnel.id}/execution-variables/resolve`, executionMode === "saved" ? { scriptVersionId: selectedVersionId } : {}),
     enabled: executionMode === "inline" || Boolean(selectedVersionId)
   });
   const scriptOptions = scriptData?.scripts ?? [];
@@ -600,7 +601,7 @@ function CommandExecutionPanel({ store }: { store: Store }) {
     setHistoryFrom("");
     setHistoryTo("");
     setExpandedExecutionId(null);
-  }, [hostPlatform, store.id]);
+  }, [hostPlatform, tunnel.id]);
   useEffect(() => {
     setHistoryPage(1);
     setExpandedExecutionId(null);
@@ -638,7 +639,7 @@ function CommandExecutionPanel({ store }: { store: Store }) {
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to create script")
   });
   const execute = useMutation({
-    mutationFn: (bindings: ArgumentBindings) => api.post<CommandExecutionResult>(`/api/stores/${store.id}/commands/execute`, {
+    mutationFn: (bindings: ArgumentBindings) => api.post<CommandExecutionResult>(`/api/tunnels/${tunnel.id}/commands/execute`, {
       ...(executionMode === "saved"
         ? { scriptVersionId: selectedVersionId }
         : { inlineScript: inlineContent, name: inlineName, language: inlineLanguage }),
@@ -650,9 +651,9 @@ function CommandExecutionPanel({ store }: { store: Store }) {
       setHistoryPage(1);
       setExpandedExecutionId(response.executionId);
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["store-detail", store.id] }),
-        queryClient.invalidateQueries({ queryKey: ["command-executions", store.id] }),
-        queryClient.invalidateQueries({ queryKey: ["stores"] })
+        queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnel.id] }),
+        queryClient.invalidateQueries({ queryKey: ["command-executions", tunnel.id] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnels"] })
       ]);
       setExpandLatestAfterExecution(false);
       if (response.scheduled) toast.success("Script scheduled");
@@ -662,24 +663,24 @@ function CommandExecutionPanel({ store }: { store: Store }) {
     onError: async (error) => {
       setHistoryPage(1);
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["store-detail", store.id] }),
-        queryClient.invalidateQueries({ queryKey: ["command-executions", store.id] }),
-        queryClient.invalidateQueries({ queryKey: ["stores"] })
+        queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnel.id] }),
+        queryClient.invalidateQueries({ queryKey: ["command-executions", tunnel.id] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnels"] })
       ]);
       setExpandLatestAfterExecution(true);
       toast.error(error instanceof Error ? error.message : "Unable to execute script");
     }
   });
   const refreshHistory = useMutation({
-    mutationFn: () => queryClient.refetchQueries({ queryKey: ["command-executions", store.id], type: "active" }),
+    mutationFn: () => queryClient.refetchQueries({ queryKey: ["command-executions", tunnel.id], type: "active" }),
     onError: () => toast.error("Unable to refresh execution history")
   });
   const saveInlineExecution = useMutation({
-    mutationFn: (execution: StoreCommandExecution) => api.post<{ executionId: string; scriptId: string; versionId: string; version: number; alreadySaved: boolean }>(`/api/stores/${store.id}/commands/executions/${execution.id}/save-script`, { name: execution.scriptName ?? "Inline script" }),
+    mutationFn: (execution: TunnelCommandExecution) => api.post<{ executionId: string; scriptId: string; versionId: string; version: number; alreadySaved: boolean }>(`/api/tunnels/${tunnel.id}/commands/executions/${execution.id}/save-script`, { name: execution.scriptName ?? "Inline script" }),
     onSuccess: async (saved) => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["store-detail", store.id] }),
-        queryClient.invalidateQueries({ queryKey: ["command-executions", store.id] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnel.id] }),
+        queryClient.invalidateQueries({ queryKey: ["command-executions", tunnel.id] }),
         queryClient.invalidateQueries({ queryKey: ["scripts"] }),
         queryClient.invalidateQueries({ queryKey: ["script-detail", saved.scriptId] })
       ]);
@@ -687,11 +688,11 @@ function CommandExecutionPanel({ store }: { store: Store }) {
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to save inline script")
   });
-  const agent = store.commandAgent!;
+  const agent = tunnel.commandAgent!;
   const executions = executionData?.executions ?? [];
   const historyPagination = executionData?.pagination;
   const historySummary = executionData?.summary ?? emptyExecutionStats;
-  const enrollmentById = new Map((store.enrollments ?? []).map((enrollment) => [enrollment.id, enrollment]));
+  const enrollmentById = new Map((tunnel.enrollments ?? []).map((enrollment) => [enrollment.id, enrollment]));
   useEffect(() => {
     if (expandLatestAfterExecution && executions[0]) {
       setExpandedExecutionId(executions[0].id);
@@ -719,12 +720,12 @@ function CommandExecutionPanel({ store }: { store: Store }) {
           {selectedScript && selectedScriptVersion && <div className="command-script-preview"><header><div><strong>Script preview</strong><span>{selectedScript.name} · Version {selectedScriptVersion.version}</span></div><code>{selectedScript.language}</code></header><ScriptEditor value={selectedScriptVersion.content} language={selectedScript.language} height="220px" readOnly /></div>}
         </div> : <div className="command-inline-script">
           <div className="command-inline-heading"><div><strong>Inline script</strong><span>Runs once and stays outside the library unless saved from history.</span></div></div>
-          <div className="command-inline-metadata"><label className="field"><span className="field-label">Name <FieldHelp text="Identifies this one-off execution in store history. It is also used if you later save the execution to the script library." /></span><input value={inlineName} maxLength={120} onChange={(event) => setInlineName(event.target.value)} placeholder="One-off maintenance" /></label>{hostPlatform === "unix" ? <label className="field"><span className="field-label">Language</span><select aria-label="Inline script language" value={inlineLanguage} onChange={(event) => setInlineLanguage(event.target.value as typeof inlineLanguage)}><option value="bash">Bash</option><option value="sh">POSIX sh</option></select></label> : <label className="field"><span className="field-label">Language</span><input value="PowerShell" disabled /></label>}</div>
+          <div className="command-inline-metadata"><label className="field"><span className="field-label">Name <FieldHelp text="Identifies this one-off execution in tunnel history. It is also used if you later save the execution to the script library." /></span><input value={inlineName} maxLength={120} onChange={(event) => setInlineName(event.target.value)} placeholder="One-off maintenance" /></label>{hostPlatform === "unix" ? <label className="field"><span className="field-label">Language</span><select aria-label="Inline script language" value={inlineLanguage} onChange={(event) => setInlineLanguage(event.target.value as typeof inlineLanguage)}><option value="bash">Bash</option><option value="sh">POSIX sh</option></select></label> : <label className="field"><span className="field-label">Language</span><input value="PowerShell" disabled /></label>}</div>
           <ScriptEditor value={inlineContent} language={inlineLanguage} height="220px" onChange={setInlineContent} />
         </div>}
-        <div className="command-execution-controls"><ArgumentSummary data={resolvedVariableData} loading={variablesLoading} /><button className="button button-primary command-execute-button" type="button" disabled={!canExecute} onClick={() => { setArgumentBindings({}); setExecuteConfirmOpen(true); }}><TerminalSquare size={15} />Execute script</button></div>
+        <div className="command-execution-controls"><ArgumentSummary data={resolvedVariableData} loading={variablesLoading} error={variablesError} /><button className="button button-primary command-execute-button" type="button" disabled={!canExecute} onClick={() => { setArgumentBindings({}); setExecuteConfirmOpen(true); }}><TerminalSquare size={15} />Execute script</button></div>
       </>}
-      <div className="command-execution-history"><header><h4>Execution history</h4><div className="command-history-head-actions"><ExecutionStatsSummary stats={historySummary} /><span>{historyPagination?.total ?? 0} run{historyPagination?.total === 1 ? "" : "s"}</span><button className="icon-button" type="button" title="Refresh execution history" aria-label="Refresh execution history" disabled={refreshHistory.isPending} onClick={() => refreshHistory.mutate()}><RefreshCw size={14} className={refreshHistory.isPending ? "spin-icon" : undefined} /></button></div></header><div className="execution-history-filters"><label className="execution-history-search"><Search size={14} /><input type="search" value={historySearch} onChange={(event) => setHistorySearch(event.target.value)} placeholder="Search script, description, store, tenant, or code" aria-label="Search store execution history" /></label><label><span>From</span><input type="datetime-local" step="60" value={historyFrom} onChange={(event) => setHistoryFrom(event.target.value)} aria-label="Filter store execution history from time" /></label><label><span>To</span><input type="datetime-local" step="60" value={historyTo} onChange={(event) => setHistoryTo(event.target.value)} aria-label="Filter store execution history to time" /></label></div>{executions.length ? executions.map((execution: StoreCommandExecution) => {
+      <div className="command-execution-history"><header><h4>Execution history</h4><div className="command-history-head-actions"><ExecutionStatsSummary stats={historySummary} /><span>{historyPagination?.total ?? 0} run{historyPagination?.total === 1 ? "" : "s"}</span><button className="icon-button" type="button" title="Refresh execution history" aria-label="Refresh execution history" disabled={refreshHistory.isPending} onClick={() => refreshHistory.mutate()}><RefreshCw size={14} className={refreshHistory.isPending ? "spin-icon" : undefined} /></button></div></header><div className="execution-history-filters"><label className="execution-history-search"><Search size={14} /><input type="search" value={historySearch} onChange={(event) => setHistorySearch(event.target.value)} placeholder="Search script, description, tunnel, tenant, or code" aria-label="Search tunnel execution history" /></label><label><span>From</span><input type="datetime-local" step="60" value={historyFrom} onChange={(event) => setHistoryFrom(event.target.value)} aria-label="Filter tunnel execution history from time" /></label><label><span>To</span><input type="datetime-local" step="60" value={historyTo} onChange={(event) => setHistoryTo(event.target.value)} aria-label="Filter tunnel execution history to time" /></label></div>{executions.length ? executions.map((execution: TunnelCommandExecution) => {
         const enrollment = execution.enrollmentId ? enrollmentById.get(execution.enrollmentId) : undefined;
         const environment = enrollment ? enrollmentEnvironment(enrollment) : "Enrollment unavailable";
         const computerName = enrollment ? enrollmentComputerName(enrollment) : "Enrollment unavailable";
@@ -738,15 +739,15 @@ function CommandExecutionPanel({ store }: { store: Store }) {
         const isSaving = saveInlineExecution.isPending && saveInlineExecution.variables?.id === execution.id;
         const executionLanguage = execution.language ?? (execution.platform === "windows" ? "powershell" : "bash");
         const executionTime = execution.startedAt ?? execution.createdAt;
-        return <details className={`command-execution command-execution-${execution.status}`} key={execution.id} open={expandedExecutionId === execution.id} onToggle={(event) => { if (event.currentTarget.open) setExpandedExecutionId(execution.id); else if (expandedExecutionId === execution.id) setExpandedExecutionId(null); }}><summary><span className="command-execution-summary-main"><StatusBadge status={execution.status} label={statusLabel} />{isBulk && <span className="command-execution-source-tag">bulk</span>}<span className="command-execution-script-identity">{isInline ? <><span className="command-execution-source-tag">inline</span><strong className="command-execution-inline-name">{inlineName}</strong></> : managedScriptId ? <button className="command-execution-script-link" type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); openScriptDrawer(managedScriptId, managedVersion); }}>{scriptLabel}</button> : <strong>{scriptLabel}</strong>}</span><span className="host-identity" title={environment}><HostPlatformIcon environment={enrollment?.environment} platform={enrollment?.platform} osName={enrollment?.hostInfo.osName} /><code>{computerName}</code></span></span><span className="command-execution-timing"><time>{new Date(executionTime).toLocaleString()}</time><code>{execution.elapsedMs !== null ? `${execution.elapsedMs} ms` : execution.status}</code></span></summary>{expandedExecutionId === execution.id && <div className="command-execution-body">{(isInline || (isBulk && managedScriptId && execution.bulkExecutionId)) && <div className="command-execution-actions">{isInline && <button className="button button-secondary button-small" type="button" disabled={isSaving} onClick={() => saveInlineExecution.mutate(execution)}><Save size={14} />{isSaving ? "Saving..." : "Save script"}</button>}{isBulk && managedScriptId && execution.bulkExecutionId && <button className="button button-secondary button-small" type="button" onClick={() => openScriptDrawer(managedScriptId, managedVersion, { bulkRunId: execution.bulkExecutionId! })}><Layers3 size={14} />Open bulk run details</button>}</div>}<ScriptEditor value={execution.script} language={executionLanguage} height="200px" readOnly compactLineNumberGutter /><ExecutionLog storeId={store.id} execution={execution} /></div>}</details>;
-      }) : <div className="quiet-empty">No scripts have been executed for this store.</div>}{historyPagination && historyPagination.totalPages > 1 && <div className="command-history-pagination"><button className="icon-button" type="button" title="Previous execution page" aria-label="Previous execution page" disabled={historyPagination.page <= 1} onClick={() => { setExpandedExecutionId(null); setHistoryPage((page) => Math.max(1, page - 1)); }}><ChevronLeft size={15} /></button><span>Page {historyPagination.page} of {historyPagination.totalPages}</span><button className="icon-button" type="button" title="Next execution page" aria-label="Next execution page" disabled={historyPagination.page >= historyPagination.totalPages} onClick={() => { setExpandedExecutionId(null); setHistoryPage((page) => page + 1); }}><ChevronRight size={15} /></button></div>}</div>
+        return <details className={`command-execution command-execution-${execution.status}`} key={execution.id} open={expandedExecutionId === execution.id} onToggle={(event) => { if (event.currentTarget.open) setExpandedExecutionId(execution.id); else if (expandedExecutionId === execution.id) setExpandedExecutionId(null); }}><summary><span className="command-execution-summary-main"><StatusBadge status={execution.status} label={statusLabel} />{isBulk && <span className="command-execution-source-tag">bulk</span>}<span className="command-execution-script-identity">{isInline ? <><span className="command-execution-source-tag">inline</span><strong className="command-execution-inline-name">{inlineName}</strong></> : managedScriptId ? <button className="command-execution-script-link" type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); openScriptDrawer(managedScriptId, managedVersion); }}>{scriptLabel}</button> : <strong>{scriptLabel}</strong>}</span><span className="host-identity" title={environment}><HostPlatformIcon environment={enrollment?.environment} platform={enrollment?.platform} osName={enrollment?.hostInfo.osName} /><code>{computerName}</code></span></span><span className="command-execution-timing"><time>{new Date(executionTime).toLocaleString()}</time><code>{execution.elapsedMs !== null ? `${execution.elapsedMs} ms` : execution.status}</code></span></summary>{expandedExecutionId === execution.id && <div className="command-execution-body">{(isInline || (isBulk && managedScriptId && execution.bulkExecutionId)) && <div className="command-execution-actions">{isInline && <button className="button button-secondary button-small" type="button" disabled={isSaving} onClick={() => saveInlineExecution.mutate(execution)}><Save size={14} />{isSaving ? "Saving..." : "Save script"}</button>}{isBulk && managedScriptId && execution.bulkExecutionId && <button className="button button-secondary button-small" type="button" onClick={() => openScriptDrawer(managedScriptId, managedVersion, { bulkRunId: execution.bulkExecutionId! })}><Layers3 size={14} />Open bulk run details</button>}</div>}<ScriptEditor value={execution.script} language={executionLanguage} height="200px" readOnly compactLineNumberGutter /><ExecutionLog tunnelId={tunnel.id} execution={execution} /></div>}</details>;
+      }) : <div className="quiet-empty">No scripts have been executed for this tunnel.</div>}{historyPagination && historyPagination.totalPages > 1 && <div className="command-history-pagination"><button className="icon-button" type="button" title="Previous execution page" aria-label="Previous execution page" disabled={historyPagination.page <= 1} onClick={() => { setExpandedExecutionId(null); setHistoryPage((page) => Math.max(1, page - 1)); }}><ChevronLeft size={15} /></button><span>Page {historyPagination.page} of {historyPagination.totalPages}</span><button className="icon-button" type="button" title="Next execution page" aria-label="Next execution page" disabled={historyPagination.page >= historyPagination.totalPages} onClick={() => { setExpandedExecutionId(null); setHistoryPage((page) => page + 1); }}><ChevronRight size={15} /></button></div>}</div>
     </section>
     <Modal open={quickCreateOpen} title="Create new script" onClose={() => setQuickCreateOpen(false)} width="wide">
-      <div className="command-quick-create"><div className="script-metadata-grid command-quick-create-fields"><label className="field"><span className="field-label">Name <FieldHelp text="The reusable script name shown in the script picker. Names must be unique within the platform." /></span><input value={quickName} onChange={(event) => setQuickName(event.target.value)} placeholder="Store health check" /></label><label className="field"><span className="field-label">Language</span><select value={quickLanguage} onChange={(event) => setQuickLanguage(event.target.value as typeof quickLanguage)}>{hostPlatform === "windows" ? <option value="powershell">PowerShell</option> : <><option value="bash">Bash</option><option value="sh">POSIX sh</option></>}</select></label><label className="field"><span className="field-label">Description</span><input value={quickDescription} onChange={(event) => setQuickDescription(event.target.value)} placeholder="Optional description" /></label><label className="field"><span className="field-label">Default timeout (seconds)</span><input type="number" min={1} max={300} value={quickTimeoutSeconds} onChange={(event) => setQuickTimeoutSeconds(Math.min(300, Math.max(1, Number(event.target.value) || 1)))} /></label></div><ScriptArgumentsEditor argumentsList={quickArguments} onChange={setQuickArguments} /><ScriptEditor value={quickContent} language={quickLanguage} height="300px" onChange={setQuickContent} /><div className="form-actions"><span className="script-editor-hint">Creates version 1 and selects it for this run</span><button className="button button-primary" type="button" disabled={!quickName.trim() || !quickContent.trim() || quickCreate.isPending} onClick={() => quickCreate.mutate()}><Save size={15} />{quickCreate.isPending ? "Saving..." : "Save script"}</button></div></div>
+      <div className="command-quick-create"><div className="script-metadata-grid command-quick-create-fields"><label className="field"><span className="field-label">Name <FieldHelp text="The reusable script name shown in the script picker. Names must be unique within the platform." /></span><input value={quickName} onChange={(event) => setQuickName(event.target.value)} placeholder="Tunnel health check" /></label><label className="field"><span className="field-label">Language</span><select value={quickLanguage} onChange={(event) => setQuickLanguage(event.target.value as typeof quickLanguage)}>{hostPlatform === "windows" ? <option value="powershell">PowerShell</option> : <><option value="bash">Bash</option><option value="sh">POSIX sh</option></>}</select></label><label className="field"><span className="field-label">Description</span><input value={quickDescription} onChange={(event) => setQuickDescription(event.target.value)} placeholder="Optional description" /></label><label className="field"><span className="field-label">Default timeout (seconds)</span><input type="number" min={1} max={300} value={quickTimeoutSeconds} onChange={(event) => setQuickTimeoutSeconds(Math.min(300, Math.max(1, Number(event.target.value) || 1)))} /></label></div><ScriptArgumentsEditor argumentsList={quickArguments} onChange={setQuickArguments} /><ScriptEditor value={quickContent} language={quickLanguage} height="300px" onChange={setQuickContent} /><div className="form-actions"><span className="script-editor-hint">Creates version 1 and selects it for this run</span><button className="button button-primary" type="button" disabled={!quickName.trim() || !quickContent.trim() || quickCreate.isPending} onClick={() => quickCreate.mutate()}><Save size={15} />{quickCreate.isPending ? "Saving..." : "Save script"}</button></div></div>
     </Modal>
     <Modal open={executeConfirmOpen} title={`Execute · ${executionMode === "saved" ? selectedScript?.name ?? "saved script" : inlineName || "inline script"}`} onClose={() => setExecuteConfirmOpen(false)} width="wide">
-      <div className="execution-confirmation">{variablesLoading || !resolvedVariableData ? <div className="quiet-empty">Resolving available variables...</div> : <>
-        <div className="execution-confirmation-summary"><div><strong>{store.displayName}</strong><span>{executionMode === "saved" ? `Version ${selectedScriptVersion?.version ?? "-"}` : "Inline script"}</span></div></div>
+      <div className="execution-confirmation">{variablesErrored ? <div className="inline-alert">{variablesError instanceof Error ? variablesError.message : "Unable to resolve available variables"}<button className="button button-secondary button-small" type="button" onClick={() => refetchVariables()}><RefreshCw size={14} />Retry</button></div> : variablesLoading || !resolvedVariableData ? <div className="quiet-empty">Resolving available variables...</div> : <>
+        <div className="execution-confirmation-summary"><div><strong>{tunnel.displayName}</strong><span>{executionMode === "saved" ? `Version ${selectedScriptVersion?.version ?? "-"}` : "Inline script"}</span></div></div>
         <ArgumentBindingsEditor argumentsList={resolvedVariableData.arguments} bindings={argumentBindings} availableVariables={resolvedVariableData.availableVariables} sources={resolvedVariableData.sources} onChange={setArgumentBindings} />
         <div className="form-actions"><button className="button button-secondary cancel-button-left" type="button" onClick={() => setExecuteConfirmOpen(false)}>Cancel</button><span>{Object.keys(argumentBindings).length} argument{Object.keys(argumentBindings).length === 1 ? "" : "s"} mapped</span><label className="field bulk-timeout-field"><span className="field-label">Timeout (s) <FieldHelp text="The maximum time the command agent may let this script run before terminating it. Allowed range: 1 to 300 seconds." /></span><input type="number" min={1} max={300} value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Math.min(300, Math.max(1, Number(event.target.value) || 1)))} /></label><button className="button button-primary" type="button" disabled={execute.isPending} onClick={() => execute.mutate(argumentBindings)}><TerminalSquare size={15} />{execute.isPending ? "Executing..." : "Confirm execution"}</button></div>
       </>}</div>
@@ -754,25 +755,27 @@ function CommandExecutionPanel({ store }: { store: Store }) {
   </>;
 }
 
-function EditConnectivityPanel({ store, onClose }: { store: Store; onClose: () => void }) {
+function EditConnectivityPanel({ tunnel, onClose }: { tunnel: Tunnel; onClose: () => void }) {
   const queryClient = useQueryClient();
   const [publications, setPublications] = useState<DraftPublication[]>([]);
   const [error, setError] = useState("");
   useEffect(() => {
     setError("");
-    setPublications(store?.publications.map((publication) => ({
+    setPublications(tunnel?.publications.map((publication) => ({
       key: publication.id,
       suffix: publication.suffix,
+      useCustomLabel: Boolean(publication.customLabel),
+      customLabel: publication.customLabel ?? "",
       routes: publication.routes.map((route) => ({ key: route.id, path: route.path, serviceUrl: route.serviceUrl, kind: route.kind ?? "service" }))
     })) ?? []);
-  }, [store.id]);
+  }, [tunnel.id]);
   const mutation = useMutation({
-    mutationFn: () => api.put<{ success: boolean; applied: boolean }>(`/api/stores/${store!.id}/connectivity`, { publications: connectivityPayload(publications) }),
+    mutationFn: () => api.put<{ success: boolean; applied: boolean }>(`/api/tunnels/${tunnel!.id}/connectivity`, { publications: connectivityPayload(publications) }),
     onSuccess: async (result) => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["stores"] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnels"] }),
         queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
-        queryClient.invalidateQueries({ queryKey: ["store-detail", store.id] })
+        queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnel.id] })
       ]);
       toast.success(result.applied ? "Tunnel connectivity updated" : "Connectivity saved for provisioning");
       onClose();
@@ -788,24 +791,24 @@ function EditConnectivityPanel({ store, onClose }: { store: Store; onClose: () =
     setError("");
     mutation.mutate();
   };
-  return <section className="store-drawer-section connectivity-inline-editor">
-    <header className="store-section-heading"><div><h3>Edit connectivity</h3><span>{store.displayName} · update published subdomains and ingress paths</span></div><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button></header>
+  return <section className="tunnel-drawer-section connectivity-inline-editor">
+    <header className="tunnel-section-heading"><div><h3>Edit connectivity</h3><span>{tunnel.displayName} · update published subdomains and ingress paths</span></div><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button></header>
     {error && <div className="form-error">{error}</div>}
-    <div className="connectivity-scope"><div><span>Cloudflare account</span><strong>{store.accountName}</strong></div><div><span>DNS zone</span><strong>{store.zoneName}</strong></div><div><span>Tunnel</span><strong className="mono">{store.tunnelId ?? "Pending installation"}</strong></div></div>
-    <ConnectivityEditor storeId={store.storeCode} zoneName={store.zoneName} publications={publications} onChange={setPublications} />
+    <div className="connectivity-scope"><div><span>Cloudflare account</span><strong>{tunnel.accountName}</strong></div><div><span>DNS zone</span><strong>{tunnel.zoneName}</strong></div><div><span>Tunnel</span><strong className="mono">{tunnel.cfTunnelId ?? "Pending installation"}</strong></div></div>
+    <ConnectivityEditor tunnelId={tunnel.tunnelCode} zoneName={tunnel.zoneName} publications={publications} onChange={setPublications} />
     <div className="form-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button><button className="button button-primary" type="button" onClick={save} disabled={mutation.isPending}>{mutation.isPending ? "Updating..." : "Save connectivity"}</button></div>
   </section>;
 }
 
-function RouteWafDialog({ store, route, onClose }: { store: Store | null; route: StoreRoute | null; onClose: () => void }) {
+function RouteWafDialog({ tunnel, route, onClose }: { tunnel: Tunnel | null; route: TunnelRoute | null; onClose: () => void }) {
   const queryClient = useQueryClient();
   const [enabled, setEnabled] = useState(true);
   const [allowedIps, setAllowedIps] = useState("");
   const [error, setError] = useState("");
   const { data, isLoading } = useQuery({
-    queryKey: ["route-waf", store?.id, route?.id],
-    queryFn: () => api.get<{ waf: { enabled: boolean; allowedIps: string[]; defaulted: boolean; cloudflareManIps: string[] } }>(`/api/stores/${store!.id}/routes/${route!.id}/waf`),
-    enabled: Boolean(store && route)
+    queryKey: ["route-waf", tunnel?.id, route?.id],
+    queryFn: () => api.get<{ waf: { enabled: boolean; allowedIps: string[]; defaulted: boolean; cloudflareManIps: string[]; currentIp: string | null } }>(`/api/tunnels/${tunnel!.id}/routes/${route!.id}/waf`),
+    enabled: Boolean(tunnel && route)
   });
   useEffect(() => {
     if (!route) return;
@@ -819,15 +822,15 @@ function RouteWafDialog({ store, route, onClose }: { store: Store | null; route:
     setAllowedIps(data.waf.allowedIps.join("\n"));
   }, [data]);
   const mutation = useMutation({
-    mutationFn: () => api.patch<{ waf: { enabled: boolean; allowedIps: string[] } }>(`/api/stores/${store!.id}/routes/${route!.id}/waf`, {
+    mutationFn: () => api.patch<{ waf: { enabled: boolean; allowedIps: string[] } }>(`/api/tunnels/${tunnel!.id}/routes/${route!.id}/waf`, {
       enabled,
       allowedIps: allowedIps.split(/[\n,]+/).map((value) => value.trim()).filter(Boolean)
     }),
     onSuccess: async () => {
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["store-detail", store?.id] }),
-        queryClient.invalidateQueries({ queryKey: ["stores"] }),
-        queryClient.invalidateQueries({ queryKey: ["route-waf", store?.id, route?.id] })
+        queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnel?.id] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnels"] }),
+        queryClient.invalidateQueries({ queryKey: ["route-waf", tunnel?.id, route?.id] })
       ]);
       toast.success("Route WAF updated");
       onClose();
@@ -841,14 +844,22 @@ function RouteWafDialog({ store, route, onClose }: { store: Store | null; route:
     if (!missingCloudflareManIps.length) return;
     setAllowedIps([...currentIps, ...missingCloudflareManIps].join("\n"));
   };
-  return <Modal open={Boolean(store && route)} title={`Route WAF · ${route?.path ?? ""}`} onClose={onClose}>
+  const myIp = data?.waf.currentIp ?? null;
+  const addMyIp = () => {
+    if (!myIp || currentIps.includes(myIp)) return;
+    setAllowedIps([...currentIps, myIp].join("\n"));
+  };
+  return <Modal open={Boolean(tunnel && route)} title={`Route WAF · ${route?.path ?? ""}`} onClose={onClose}>
     {route && <div className="route-waf-dialog">
       {error && <div className="form-error">{error}</div>}
       {isLoading ? <div className="quiet-empty">Loading WAF policy...</div> : <>
         <label className="checkbox-field"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /><span><strong>Allow-list protection</strong><small>When enabled, Cloudflare blocks every source IP except the addresses below.</small></span></label>
-        <label className="field"><span className="field-label">Allowed Cloudflare Man IPs or CIDRs <FieldHelp text="Use one public IPv4, IPv6, or CIDR per line. Leave the list unchanged to use the server's configured Cloudflare Man source IP. Never use 0.0.0.0/0 unless this route is intentionally public." /></span><textarea value={allowedIps} onChange={(event) => setAllowedIps(event.target.value)} rows={4} placeholder="203.0.113.10/32" disabled={!enabled} /></label>
-        <button className="button button-secondary" type="button" onClick={addCloudflareManOrigin} disabled={!missingCloudflareManIps.length}><ShieldCheck size={15} />Add Cloudflare Man origin{cloudflareManIps.length ? ` (${cloudflareManIps.join(", ")})` : ""}</button>
-        {data?.waf.defaulted && <div className="inline-alert"><ShieldCheck size={15} />The addresses were resolved from CFMAN_WAF_ALLOWED_IPS or the Cloudflare Man server's public IP.</div>}
+        <label className="field"><span className="field-label">Allowed CFMan IPs or CIDRs <FieldHelp text="Use one public IPv4, IPv6, or CIDR per line. Leave the list unchanged to use the server's configured CFMan source IP. Never use 0.0.0.0/0 unless this route is intentionally public." /></span><textarea value={allowedIps} onChange={(event) => setAllowedIps(event.target.value)} rows={4} placeholder="203.0.113.10/32" disabled={!enabled} /></label>
+        <div className="route-waf-quick-add">
+          <button className="button button-secondary" type="button" onClick={addCloudflareManOrigin} disabled={!missingCloudflareManIps.length}><ShieldCheck size={15} />Add CFMan origin{cloudflareManIps.length ? ` (${cloudflareManIps.join(", ")})` : ""}</button>
+          <button className="button button-secondary" type="button" onClick={addMyIp} disabled={!myIp || currentIps.includes(myIp)}><Globe2 size={15} />Add my current IP{myIp ? ` (${myIp})` : ""}</button>
+        </div>
+        {data?.waf.defaulted && <div className="inline-alert"><ShieldCheck size={15} />The addresses were resolved from CFMAN_WAF_ALLOWED_IPS or the CFMan server's public IP.</div>}
       </>}
       <div className="form-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button><button className="button button-primary" type="button" onClick={() => mutation.mutate()} disabled={isLoading || mutation.isPending}>{mutation.isPending ? "Updating..." : "Save WAF policy"}</button></div>
     </div>}
@@ -870,10 +881,10 @@ function ExpiryLine({ expiresAt }: { expiresAt: string }) {
   return <div className="expiry-line">{formatExpiry(expiresAt)}</div>;
 }
 
-// Store administrators paste this into an elevated Command Prompt as often as an
+// Tunnel administrators paste this into an elevated Command Prompt as often as an
 // elevated PowerShell, so the one-liner invokes powershell.exe explicitly instead of
 // relying on the host shell. TLS 1.2 must be forced here, before the download, for
-// stores on older Windows builds that still default to TLS 1.0.
+// tunnels on older Windows builds that still default to TLS 1.0.
 function windowsBootstrapCommand(url: string): string {
   return `powershell -NoProfile -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor 3072; irm '${url}' | iex"`;
 }
@@ -894,17 +905,17 @@ export function EnrollmentCommands({ result, defaultPlatform = "windows" }: { re
   </div>;
 }
 
-function UnenrollHelperPanel({ storeId, enrollment, status }: { storeId: string; enrollment: StoreEnrollment; status: string }) {
+function UnenrollHelperPanel({ tunnelId, enrollment, status }: { tunnelId: string; enrollment: TunnelEnrollment; status: string }) {
   const { data, isLoading } = useQuery({
-    queryKey: ["enrollment-unenroll-script", storeId, enrollment.id],
-    queryFn: () => api.get<{ powershell: string | null; shell: string | null }>(`/api/stores/${storeId}/enrollments/${enrollment.id}/unenroll-script`),
-    enabled: Boolean(storeId && enrollment.id),
+    queryKey: ["enrollment-unenroll-script", tunnelId, enrollment.id],
+    queryFn: () => api.get<{ powershell: string | null; shell: string | null }>(`/api/tunnels/${tunnelId}/enrollments/${enrollment.id}/unenroll-script`),
+    enabled: Boolean(tunnelId && enrollment.id),
     refetchInterval: status === "unenroll_pending" ? 2000 : false
   });
   if (isLoading) return null;
   if (!data?.powershell && !data?.shell) return null;
   const note = status === "unenroll_failed"
-    ? `${enrollment.unenrollLastError ?? "Automatic unenrollment failed"}. Run this cleanup command on the connected store machine.`
+    ? `${enrollment.unenrollLastError ?? "Automatic unenrollment failed"}. Run this cleanup command on the connected tunnel machine.`
     : "Unenrollment was scheduled through the command agent. Run this manual command only if it does not complete on its own.";
   return <div className="unenroll-command-panel">
     <div className="command-note"><ShieldAlert size={14} />{note}</div>
@@ -929,7 +940,7 @@ function DiagnosticCommands({ result }: { result: DiagnoseResult }) {
       <CopyButton value={command} label="Copy diagnostic command" />
     </div>
     <pre><code>{command}</code></pre>
-    <div className="command-note"><ShieldAlert size={14} />Run this on the store machine. It checks cloudflared, local enrollment state, and the command agent, then reports the result back here automatically.</div>
+    <div className="command-note"><ShieldAlert size={14} />Run this on the tunnel machine. It checks cloudflared, local enrollment state, and the command agent, then reports the result back here automatically.</div>
     <ExpiryLine expiresAt={result.expiresAt} />
   </div>;
 }
@@ -937,24 +948,24 @@ function DiagnosticCommands({ result }: { result: DiagnoseResult }) {
 type TroubleshootStepStatus = "pending" | "checking" | "pass" | "fail";
 type TroubleshootStep = { key: string; label: string; status: TroubleshootStepStatus; detail?: string | undefined };
 
-function TroubleshootDialog({ store, open, onClose, onManageWaf }: { store: Store; open: boolean; onClose: () => void; onManageWaf: (route: StoreRoute) => void }) {
+function TroubleshootDialog({ tunnel, open, onClose, onManageWaf }: { tunnel: Tunnel; open: boolean; onClose: () => void; onManageWaf: (route: TunnelRoute) => void }) {
   const queryClient = useQueryClient();
-  const routes = (store.publications ?? []).flatMap((publication) => publication.routes.filter((route) => route.kind === "service").map((route) => route));
+  const routes = (tunnel.publications ?? []).flatMap((publication) => publication.routes.filter((route) => route.kind === "service").map((route) => route));
   const buildSteps = (): TroubleshootStep[] => [
     { key: "tunnel", label: "Cloudflare tunnel", status: "pending" },
-    ...(store.commandAgent ? [{ key: "agent", label: "Command agent", status: "pending" as TroubleshootStepStatus }] : []),
+    ...(tunnel.commandAgent ? [{ key: "agent", label: "Command agent", status: "pending" as TroubleshootStepStatus }] : []),
     ...routes.map((route) => ({ key: route.id, label: route.path, status: "pending" as TroubleshootStepStatus }))
   ];
   const [steps, setSteps] = useState<TroubleshootStep[]>(buildSteps);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
   const [diagnose, setDiagnose] = useState<DiagnoseResult | null>(null);
   const issueDiagnose = useMutation({
-    mutationFn: () => api.post<DiagnoseResult>(`/api/stores/${store.id}/diagnose`),
+    mutationFn: () => api.post<DiagnoseResult>(`/api/tunnels/${tunnel.id}/diagnose`),
     onSuccess: async (result) => {
       setDiagnose(result);
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["enrollment-logs", store.id, result.enrollmentId] }),
-        queryClient.invalidateQueries({ queryKey: ["store-enrollments", store.id] })
+        queryClient.invalidateQueries({ queryKey: ["enrollment-logs", tunnel.id, result.enrollmentId] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnel-enrollments", tunnel.id] })
       ]);
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to generate a diagnostic command")
@@ -970,13 +981,13 @@ function TroubleshootDialog({ store, open, onClose, onManageWaf }: { store: Stor
     setDiagnose(null);
 
     updateStep("tunnel", { status: "checking" });
-    await api.post("/api/stores/refresh", { storeIds: [store.id] }).catch(() => null);
+    await api.post("/api/tunnels/refresh", { tunnelIds: [tunnel.id] }).catch(() => null);
     await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ["stores"] }),
-      queryClient.invalidateQueries({ queryKey: ["store-detail", store.id] })
+      queryClient.invalidateQueries({ queryKey: ["tunnels"] }),
+      queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnel.id] })
     ]);
-    const fresh = queryClient.getQueryData<{ store: Store }>(["store-detail", store.id])?.store ?? store;
-    const tunnelOk = tunnelOnlineStatus(fresh.tunnelStatus) === "online";
+    const fresh = queryClient.getQueryData<{ tunnel: Tunnel }>(["tunnel-detail", tunnel.id])?.tunnel ?? tunnel;
+    const tunnelOk = tunnelOnlineStatus(fresh.cfTunnelStatus) === "online";
     updateStep("tunnel", { status: tunnelOk ? "pass" : "fail" });
 
     if (fresh.commandAgent) {
@@ -985,11 +996,11 @@ function TroubleshootDialog({ store, open, onClose, onManageWaf }: { store: Stor
 
     for (const route of routes) {
       updateStep(route.id, { status: "checking" });
-      const result = await api.post<{ success: boolean; check: { error?: string } }>(`/api/stores/${store.id}/verify`, { routeId: route.id }).catch(() => null);
+      const result = await api.post<{ success: boolean; check: { error?: string } }>(`/api/tunnels/${tunnel.id}/verify`, { routeId: route.id }).catch(() => null);
       updateStep(route.id, { status: result?.success ? "pass" : "fail", detail: result?.check.error });
       await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["stores"] }),
-        queryClient.invalidateQueries({ queryKey: ["store-detail", store.id] })
+        queryClient.invalidateQueries({ queryKey: ["tunnels"] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnel.id] })
       ]);
     }
   };
@@ -997,23 +1008,23 @@ function TroubleshootDialog({ store, open, onClose, onManageWaf }: { store: Stor
   useEffect(() => {
     if (open) void runChecks();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, store.id]);
+  }, [open, tunnel.id]);
 
   const toggleExpand = (key: string) => setExpanded((current) => ({ ...current, [key]: !current[key] }));
   const verifyRoute = (routeId: string) => {
     updateStep(routeId, { status: "checking" });
-    api.post<{ success: boolean; check: { error?: string } }>(`/api/stores/${store.id}/verify`, { routeId })
+    api.post<{ success: boolean; check: { error?: string } }>(`/api/tunnels/${tunnel.id}/verify`, { routeId })
       .then(async (result) => {
         updateStep(routeId, { status: result.success ? "pass" : "fail", detail: result.check.error });
         await Promise.all([
-          queryClient.invalidateQueries({ queryKey: ["stores"] }),
-          queryClient.invalidateQueries({ queryKey: ["store-detail", store.id] })
+          queryClient.invalidateQueries({ queryKey: ["tunnels"] }),
+          queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnel.id] })
         ]);
       })
       .catch(() => updateStep(routeId, { status: "fail" }));
   };
 
-  return <Modal open={open} title={`Troubleshoot · ${store.displayName}`} onClose={onClose} width="wide">
+  return <Modal open={open} title={`Troubleshoot · ${tunnel.displayName}`} onClose={onClose} width="wide">
     <div className="troubleshoot-steps">
       {steps.map((step) => {
         const isConnectionStep = step.key === "tunnel" || step.key === "agent";
@@ -1030,7 +1041,7 @@ function TroubleshootDialog({ store, open, onClose, onManageWaf }: { store: Stor
           </div>
           {step.status === "fail" && expanded[step.key] && <div className="troubleshoot-step-guidance">
             {isConnectionStep ? <>
-              <p>{step.key === "tunnel" ? "The Cloudflare tunnel is not connected." : "The command agent is not responding."} Run this on the store machine - it checks cloudflared, local enrollment state, and the command agent, then reports back automatically.</p>
+              <p>{step.key === "tunnel" ? "The Cloudflare tunnel is not connected." : "The command agent is not responding."} Run this on the tunnel machine - it checks cloudflared, local enrollment state, and the command agent, then reports back automatically.</p>
               {diagnose ? <DiagnosticCommands result={diagnose} /> : <button className="button button-primary" type="button" onClick={() => issueDiagnose.mutate()} disabled={issueDiagnose.isPending}><TerminalSquare size={15} />{issueDiagnose.isPending ? "Generating..." : "Generate diagnostic command"}</button>}
             </> : <>
               <p>{step.detail || "This endpoint did not respond successfully."}</p>

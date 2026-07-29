@@ -27,7 +27,7 @@ export const scriptArgumentsSchema = z.array(scriptArgumentSchema).max(100).supe
 export type ExecutionVariables = z.infer<typeof executionVariablesSchema>;
 export type ScriptArgument = z.infer<typeof scriptArgumentSchema>;
 
-export const STORE_BUILT_IN_VARIABLES = ["TENANT_CODE", "STORE_NAME", "STORE_CODE"] as const;
+export const TUNNEL_BUILT_IN_VARIABLES = ["TENANT_CODE", "TUNNEL_NAME", "TUNNEL_CODE"] as const;
 
 // How a declared script argument gets its value at execution time. This is a
 // mapping chosen by the operator when preparing a run - it is never persisted
@@ -45,18 +45,18 @@ export const argumentBindingsSchema = z.record(variableNameSchema, argumentBindi
 export type ArgumentBinding = z.infer<typeof argumentBindingSchema>;
 export type ArgumentBindings = z.infer<typeof argumentBindingsSchema>;
 
-type StoreVariableScope = {
+type TunnelVariableScope = {
   id: string;
   tenantCode: string;
-  storeCode: string;
-  storeName: string;
-  storeVariables: unknown;
+  tunnelCode: string;
+  tunnelName: string;
+  tunnelVariables: unknown;
   computerVariables: unknown;
   zoneVariables: unknown;
   accountVariables: unknown;
 };
 
-export type VariableSource = "global" | "account" | "zone" | "store" | "built-in" | "computer";
+export type VariableSource = "global" | "account" | "zone" | "tunnel" | "built-in" | "computer";
 
 function normalizedVariables(variables: ExecutionVariables): ExecutionVariables {
   return Object.fromEntries(Object.entries(variables).map(([name, value]) => [name.toUpperCase(), value]));
@@ -71,16 +71,16 @@ function normalizedVariables(variables: ExecutionVariables): ExecutionVariables 
 const VARIABLE_REFERENCE = /\$(?:\$|\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g;
 
 // Guards against a small set of variables expanding into an enormous string
-// (each level multiplying the previous one) before it ever reaches a store.
+// (each level multiplying the previous one) before it ever reaches a tunnel.
 const MAX_EXPANDED_LENGTH = 20_000;
 
 export class VariableResolutionError extends Error {}
 
 type ExpansionContext = {
   raw: ExecutionVariables;
-  // Names resolved from store identity columns. They hold store data, not
+  // Names resolved from tunnel identity columns. They hold tunnel data, not
   // templates, so a display name containing $FOO stays literal instead of
-  // turning arbitrary store data into a reference.
+  // turning arbitrary tunnel data into a reference.
   literals: Set<string>;
   cache: Map<string, string>;
   stack: string[];
@@ -162,12 +162,12 @@ export async function getGlobalExecutionVariables(): Promise<ExecutionVariables>
   }
 }
 
-// Resolves the full set of environment variables available to one store,
+// Resolves the full set of environment variables available to one tunnel,
 // completely independent of any script or argument. This is the "value
 // provider" layer: scripts and their arguments know nothing about it until an
 // operator explicitly binds an argument to one of these names.
 function resolveAvailableVariables(
-  scope: StoreVariableScope,
+  scope: TunnelVariableScope,
   globalVariables: ExecutionVariables
 ): { variables: ExecutionVariables; sources: Record<string, VariableSource> } {
   const variables: ExecutionVariables = {};
@@ -182,54 +182,54 @@ function resolveAvailableVariables(
   merge(globalVariables, "global");
   merge(parseStoredVariables(scope.accountVariables), "account");
   merge(parseStoredVariables(scope.zoneVariables), "zone");
-  merge(parseStoredVariables(scope.storeVariables), "store");
-  merge({ TENANT_CODE: scope.tenantCode, STORE_NAME: scope.storeName, STORE_CODE: scope.storeCode }, "built-in");
+  merge(parseStoredVariables(scope.tunnelVariables), "tunnel");
+  merge({ TENANT_CODE: scope.tenantCode, TUNNEL_NAME: scope.tunnelName, TUNNEL_CODE: scope.tunnelCode }, "built-in");
   merge(parseStoredVariables(scope.computerVariables), "computer");
-  // Expansion runs per store: the same $STORE_NAME reference resolves to a
-  // different value on every store of a bulk run.
+  // Expansion runs per tunnel: the same $TUNNEL_NAME reference resolves to a
+  // different value on every tunnel of a bulk run.
   return { variables: expandVariableReferences(variables, sources), sources };
 }
 
-export async function resolveAvailableVariablesForStore(storeId: string): Promise<{ variables: ExecutionVariables; sources: Record<string, VariableSource> }> {
-  const resolved = await resolveAvailableVariablesForStores([storeId]);
-  const result = resolved.get(storeId);
-  if (!result) throw new Error("Store not found");
+export async function resolveAvailableVariablesForTunnel(tunnelId: string): Promise<{ variables: ExecutionVariables; sources: Record<string, VariableSource> }> {
+  const resolved = await resolveAvailableVariablesForTunnels([tunnelId]);
+  const result = resolved.get(tunnelId);
+  if (!result) throw new Error("Tunnel not found");
   return result;
 }
 
-export async function resolveAvailableVariablesForStores(
-  storeIds: string[]
+export async function resolveAvailableVariablesForTunnels(
+  tunnelIds: string[]
 ): Promise<Map<string, { variables: ExecutionVariables; sources: Record<string, VariableSource> }>> {
-  if (!storeIds.length) return new Map();
+  if (!tunnelIds.length) return new Map();
   const [globalVariables, scopeResult] = await Promise.all([
     getGlobalExecutionVariables(),
     pool.query(
-      `SELECT s.id, s.tenant_code AS "tenantCode", s.store_code AS "storeCode", s.display_name AS "storeName",
-              s.execution_variables AS "storeVariables", z.execution_variables AS "zoneVariables",
+      `SELECT s.id, s.tenant_code AS "tenantCode", s.tunnel_code AS "tunnelCode", s.display_name AS "tunnelName",
+              s.execution_variables AS "tunnelVariables", z.execution_variables AS "zoneVariables",
               a.execution_variables AS "accountVariables", active_enrollment.execution_variables AS "computerVariables"
-         FROM stores s
+         FROM tunnels s
          JOIN zones z ON z.id = s.zone_id
          JOIN cloudflare_accounts a ON a.id = s.account_id
          LEFT JOIN LATERAL (
            SELECT e.execution_variables
              FROM enrollments e
-            WHERE e.store_id = s.id AND e.status IN ('ready', 'installed')
+            WHERE e.tunnel_id = s.id AND e.status IN ('ready', 'installed')
               AND e.unenrolled_at IS NULL AND e.deleted_at IS NULL
             ORDER BY COALESCE(e.installed_at, e.claimed_at, e.created_at) DESC
             LIMIT 1
          ) active_enrollment ON TRUE
         WHERE s.id = ANY($1::uuid[])`,
-      [storeIds]
+      [tunnelIds]
     )
   ]);
-  return new Map((scopeResult.rows as StoreVariableScope[]).map((scope) => [scope.id, resolveAvailableVariables(scope, globalVariables)]));
+  return new Map((scopeResult.rows as TunnelVariableScope[]).map((scope) => [scope.id, resolveAvailableVariables(scope, globalVariables)]));
 }
 
-// Maps each declared script argument to its final value for one store's
+// Maps each declared script argument to its final value for one tunnel's
 // available variables, following the operator's explicit binding choice: a
-// literal custom value, or a reference to one of that store's available
-// environment variables (resolved fresh per store, since the same variable
-// name can resolve differently on different stores). An argument with no
+// literal custom value, or a reference to one of that tunnel's available
+// environment variables (resolved fresh per tunnel, since the same variable
+// name can resolve differently on different tunnels). An argument with no
 // binding falls back to its own default value - the argument's default is its
 // own value provider, independent of the environment-variable layer.
 export function resolveArgumentValues(
@@ -249,13 +249,13 @@ export function resolveArgumentValues(
     else if (binding?.type === "custom") values[key] = expandArgumentValue(binding.value, availableVariables);
     else values[key] = expandArgumentValue(argument.defaultValue, availableVariables);
   }
-  // Built-in store identity values are always available to every script,
+  // Built-in tunnel identity values are always available to every script,
   // regardless of what arguments it declares or how they're mapped - but a
   // script that declares an argument under a built-in name keeps the operator's
   // mapping for it. Overwriting it here would silently discard the chosen
   // binding while describeArgumentValueSources still recorded that binding,
   // leaving history describing a value the run never used.
-  for (const name of STORE_BUILT_IN_VARIABLES) {
+  for (const name of TUNNEL_BUILT_IN_VARIABLES) {
     if (!(name in values)) values[name] = availableVariables[name] ?? "";
   }
 
@@ -267,9 +267,9 @@ export function resolveArgumentValues(
 // Where each resolved argument value in resolveArgumentValues actually came
 // from, recorded alongside the value at execution time so history can show
 // it later: a literal custom value, the argument's own declared default, or a
-// binding to one of the store's resolved variables (with the scope it
+// binding to one of the tunnel's resolved variables (with the scope it
 // resolved from, since the same variable name can come from a different
-// scope on different stores).
+// scope on different tunnels).
 export type ArgumentValueSource =
   | { origin: "custom" }
   | { origin: "default" }
@@ -294,7 +294,7 @@ export function describeArgumentValueSources(
       result[key] = { origin: "default" };
     }
   }
-  for (const name of STORE_BUILT_IN_VARIABLES) {
+  for (const name of TUNNEL_BUILT_IN_VARIABLES) {
     if (!(name in result)) result[name] = { origin: "variable", variable: name, scope: sources[name] ?? "built-in" };
   }
   return result;

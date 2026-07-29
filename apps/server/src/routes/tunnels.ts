@@ -1,3 +1,4 @@
+import { isIP } from "node:net";
 import type { FastifyInstance } from "fastify";
 import type { PoolClient } from "pg";
 import { z } from "zod";
@@ -8,15 +9,15 @@ import { CloudflareClient } from "../lib/cloudflare.js";
 import { pool, withTransaction } from "../lib/database.js";
 import { appendNameFilter, nameFilterFields, validateNameFilter } from "../lib/name-filter.js";
 import { decryptSecret, encryptSecret } from "../lib/security.js";
-import { reconfigureStore } from "../lib/provisioning.js";
+import { reconfigureTunnel } from "../lib/provisioning.js";
 import { defaultWafAllowedIps, isValidIpOrCidr, resolveWafAllowedIps } from "../lib/route-waf.js";
 import { provisionBrowserRdp } from "../lib/rdp.js";
-import { verifyStoreEndpoints } from "../lib/store-verification.js";
+import { verifyTunnelEndpoints } from "../lib/tunnel-verification.js";
 import { synchronizeAccount } from "./accounts.js";
 import { createOpaqueToken, hashToken } from "../lib/security.js";
-import { selectZone, slugifyLabel } from "../lib/stores.js";
-import { automaticUnenrollmentScript, cancelCommandExecution, createCommandExecution, executeStoreScript, getCommandAgentConfig, ensureCommandAgentToken, COMMAND_AGENT_SERVICE_URL } from "../lib/command-agent.js";
-import { argumentBindingsSchema, applyScriptArguments, describeArgumentValueSources, executionVariablesSchema, resolveArgumentValues, resolveAvailableVariablesForStore, scriptArgumentsSchema, type ExecutionVariables, type ScriptArgument } from "../lib/execution-variables.js";
+import { selectZone, slugifyLabel } from "../lib/tunnels.js";
+import { automaticUnenrollmentScript, cancelCommandExecution, createCommandExecution, executeTunnelScript, getCommandAgentConfig, ensureCommandAgentToken, COMMAND_AGENT_SERVICE_URL } from "../lib/command-agent.js";
+import { argumentBindingsSchema, applyScriptArguments, describeArgumentValueSources, executionVariablesSchema, resolveArgumentValues, resolveAvailableVariablesForTunnel, scriptArgumentsSchema, type ExecutionVariables, type ScriptArgument } from "../lib/execution-variables.js";
 
 const serviceUrlSchema = z.string().url().refine((value) => value.startsWith("http://") || value.startsWith("https://"), {
   message: "Service URL must use HTTP or HTTPS"
@@ -42,17 +43,25 @@ const publicationSchema = z.object({
     /^(?:[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,28}[a-zA-Z0-9])?)?$/,
     "Suffix can contain letters, numbers, and inner hyphens"
   ).transform((value) => value.toLowerCase()),
+  // When set, this is used verbatim as the full subdomain label instead of
+  // the tunnel-id-derived `suffix` above - lets an operator publish a
+  // hostname that has nothing to do with the tunnel id.
+  customLabel: z.string().trim().min(1).max(63).regex(
+    /^[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?$/,
+    "Subdomain can contain letters, numbers, and inner hyphens"
+  ).transform((value) => value.toLowerCase()).optional(),
   routes: z.array(routeSchema).min(1).max(20)
 });
 
 const publicationsSchema = z.array(publicationSchema).min(1).max(20).superRefine((publications, context) => {
   let commandAgentRoutes = 0;
-  const suffixes = new Set<string>();
+  const labelKeys = new Set<string>();
   publications.forEach((publication, publicationIndex) => {
-    if (suffixes.has(publication.suffix)) {
-      context.addIssue({ code: "custom", path: [publicationIndex, "suffix"], message: "Each subdomain suffix must be unique" });
+    const labelKey = publication.customLabel ? `custom:${publication.customLabel}` : `suffix:${publication.suffix}`;
+    if (labelKeys.has(labelKey)) {
+      context.addIssue({ code: "custom", path: [publicationIndex, publication.customLabel ? "customLabel" : "suffix"], message: "Each subdomain must be unique" });
     }
-    suffixes.add(publication.suffix);
+    labelKeys.add(labelKey);
     const paths = new Set<string>();
     publication.routes.forEach((route, routeIndex) => {
       if (route.kind === "command_agent") commandAgentRoutes += 1;
@@ -63,13 +72,13 @@ const publicationsSchema = z.array(publicationSchema).min(1).max(20).superRefine
     });
   });
   if (commandAgentRoutes > 1) {
-    context.addIssue({ code: "custom", message: "Only one command agent route can be configured per store" });
+    context.addIssue({ code: "custom", message: "Only one command agent route can be configured per tunnel" });
   }
 });
 
-const createStoreSchema = z.object({
+const createTunnelSchema = z.object({
   tenantCode: z.string().trim().min(1).max(80),
-  storeCode: z.string().trim().min(1).max(80),
+  tunnelCode: z.string().trim().min(1).max(80),
   displayName: z.string().trim().min(2).max(160),
   originUrl: serviceUrlSchema.optional(),
   zoneId: z.string().uuid().optional(),
@@ -93,14 +102,14 @@ const listQuerySchema = z.object({
   search: z.string().trim().max(120).optional(),
   tenantCode: z.string().trim().max(80).optional(),
   status: z.string().trim().max(40).optional(),
-  tunnelStatus: z.string().trim().max(40).optional(),
+  cfTunnelStatus: z.string().trim().max(40).optional(),
   enrollmentStatus: z.string().trim().max(40).optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(5).max(100).default(25)
 }).superRefine(validateNameFilter);
 
-const refreshStoresSchema = z.object({
-  storeIds: z.array(z.string().uuid()).min(1).max(100)
+const refreshTunnelsSchema = z.object({
+  tunnelIds: z.array(z.string().uuid()).min(1).max(100)
 });
 
 const commandExecutionListSchema = z.object({
@@ -151,18 +160,18 @@ const saveInlineExecutionSchema = z.object({
   name: z.string().trim().min(1).max(120).optional()
 });
 
-const deleteStoreSchema = z.object({
+const deleteTunnelSchema = z.object({
   confirmName: z.string().trim().max(160).optional(),
   force: z.boolean().default(false)
 });
 
-type StoreDeleteExecutor = Pick<PoolClient, "query">;
-type StoreDeleteContext = {
+type TunnelDeleteExecutor = Pick<PoolClient, "query">;
+type TunnelDeleteContext = {
   id: string;
   displayName: string;
-  storeCode: string;
-  tunnelId: string | null;
-  tunnelStatus: string;
+  tunnelCode: string;
+  cfTunnelId: string | null;
+  cfTunnelStatus: string;
   rdpRouteId: string | null;
   rdpTargetId: string | null;
   rdpVnetId: string | null;
@@ -185,7 +194,7 @@ type StoreDeleteContext = {
   }>;
 };
 
-type StoreDeleteCheck = {
+type TunnelDeleteCheck = {
   id: "tunnel" | "enrollments" | "commands" | "cloudflare";
   label: string;
   ok: boolean;
@@ -193,11 +202,11 @@ type StoreDeleteCheck = {
   resolution: string;
 };
 
-type StoreDeletePreflight = {
-  storeId: string;
+type TunnelDeletePreflight = {
+  tunnelId: string;
   displayName: string;
   canDelete: boolean;
-  checks: StoreDeleteCheck[];
+  checks: TunnelDeleteCheck[];
   checkedAt: string;
 };
 
@@ -217,59 +226,59 @@ async function unenrollmentUrls(token: string) {
   };
 }
 
-async function loadStoreDeleteContext(executor: StoreDeleteExecutor, storeId: string): Promise<StoreDeleteContext | null> {
-  const storeResult = await executor.query(
-    `SELECT s.id, s.display_name AS "displayName", s.store_code AS "storeCode",
-            s.tunnel_id AS "tunnelId", s.tunnel_status AS "tunnelStatus",
+async function loadTunnelDeleteContext(executor: TunnelDeleteExecutor, tunnelId: string): Promise<TunnelDeleteContext | null> {
+  const tunnelResult = await executor.query(
+    `SELECT s.id, s.display_name AS "displayName", s.tunnel_code AS "tunnelCode",
+            s.cf_tunnel_id AS "cfTunnelId", s.cf_tunnel_status AS "cfTunnelStatus",
             s.rdp_route_id AS "rdpRouteId", s.rdp_target_id AS "rdpTargetId", s.rdp_vnet_id AS "rdpVnetId",
             a.id AS "accountRowId", a.provider_mode AS "providerMode", a.cf_account_id AS "cfAccountId",
             a.api_token_encrypted AS "apiTokenEncrypted", z.cf_zone_id AS "cfZoneId",
             (SELECT count(*)::int FROM enrollments e
-              WHERE e.store_id = s.id
+              WHERE e.tunnel_id = s.id
                 AND e.status IN ('claimed', 'provisioning', 'ready', 'installed')
                 AND e.unenrolled_at IS NULL
                 AND e.deleted_at IS NULL) AS "activeEnrollmentCount",
             (SELECT string_agg(COALESCE(e.platform, 'unknown'), ', ' ORDER BY e.created_at)
                FROM enrollments e
-              WHERE e.store_id = s.id
+              WHERE e.tunnel_id = s.id
                 AND e.status IN ('claimed', 'provisioning', 'ready', 'installed')
                 AND e.unenrolled_at IS NULL
                 AND e.deleted_at IS NULL) AS "activeEnrollmentPlatforms",
-            (SELECT count(*)::int FROM store_command_executions ce
-              WHERE ce.store_id = s.id AND ce.status IN ('scheduled', 'running')) AS "runningCommandCount",
+            (SELECT count(*)::int FROM tunnel_command_executions ce
+              WHERE ce.tunnel_id = s.id AND ce.status IN ('scheduled', 'running')) AS "runningCommandCount",
             ca.status AS "commandAgentStatus", ca.last_seen_at AS "commandAgentLastSeenAt"
-       FROM stores s
+       FROM tunnels s
        JOIN cloudflare_accounts a ON a.id = s.account_id
        JOIN zones z ON z.id = s.zone_id
-       LEFT JOIN store_command_agents ca ON ca.store_id = s.id
+       LEFT JOIN tunnel_command_agents ca ON ca.tunnel_id = s.id
       WHERE s.id = $1`,
-    [storeId]
+    [tunnelId]
   );
-  if (!storeResult.rowCount) return null;
+  if (!tunnelResult.rowCount) return null;
   const publicationResult = await executor.query(
     `SELECT p.hostname, p.dns_record_id AS "dnsRecordId", r.path,
             r.waf_ruleset_id AS "wafRulesetId", r.waf_rule_id AS "wafRuleId"
-       FROM store_publications p
-       JOIN store_routes r ON r.publication_id = p.id
-      WHERE p.store_id = $1
+       FROM tunnel_publications p
+       JOIN tunnel_routes r ON r.publication_id = p.id
+      WHERE p.tunnel_id = $1
       ORDER BY p.created_at, r.sort_order, r.created_at`,
-    [storeId]
+    [tunnelId]
   );
-  return { ...storeResult.rows[0], publications: publicationResult.rows } as StoreDeleteContext;
+  return { ...tunnelResult.rows[0], publications: publicationResult.rows } as TunnelDeleteContext;
 }
 
-function buildStoreDeletePreflight(context: StoreDeleteContext): StoreDeletePreflight {
-  const activeTunnel = Boolean(context.tunnelId && ["healthy", "degraded", "connector_online"].includes(context.tunnelStatus));
-  const tunnelCheck: StoreDeleteCheck = {
+function buildTunnelDeletePreflight(context: TunnelDeleteContext): TunnelDeletePreflight {
+  const activeTunnel = Boolean(context.cfTunnelId && ["healthy", "degraded", "connector_online"].includes(context.cfTunnelStatus));
+  const tunnelCheck: TunnelDeleteCheck = {
     id: "tunnel",
     label: "Tunnel is disconnected",
     ok: !activeTunnel,
-    detail: context.tunnelId ? `Tunnel ${context.tunnelId} is ${context.tunnelStatus}.` : "No Cloudflare Tunnel has been provisioned.",
+    detail: context.cfTunnelId ? `Tunnel ${context.cfTunnelId} is ${context.cfTunnelStatus}.` : "No Cloudflare Tunnel has been provisioned.",
     resolution: activeTunnel
-      ? "Run the generated unenrollment command on the store, stop cloudflared if needed, then refresh this check. Force delete will terminate Cloudflare tunnel connections."
+      ? "Run the generated unenrollment command on the tunnel, stop cloudflared if needed, then refresh this check. Force delete will terminate Cloudflare tunnel connections."
       : "No action required."
   };
-  const enrollmentCheck: StoreDeleteCheck = {
+  const enrollmentCheck: TunnelDeleteCheck = {
     id: "enrollments",
     label: "All installed enrollments are unenrolled",
     ok: context.activeEnrollmentCount === 0,
@@ -280,7 +289,7 @@ function buildStoreDeletePreflight(context: StoreDeleteContext): StoreDeletePref
       ? "Open Enrollment history, run the matching Windows or Unix unenrollment command, and wait for the status to become unenrolled."
       : "No action required."
   };
-  const commandsCheck: StoreDeleteCheck = {
+  const commandsCheck: TunnelDeleteCheck = {
     id: "commands",
     label: "No command execution is running",
     ok: context.runningCommandCount === 0,
@@ -292,18 +301,18 @@ function buildStoreDeletePreflight(context: StoreDeleteContext): StoreDeletePref
       : "No action required."
   };
   const cloudflareReady = context.providerMode === "mock" || Boolean(context.cfAccountId && context.cfZoneId && context.apiTokenEncrypted);
-  const cloudflareCheck: StoreDeleteCheck = {
+  const cloudflareCheck: TunnelDeleteCheck = {
     id: "cloudflare",
     label: "Cloudflare cleanup credentials are available",
     ok: cloudflareReady,
-    detail: cloudflareReady ? `Store-owned DNS and tunnel resources can be cleaned from the ${context.providerMode} account.` : "The live account or zone is missing its API credentials.",
+    detail: cloudflareReady ? `Tunnel-owned DNS and tunnel resources can be cleaned from the ${context.providerMode} account.` : "The live account or zone is missing its API credentials.",
     resolution: cloudflareReady
       ? "No action required."
       : "Open Account pool and restore the account token and zone ID before deleting, otherwise Cloudflare resources could be orphaned."
   };
   const checks = [tunnelCheck, enrollmentCheck, commandsCheck, cloudflareCheck];
   return {
-    storeId: context.id,
+    tunnelId: context.id,
     displayName: context.displayName,
     canDelete: checks.every((check) => check.ok),
     checks,
@@ -311,7 +320,7 @@ function buildStoreDeletePreflight(context: StoreDeleteContext): StoreDeletePref
   };
 }
 
-async function cleanupStoreResources(context: StoreDeleteContext): Promise<void> {
+async function cleanupTunnelResources(context: TunnelDeleteContext): Promise<void> {
   const client = new CloudflareClient(
     context.cfAccountId ?? context.accountRowId,
     context.apiTokenEncrypted ? decryptSecret(context.apiTokenEncrypted) : "mock",
@@ -338,9 +347,9 @@ async function cleanupStoreResources(context: StoreDeleteContext): Promise<void>
   if (context.rdpRouteId) await client.deleteTunnelRoute(context.rdpRouteId);
   if (context.rdpTargetId) await client.deleteInfrastructureTarget(context.rdpTargetId);
   if (context.rdpVnetId) await client.deleteVirtualNetwork(context.rdpVnetId);
-  if (context.tunnelId) {
-    await client.deleteTunnelConnections(context.tunnelId);
-    await client.deleteTunnel(context.tunnelId);
+  if (context.cfTunnelId) {
+    await client.deleteTunnelConnections(context.cfTunnelId);
+    await client.deleteTunnel(context.cfTunnelId);
   }
 }
 
@@ -348,6 +357,7 @@ const publicationsJson = `COALESCE((
   SELECT jsonb_agg(jsonb_build_object(
     'id', p.id,
     'suffix', p.suffix,
+    'customLabel', p.custom_label,
     'hostname', p.hostname,
     'status', p.status,
     'lastError', p.last_error,
@@ -362,38 +372,38 @@ const publicationsJson = `COALESCE((
         'wafRulesetId', r.waf_ruleset_id,
         'wafRuleId', r.waf_rule_id
       ) ORDER BY r.sort_order, r.created_at)
-      FROM store_routes r WHERE r.publication_id = p.id
+      FROM tunnel_routes r WHERE r.publication_id = p.id
     ), '[]'::jsonb)
   ) ORDER BY p.created_at)
-  FROM store_publications p WHERE p.store_id = s.id
+  FROM tunnel_publications p WHERE p.tunnel_id = s.id
 ), '[]'::jsonb)`;
 
 // A revoked/expired link that was never claimed is a dead end - if an older
-// enrollment is still active (or otherwise live), prefer it so a store
+// enrollment is still active (or otherwise live), prefer it so a tunnel
 // doesn't display "revoked" while it's actually still enrolled.
 export const latestEnrollmentJoin = `LEFT JOIN LATERAL (
   SELECT e.status, e.expires_at, e.unenrolled_at,
          EXISTS (
            SELECT 1
              FROM enrollments previous
-            WHERE previous.store_id = e.store_id
+            WHERE previous.tunnel_id = e.tunnel_id
               AND previous.id <> e.id
               AND previous.deleted_at IS NULL
               AND previous.unenrolled_at IS NULL
               AND previous.status IN ('claimed', 'provisioning', 'ready', 'installed')
          ) AS has_active_previous
     FROM enrollments e
-   WHERE e.store_id = s.id
+   WHERE e.tunnel_id = s.id
      AND e.deleted_at IS NULL
    ORDER BY (e.status = 'revoked' OR e.status = 'expired' OR (e.status = 'url_issued' AND e.expires_at <= now())) ASC,
             e.created_at DESC, e.id DESC
    LIMIT 1
 ) latest_enrollment ON TRUE`;
 
-// Kept in sync with the drawer's "isCurrent" concept (StoreEnrollment.isCurrent,
-// apps/web/src/components/StoreDrawer.tsx): a ready/installed enrollment that
+// Kept in sync with the drawer's "isCurrent" concept (TunnelEnrollment.isCurrent,
+// apps/web/src/components/TunnelDrawer.tsx): a ready/installed enrollment that
 // hasn't been unenrolled is displayed as "active" everywhere, not the raw
-// workflow status, so the store list and the enrollment history never disagree.
+// workflow status, so the tunnel list and the enrollment history never disagree.
 export const onboardingStatusExpression = `CASE
   WHEN latest_enrollment.status IS NULL THEN s.onboarding_status
   WHEN latest_enrollment.status = 'url_issued' AND latest_enrollment.expires_at <= now() THEN 'expired'
@@ -412,7 +422,7 @@ const enrollmentsJson = `COALESCE((
       AND e.id = (
         SELECT current_enrollment.id
           FROM enrollments current_enrollment
-         WHERE current_enrollment.store_id = s.id
+         WHERE current_enrollment.tunnel_id = s.id
            AND current_enrollment.deleted_at IS NULL
            AND current_enrollment.unenrolled_at IS NULL
            AND current_enrollment.status IN ('ready', 'installed')
@@ -454,17 +464,17 @@ const enrollmentsJson = `COALESCE((
       FROM enrollment_scripts es WHERE es.enrollment_id = e.id
     ), '[]'::jsonb)
   ) ORDER BY e.created_at DESC)
-  FROM enrollments e WHERE e.store_id = s.id
+  FROM enrollments e WHERE e.tunnel_id = s.id
 ), '[]'::jsonb)`;
 
-// Shared with the drawer's own polling condition (StoreDrawer.tsx,
-// storeNeedsFastPolling) so the store list and an open drawer refresh on the
+// Shared with the drawer's own polling condition (TunnelDrawer.tsx,
+// tunnelNeedsFastPolling) so the tunnel list and an open drawer refresh on the
 // exact same signal instead of two conditions silently drifting apart.
 const hasPendingActivityExpression = `(
-  EXISTS (SELECT 1 FROM store_command_executions ce WHERE ce.store_id = s.id AND ce.status IN ('scheduled', 'running'))
+  EXISTS (SELECT 1 FROM tunnel_command_executions ce WHERE ce.tunnel_id = s.id AND ce.status IN ('scheduled', 'running'))
   OR EXISTS (
     SELECT 1 FROM enrollments e
-     WHERE e.store_id = s.id AND e.deleted_at IS NULL
+     WHERE e.tunnel_id = s.id AND e.deleted_at IS NULL
        AND e.unenroll_token_hash IS NOT NULL AND e.unenrolled_at IS NULL AND e.unenroll_last_error IS NULL
   )
 )`;
@@ -479,10 +489,10 @@ const commandAgentJson = `(
     'lastSeenAt', ca.last_seen_at,
     'lastError', ca.last_error
   )
-    FROM store_publications p
-    JOIN store_routes r ON r.publication_id = p.id AND r.route_kind = 'command_agent'
-    JOIN store_command_agents ca ON ca.store_id = s.id
-   WHERE p.store_id = s.id
+    FROM tunnel_publications p
+    JOIN tunnel_routes r ON r.publication_id = p.id AND r.route_kind = 'command_agent'
+    JOIN tunnel_command_agents ca ON ca.tunnel_id = s.id
+   WHERE p.tunnel_id = s.id
    ORDER BY p.created_at, r.sort_order, r.created_at
    LIMIT 1
 )`;
@@ -521,46 +531,46 @@ const commandExecutionsJson = `COALESCE((
   ) ORDER BY ce.created_at DESC)
   FROM LATERAL (
     SELECT ce.*, u.username, sv.version, ms.id AS script_id, ms.name, ms.platform, ms.language
-      FROM store_command_executions ce
+      FROM tunnel_command_executions ce
       LEFT JOIN users u ON u.id = ce.requested_by
       LEFT JOIN managed_script_versions sv ON sv.id = ce.script_version_id
       LEFT JOIN managed_scripts ms ON ms.id = sv.script_id
-     WHERE ce.store_id = s.id
+     WHERE ce.tunnel_id = s.id
      ORDER BY ce.created_at DESC
      LIMIT 50
   ) ce
 ), '[]'::jsonb)`;
 
 function preparePublications(
-  storeCode: string,
+  tunnelCode: string,
   zoneName: string,
   publications: z.infer<typeof publicationsSchema>
 ) {
-  const baseLabel = slugifyLabel(storeCode);
+  const baseLabel = slugifyLabel(tunnelCode);
   return publications.map((publication) => ({
     ...publication,
     routes: publication.routes.map((route) => ({
       ...route,
       serviceUrl: route.kind === "command_agent" ? COMMAND_AGENT_SERVICE_URL : route.serviceUrl!
     })),
-    hostname: `${publication.suffix ? `${baseLabel}-${publication.suffix}` : baseLabel}.${zoneName}`
+    hostname: `${publication.customLabel || (publication.suffix ? `${baseLabel}-${publication.suffix}` : baseLabel)}.${zoneName}`
   }));
 }
 
-export async function storeRoutes(app: FastifyInstance): Promise<void> {
-  app.get("/api/stores/tenant-codes", { preHandler: requireAuth }, async () => {
-    const result = await pool.query("SELECT DISTINCT tenant_code AS \"tenantCode\" FROM stores ORDER BY tenant_code");
+export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
+  app.get("/api/tunnels/tenant-codes", { preHandler: requireAuth }, async () => {
+    const result = await pool.query("SELECT DISTINCT tenant_code AS \"tenantCode\" FROM tunnels ORDER BY tenant_code");
     return { tenantCodes: result.rows.map((row) => row.tenantCode as string) };
   });
 
-  app.get("/api/stores", { preHandler: requireAuth }, async (request) => {
+  app.get("/api/tunnels", { preHandler: requireAuth }, async (request) => {
     const query = listQuerySchema.parse(request.query);
     const values: unknown[] = [];
     const conditions: string[] = [];
-    appendNameFilter(conditions, values, ["s.display_name", "s.store_code"], query);
+    appendNameFilter(conditions, values, ["s.display_name", "s.tunnel_code"], query);
     if (query.search) {
       values.push(`%${query.search}%`);
-      conditions.push(`(s.store_code ILIKE $${values.length} OR s.tenant_code ILIKE $${values.length} OR s.display_name ILIKE $${values.length} OR s.hostname ILIKE $${values.length} OR EXISTS (SELECT 1 FROM store_publications p WHERE p.store_id = s.id AND p.hostname ILIKE $${values.length}))`);
+      conditions.push(`(s.tunnel_code ILIKE $${values.length} OR s.tenant_code ILIKE $${values.length} OR s.display_name ILIKE $${values.length} OR s.hostname ILIKE $${values.length} OR EXISTS (SELECT 1 FROM tunnel_publications p WHERE p.tunnel_id = s.id AND p.hostname ILIKE $${values.length}))`);
     }
     if (query.tenantCode) {
       values.push(`%${query.tenantCode}%`);
@@ -570,25 +580,25 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       values.push(query.status);
       conditions.push(`${onboardingStatusExpression} = $${values.length}`);
     }
-    if (query.tunnelStatus) {
-      values.push(query.tunnelStatus);
-      conditions.push(`s.tunnel_status = $${values.length}`);
+    if (query.cfTunnelStatus) {
+      values.push(query.cfTunnelStatus);
+      conditions.push(`s.cf_tunnel_status = $${values.length}`);
     }
     if (query.enrollmentStatus) {
       values.push(query.enrollmentStatus);
       conditions.push(`${onboardingStatusExpression} = $${values.length}`);
     }
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-    const countResult = await pool.query(`SELECT count(*)::int AS total FROM stores s ${latestEnrollmentJoin} ${where}`, values);
+    const countResult = await pool.query(`SELECT count(*)::int AS total FROM tunnels s ${latestEnrollmentJoin} ${where}`, values);
     const total = countResult.rows[0]?.total as number ?? 0;
     const offset = (query.page - 1) * query.pageSize;
     const pageValues = [...values, query.pageSize, offset];
     const limitParameter = values.length + 1;
     const offsetParameter = values.length + 2;
     const result = await pool.query(`
-      SELECT s.id, s.tenant_code AS "tenantCode", s.store_code AS "storeCode", s.display_name AS "displayName", s.execution_variables AS "executionVariables",
-             s.origin_url AS "originUrl", s.hostname, s.tunnel_id AS "tunnelId", s.tunnel_name AS "tunnelName",
-             s.tunnel_status AS "tunnelStatus", ${onboardingStatusExpression} AS "onboardingStatus",
+      SELECT s.id, s.tenant_code AS "tenantCode", s.tunnel_code AS "tunnelCode", s.display_name AS "displayName", s.execution_variables AS "executionVariables",
+             s.origin_url AS "originUrl", s.hostname, s.cf_tunnel_id AS "cfTunnelId", s.cf_tunnel_name AS "cfTunnelName",
+             s.cf_tunnel_status AS "cfTunnelStatus", ${onboardingStatusExpression} AS "onboardingStatus",
              latest_enrollment.status AS "latestEnrollmentStatus",
              s.rdp_status AS "rdpStatus", s.rdp_target_ip::text AS "rdpTargetIp",
              s.rdp_url AS "rdpUrl", s.rdp_last_error AS "rdpLastError",
@@ -597,7 +607,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
              ${publicationsJson} AS publications,
              ${commandAgentJson} AS "commandAgent",
              ${hasPendingActivityExpression} AS "hasPendingActivity"
-        FROM stores s
+        FROM tunnels s
         JOIN cloudflare_accounts a ON a.id = s.account_id
         JOIN zones z ON z.id = s.zone_id
         ${latestEnrollmentJoin}
@@ -606,7 +616,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
        LIMIT $${limitParameter} OFFSET $${offsetParameter}
     `, pageValues);
     return {
-      stores: result.rows,
+      tunnels: result.rows,
       pagination: {
         page: query.page,
         pageSize: query.pageSize,
@@ -616,12 +626,12 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
-  app.get("/api/stores/:id", { preHandler: requireAuth }, async (request, reply) => {
+  app.get("/api/tunnels/:id", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const result = await pool.query(`
-      SELECT s.id, s.tenant_code AS "tenantCode", s.store_code AS "storeCode", s.display_name AS "displayName", s.execution_variables AS "executionVariables",
-             s.origin_url AS "originUrl", s.hostname, s.tunnel_id AS "tunnelId", s.tunnel_name AS "tunnelName",
-             s.tunnel_status AS "tunnelStatus", ${onboardingStatusExpression} AS "onboardingStatus",
+      SELECT s.id, s.tenant_code AS "tenantCode", s.tunnel_code AS "tunnelCode", s.display_name AS "displayName", s.execution_variables AS "executionVariables",
+             s.origin_url AS "originUrl", s.hostname, s.cf_tunnel_id AS "cfTunnelId", s.cf_tunnel_name AS "cfTunnelName",
+             s.cf_tunnel_status AS "cfTunnelStatus", ${onboardingStatusExpression} AS "onboardingStatus",
              latest_enrollment.status AS "latestEnrollmentStatus",
              s.rdp_status AS "rdpStatus", s.rdp_target_ip::text AS "rdpTargetIp",
              s.rdp_url AS "rdpUrl", s.rdp_last_error AS "rdpLastError",
@@ -632,22 +642,22 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
              ${commandAgentJson} AS "commandAgent",
              ${commandExecutionsJson} AS "commandExecutions",
              ${hasPendingActivityExpression} AS "hasPendingActivity"
-        FROM stores s
+        FROM tunnels s
         JOIN cloudflare_accounts a ON a.id = s.account_id
         JOIN zones z ON z.id = s.zone_id
         ${latestEnrollmentJoin}
        WHERE s.id = $1
     `, [id]);
-    if (!result.rowCount) return reply.code(404).send({ error: "Store not found" });
-    return { store: result.rows[0] };
+    if (!result.rowCount) return reply.code(404).send({ error: "Tunnel not found" });
+    return { tunnel: result.rows[0] };
   });
 
-  app.get("/api/stores/:id/enrollments", { preHandler: requireAuth }, async (request, reply) => {
+  app.get("/api/tunnels/:id/enrollments", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const query = enrollmentListSchema.parse(request.query);
     const offset = (query.page - 1) * query.pageSize;
-    const [storeResult, enrollmentResult, countResult] = await Promise.all([
-      pool.query("SELECT 1 FROM stores WHERE id = $1", [id]),
+    const [tunnelResult, enrollmentResult, countResult] = await Promise.all([
+      pool.query("SELECT 1 FROM tunnels WHERE id = $1", [id]),
       pool.query(
         `SELECT e.id,
                 NULLIF(e.host_info->>'machineName', '') AS "computerName",
@@ -657,7 +667,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
                   AND e.id = (
                     SELECT current_enrollment.id
                       FROM enrollments current_enrollment
-                     WHERE current_enrollment.store_id = $1
+                     WHERE current_enrollment.tunnel_id = $1
                        AND current_enrollment.deleted_at IS NULL
                        AND current_enrollment.unenrolled_at IS NULL
                        AND current_enrollment.status IN ('ready', 'installed')
@@ -691,14 +701,14 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
                     FROM enrollment_scripts es WHERE es.enrollment_id = e.id
                 ), '[]'::jsonb) AS scripts
            FROM enrollments e
-          WHERE e.store_id = $1
+          WHERE e.tunnel_id = $1
           ORDER BY e.created_at DESC, e.id DESC
           LIMIT $2 OFFSET $3`,
         [id, query.pageSize, offset]
       ),
-      pool.query("SELECT count(*)::int AS total FROM enrollments WHERE store_id = $1", [id])
+      pool.query("SELECT count(*)::int AS total FROM enrollments WHERE tunnel_id = $1", [id])
     ]);
-    if (!storeResult.rowCount) return reply.code(404).send({ error: "Store not found" });
+    if (!tunnelResult.rowCount) return reply.code(404).send({ error: "Tunnel not found" });
     const total = countResult.rows[0]?.total as number ?? 0;
     return {
       enrollments: enrollmentResult.rows,
@@ -711,48 +721,51 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
-  app.get("/api/stores/:storeId/routes/:routeId/waf", { preHandler: requireAuth }, async (request, reply) => {
-    const { storeId, routeId } = z.object({ storeId: z.string().uuid(), routeId: z.string().uuid() }).parse(request.params);
+  app.get("/api/tunnels/:tunnelId/routes/:routeId/waf", { preHandler: requireAuth }, async (request, reply) => {
+    const { tunnelId, routeId } = z.object({ tunnelId: z.string().uuid(), routeId: z.string().uuid() }).parse(request.params);
     const result = await pool.query(
       `SELECT r.id, r.waf_enabled, r.waf_allowed_ips, r.waf_ruleset_id, r.waf_rule_id,
               a.provider_mode AS "providerMode"
-         FROM store_routes r
-         JOIN store_publications p ON p.id = r.publication_id
-         JOIN stores s ON s.id = p.store_id
+         FROM tunnel_routes r
+         JOIN tunnel_publications p ON p.id = r.publication_id
+         JOIN tunnels s ON s.id = p.tunnel_id
          JOIN cloudflare_accounts a ON a.id = s.account_id
-        WHERE p.store_id = $1 AND r.id = $2`,
-      [storeId, routeId]
+        WHERE p.tunnel_id = $1 AND r.id = $2`,
+      [tunnelId, routeId]
     );
     if (!result.rowCount) return reply.code(404).send({ error: "Ingress route not found" });
     const row = result.rows[0];
     const storedIps = (row.waf_allowed_ips ?? []) as string[];
-    // Resolved best-effort so the "Cloudflare Man origin" quick-add option can
+    // Resolved best-effort so the "CFMan origin" quick-add option can
     // still be offered without breaking the read for routes that already have
     // their own allowed IPs configured.
     const cloudflareManIps = await defaultWafAllowedIps(row.providerMode).catch(() => [] as string[]);
+    // The operator's own browser IP, offered as a one-click allow-list entry -
+    // distinct from cloudflareManIps, which is the server's own outbound IP.
+    const currentIp = isIP(request.ip) ? `${request.ip}/${request.ip.includes(":") ? 128 : 32}` : null;
     try {
       const allowedIps = await resolveWafAllowedIps(storedIps.length ? storedIps : cloudflareManIps, row.providerMode);
-      return { waf: { enabled: row.waf_enabled, allowedIps, rulesetId: row.waf_ruleset_id, ruleId: row.waf_rule_id, defaulted: !storedIps.length, cloudflareManIps } };
+      return { waf: { enabled: row.waf_enabled, allowedIps, rulesetId: row.waf_ruleset_id, ruleId: row.waf_rule_id, defaulted: !storedIps.length, cloudflareManIps, currentIp } };
     } catch (error) {
       return reply.code(502).send({ error: error instanceof Error ? error.message : "Unable to resolve WAF source IP" });
     }
   });
 
-  app.patch("/api/stores/:storeId/routes/:routeId/waf", { preHandler: requireAuth }, async (request, reply) => {
-    const { storeId, routeId } = z.object({ storeId: z.string().uuid(), routeId: z.string().uuid() }).parse(request.params);
+  app.patch("/api/tunnels/:tunnelId/routes/:routeId/waf", { preHandler: requireAuth }, async (request, reply) => {
+    const { tunnelId, routeId } = z.object({ tunnelId: z.string().uuid(), routeId: z.string().uuid() }).parse(request.params);
     const body = routeWafSchema.parse(request.body ?? {});
     const result = await pool.query(
       `SELECT r.id, r.path, r.waf_allowed_ips, r.waf_ruleset_id,
               p.hostname, z.cf_zone_id AS "cfZoneId",
               a.id AS "accountRowId", a.cf_account_id AS "cfAccountId", a.api_token_encrypted AS "apiTokenEncrypted",
               a.provider_mode AS "providerMode"
-         FROM store_routes r
-         JOIN store_publications p ON p.id = r.publication_id
-         JOIN stores s ON s.id = p.store_id
+         FROM tunnel_routes r
+         JOIN tunnel_publications p ON p.id = r.publication_id
+         JOIN tunnels s ON s.id = p.tunnel_id
          JOIN cloudflare_accounts a ON a.id = s.account_id
          JOIN zones z ON z.id = s.zone_id
-        WHERE p.store_id = $1 AND r.id = $2`,
-      [storeId, routeId]
+        WHERE p.tunnel_id = $1 AND r.id = $2`,
+      [tunnelId, routeId]
     );
     if (!result.rowCount) return reply.code(404).send({ error: "Ingress route not found" });
     const route = result.rows[0] as {
@@ -789,7 +802,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
         rulesetId: route.waf_ruleset_id
       });
       await pool.query(
-        `UPDATE store_routes
+        `UPDATE tunnel_routes
             SET waf_enabled = $1, waf_allowed_ips = $2, waf_ruleset_id = $3, waf_rule_id = $4, updated_at = now()
           WHERE id = $5`,
         [body.enabled, allowedIps, applied.rulesetId, applied.ruleId, routeId]
@@ -797,9 +810,9 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       await writeAudit({
         actorUserId: request.authUser!.id,
         action: body.enabled ? "route.waf_enabled" : "route.waf_disabled",
-        entityType: "store_route",
+        entityType: "tunnel_route",
         entityId: routeId,
-        details: { storeId, hostname: route.hostname, path: route.path, allowedIps, rulesetId: applied.rulesetId, ruleId: applied.ruleId }
+        details: { tunnelId, hostname: route.hostname, path: route.path, allowedIps, rulesetId: applied.rulesetId, ruleId: applied.ruleId }
       });
       return { success: true, waf: { enabled: body.enabled, allowedIps, rulesetId: applied.rulesetId, ruleId: applied.ruleId } };
     } catch (error) {
@@ -807,9 +820,9 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.delete("/api/stores/:storeId/enrollments/:enrollmentId", { preHandler: requireAuth }, async (request, reply) => {
-    const { storeId, enrollmentId } = z.object({
-      storeId: z.string().uuid(),
+  app.delete("/api/tunnels/:tunnelId/enrollments/:enrollmentId", { preHandler: requireAuth }, async (request, reply) => {
+    const { tunnelId, enrollmentId } = z.object({
+      tunnelId: z.string().uuid(),
       enrollmentId: z.string().uuid()
     }).parse(request.params);
     await pool.query(
@@ -828,7 +841,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
                 AND e.id = (
                   SELECT current_enrollment.id
                     FROM enrollments current_enrollment
-                   WHERE current_enrollment.store_id = e.store_id
+                   WHERE current_enrollment.tunnel_id = e.tunnel_id
                      AND current_enrollment.deleted_at IS NULL
                      AND current_enrollment.unenrolled_at IS NULL
                      AND current_enrollment.status IN ('ready', 'installed')
@@ -836,9 +849,9 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
                    LIMIT 1
                 ) AS is_current
            FROM enrollments e
-          WHERE e.store_id = $1 AND e.id = $2
+          WHERE e.tunnel_id = $1 AND e.id = $2
           FOR UPDATE`,
-        [storeId, enrollmentId]
+        [tunnelId, enrollmentId]
       );
       const enrollment = result.rows[0];
       if (!enrollment) return { kind: "missing" as const };
@@ -851,12 +864,12 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       const reverted = await client.query(
         `UPDATE enrollments
             SET unenroll_token_hash = null, unenroll_token_encrypted = null,
-                unenroll_token_expires_at = null, unenroll_tunnel_id = null,
+                unenroll_token_expires_at = null, unenroll_cf_tunnel_id = null,
                 unenroll_requested_at = null, unenroll_last_error = null,
                 superseded_by_enrollment_id = null, updated_at = now()
-          WHERE store_id = $1 AND superseded_by_enrollment_id = $2 AND unenrolled_at IS NULL
+          WHERE tunnel_id = $1 AND superseded_by_enrollment_id = $2 AND unenrolled_at IS NULL
           RETURNING id`,
-        [storeId, enrollmentId]
+        [tunnelId, enrollmentId]
       );
       if (reverted.rowCount) {
         await client.query(
@@ -864,24 +877,24 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
           [reverted.rows.map((row) => row.id)]
         );
       }
-      await client.query("DELETE FROM enrollments WHERE store_id = $1 AND id = $2", [storeId, enrollmentId]);
+      await client.query("DELETE FROM enrollments WHERE tunnel_id = $1 AND id = $2", [tunnelId, enrollmentId]);
       const activeEnrollment = await client.query(
         `SELECT 1
            FROM enrollments
-          WHERE store_id = $1
+          WHERE tunnel_id = $1
             AND deleted_at IS NULL
             AND unenrolled_at IS NULL
             AND status IN ('ready', 'installed')
           ORDER BY COALESCE(installed_at, claimed_at, created_at) DESC
           LIMIT 1`,
-        [storeId]
+        [tunnelId]
       );
       await client.query(
-        `UPDATE stores
+        `UPDATE tunnels
             SET onboarding_status = CASE WHEN $2 THEN 'verified' ELSE 'revoked' END,
                 last_error = null, updated_at = now()
           WHERE id = $1 AND onboarding_status = 'waiting_for_new_enrollment'`,
-        [storeId, Boolean(activeEnrollment.rowCount)]
+        [tunnelId, Boolean(activeEnrollment.rowCount)]
       );
       await writeAudit({
         actorUserId: request.authUser!.id,
@@ -889,7 +902,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
         entityType: "enrollment",
         entityId: enrollmentId,
         details: {
-          storeId,
+          tunnelId,
           hardDelete: true,
           logCount: enrollment.log_count,
           revertedSupersededEnrollmentIds: reverted.rows.map((row) => row.id)
@@ -902,9 +915,9 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     return { success: true, deletedAt: deleted.deletedAt, hardDeleted: true, logCount: deleted.logCount, alreadyDeleted: false };
   });
 
-  app.post("/api/stores/:storeId/enrollments/:enrollmentId/unenroll", { preHandler: requireAuth }, async (request, reply) => {
-    const { storeId, enrollmentId } = z.object({
-      storeId: z.string().uuid(),
+  app.post("/api/tunnels/:tunnelId/enrollments/:enrollmentId/unenroll", { preHandler: requireAuth }, async (request, reply) => {
+    const { tunnelId, enrollmentId } = z.object({
+      tunnelId: z.string().uuid(),
       enrollmentId: z.string().uuid()
     }).parse(request.params);
     const body = unenrollmentRequestSchema.parse(request.body ?? {});
@@ -919,7 +932,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
                 AND e.id = (
                   SELECT current_enrollment.id
                     FROM enrollments current_enrollment
-                   WHERE current_enrollment.store_id = e.store_id
+                   WHERE current_enrollment.tunnel_id = e.tunnel_id
                      AND current_enrollment.deleted_at IS NULL
                      AND current_enrollment.unenrolled_at IS NULL
                      AND current_enrollment.status IN ('ready', 'installed')
@@ -927,9 +940,9 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
                    LIMIT 1
                 ) AS is_current
            FROM enrollments e
-          WHERE e.store_id = $1 AND e.id = $2
+          WHERE e.tunnel_id = $1 AND e.id = $2
           FOR UPDATE`,
-        [storeId, enrollmentId]
+        [tunnelId, enrollmentId]
       );
       const enrollment = result.rows[0];
       if (!enrollment) return { kind: "missing" as const };
@@ -937,11 +950,11 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       await client.query(
         `UPDATE enrollments
             SET unenroll_token_hash = $1, unenroll_token_encrypted = $2, unenroll_token_expires_at = $3,
-                unenroll_tunnel_id = (SELECT tunnel_id FROM stores WHERE id = $5),
+                unenroll_cf_tunnel_id = (SELECT cf_tunnel_id FROM tunnels WHERE id = $5),
                 unenroll_requested_at = now(), unenrolled_at = null,
                 unenroll_reason = null, unenroll_last_error = null, updated_at = now()
           WHERE id = $4`,
-        [hashToken(rawToken), encryptSecret(rawToken), expiresAt, enrollmentId, storeId]
+        [hashToken(rawToken), encryptSecret(rawToken), expiresAt, enrollmentId, tunnelId]
       );
       await client.query(
         `INSERT INTO enrollment_scripts(enrollment_id, script_kind, platform, status)
@@ -955,7 +968,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
         action: "enrollment.unenroll_issued",
         entityType: "enrollment",
         entityId: enrollmentId,
-        details: { storeId, expiresAt }
+        details: { tunnelId, expiresAt }
       }, client);
       return { kind: "issued" as const, createdAt: enrollment.created_at as string, platform: enrollment.platform as string | null };
     });
@@ -975,7 +988,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
         : issued.platform && ["linux", "darwin", "unix"].includes(issued.platform)
           ? "unix"
           : null;
-      const agent = await getCommandAgentConfig(storeId);
+      const agent = await getCommandAgentConfig(tunnelId);
       if (!platform) {
         automatic = { requested: true, status: "unavailable", executionId: null, platform: null, error: "The connected enrollment platform is unknown" };
       } else if (!agent || agent.status !== "ready") {
@@ -983,7 +996,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       } else {
         const script = automaticUnenrollmentScript(platform, platform === "windows" ? urls.powershell : urls.shell);
         const executionHandle = await createCommandExecution({
-          storeId,
+          tunnelId,
           enrollmentId,
           scriptVersionId: null,
           requestedBy: request.authUser!.id,
@@ -996,7 +1009,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
           scriptVersion: null
         });
         try {
-          const execution = await executeStoreScript(storeId, script, 30_000, executionHandle);
+          const execution = await executeTunnelScript(tunnelId, script, 30_000, executionHandle);
           automatic = execution?.scheduled || execution?.result?.success
             ? { requested: true, status: "scheduled", executionId: executionHandle.executionId, platform, error: null }
             : { requested: true, status: "failed", executionId: executionHandle.executionId, platform, error: execution?.result?.stderr || "The command agent did not schedule cleanup" };
@@ -1009,7 +1022,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
         action: "enrollment.unenroll_automatic_requested",
         entityType: "enrollment",
         entityId: enrollmentId,
-        details: { storeId, executionId: automatic.executionId, platform: automatic.platform, status: automatic.status, error: automatic.error }
+        details: { tunnelId, executionId: automatic.executionId, platform: automatic.platform, status: automatic.status, error: automatic.error }
       });
       if (automatic.status !== "scheduled") {
         await pool.query(
@@ -1019,7 +1032,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       }
     }
     return {
-      storeId,
+      tunnelId,
       enrollmentId,
       createdAt: issued.createdAt,
       expiresAt,
@@ -1028,30 +1041,30 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
-  app.get("/api/stores/:id/delete-preflight", { preHandler: requireAuth }, async (request, reply) => {
+  app.get("/api/tunnels/:id/delete-preflight", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
-    const context = await loadStoreDeleteContext(pool, id);
-    if (!context) return reply.code(404).send({ error: "Store not found" });
-    return buildStoreDeletePreflight(context);
+    const context = await loadTunnelDeleteContext(pool, id);
+    if (!context) return reply.code(404).send({ error: "Tunnel not found" });
+    return buildTunnelDeletePreflight(context);
   });
 
-  app.delete("/api/stores/:id", { preHandler: requireAuth }, async (request, reply) => {
+  app.delete("/api/tunnels/:id", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
-    const body = deleteStoreSchema.parse(request.body ?? {});
+    const body = deleteTunnelSchema.parse(request.body ?? {});
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
-      const lockedStore = await client.query("SELECT id FROM stores WHERE id = $1 FOR UPDATE", [id]);
-      if (!lockedStore.rowCount) {
+      const lockedTunnel = await client.query("SELECT id FROM tunnels WHERE id = $1 FOR UPDATE", [id]);
+      if (!lockedTunnel.rowCount) {
         await client.query("ROLLBACK");
-        return reply.code(404).send({ error: "Store not found" });
+        return reply.code(404).send({ error: "Tunnel not found" });
       }
-      const context = await loadStoreDeleteContext(client, id);
+      const context = await loadTunnelDeleteContext(client, id);
       if (!context) {
         await client.query("ROLLBACK");
-        return reply.code(404).send({ error: "Store not found" });
+        return reply.code(404).send({ error: "Tunnel not found" });
       }
-      const preflight = buildStoreDeletePreflight(context);
+      const preflight = buildTunnelDeletePreflight(context);
       const cloudflareCheck = preflight.checks.find((check) => check.id === "cloudflare");
       if (!cloudflareCheck?.ok) {
         await client.query("ROLLBACK");
@@ -1059,37 +1072,37 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       }
       if (!preflight.canDelete && (!body.force || body.confirmName !== context.displayName)) {
         await client.query("ROLLBACK");
-        return reply.code(409).send({ error: "Store safety checks require an explicit name confirmation", preflight, requiresNameConfirmation: true });
+        return reply.code(409).send({ error: "Tunnel safety checks require an explicit name confirmation", preflight, requiresNameConfirmation: true });
       }
-      await cleanupStoreResources(context);
+      await cleanupTunnelResources(context);
       await writeAudit({
         actorUserId: request.authUser!.id,
-        action: "store.deleted",
-        entityType: "store",
+        action: "tunnel.deleted",
+        entityType: "tunnel",
         entityId: id,
         details: {
           displayName: context.displayName,
-          storeCode: context.storeCode,
+          tunnelCode: context.tunnelCode,
           forced: !preflight.canDelete,
-          tunnelId: context.tunnelId,
+          cfTunnelId: context.cfTunnelId,
           publicationCount: context.publications.length
         }
       }, client);
-      await client.query("DELETE FROM stores WHERE id = $1", [id]);
+      await client.query("DELETE FROM tunnels WHERE id = $1", [id]);
       await client.query("COMMIT");
       return reply.code(204).send();
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
-      const message = error instanceof Error ? error.message : "Store deletion failed";
-      return reply.code(502).send({ error: `Store resources could not be fully deleted: ${message}` });
+      const message = error instanceof Error ? error.message : "Tunnel deletion failed";
+      return reply.code(502).send({ error: `Tunnel resources could not be fully deleted: ${message}` });
     } finally {
       client.release();
     }
   });
 
-  app.get("/api/stores/:storeId/enrollments/:enrollmentId/logs", { preHandler: requireAuth }, async (request, reply) => {
-    const { storeId, enrollmentId } = z.object({
-      storeId: z.string().uuid(),
+  app.get("/api/tunnels/:tunnelId/enrollments/:enrollmentId/logs", { preHandler: requireAuth }, async (request, reply) => {
+    const { tunnelId, enrollmentId } = z.object({
+      tunnelId: z.string().uuid(),
       enrollmentId: z.string().uuid()
     }).parse(request.params);
     const result = await pool.query(
@@ -1097,11 +1110,11 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
               l.diagnostic_run_id AS "diagnosticRunId", l.created_at AS "createdAt"
          FROM enrollment_logs l
          JOIN enrollments e ON e.id = l.enrollment_id
-        WHERE e.store_id = $1 AND e.id = $2
+        WHERE e.tunnel_id = $1 AND e.id = $2
         ORDER BY l.created_at ASC, l.id ASC`,
-      [storeId, enrollmentId]
+      [tunnelId, enrollmentId]
     );
-    const enrollment = await pool.query("SELECT 1 FROM enrollments WHERE id = $1 AND store_id = $2", [enrollmentId, storeId]);
+    const enrollment = await pool.query("SELECT 1 FROM enrollments WHERE id = $1 AND tunnel_id = $2", [enrollmentId, tunnelId]);
     if (!enrollment.rowCount) return reply.code(404).send({ error: "Enrollment not found" });
     const diagnosticRuns = await pool.query(
       `SELECT id, platform, status, expires_at AS "expiresAt", created_at AS "createdAt",
@@ -1118,14 +1131,14 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
-  app.get("/api/stores/:storeId/enrollments/:enrollmentId/install-script", { preHandler: requireAuth }, async (request, reply) => {
-    const { storeId, enrollmentId } = z.object({
-      storeId: z.string().uuid(),
+  app.get("/api/tunnels/:tunnelId/enrollments/:enrollmentId/install-script", { preHandler: requireAuth }, async (request, reply) => {
+    const { tunnelId, enrollmentId } = z.object({
+      tunnelId: z.string().uuid(),
       enrollmentId: z.string().uuid()
     }).parse(request.params);
     const result = await pool.query(
-      "SELECT token_encrypted FROM enrollments WHERE id = $1 AND store_id = $2",
-      [enrollmentId, storeId]
+      "SELECT token_encrypted FROM enrollments WHERE id = $1 AND tunnel_id = $2",
+      [enrollmentId, tunnelId]
     );
     if (!result.rowCount) return reply.code(404).send({ error: "Enrollment not found" });
     const row = result.rows[0] as { token_encrypted: string | null };
@@ -1138,15 +1151,15 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
-  app.get("/api/stores/:storeId/enrollments/:enrollmentId/unenroll-script", { preHandler: requireAuth }, async (request, reply) => {
-    const { storeId, enrollmentId } = z.object({
-      storeId: z.string().uuid(),
+  app.get("/api/tunnels/:tunnelId/enrollments/:enrollmentId/unenroll-script", { preHandler: requireAuth }, async (request, reply) => {
+    const { tunnelId, enrollmentId } = z.object({
+      tunnelId: z.string().uuid(),
       enrollmentId: z.string().uuid()
     }).parse(request.params);
     const result = await pool.query(
       `SELECT unenroll_token_encrypted, unenrolled_at, unenroll_token_expires_at
-         FROM enrollments WHERE id = $1 AND store_id = $2`,
-      [enrollmentId, storeId]
+         FROM enrollments WHERE id = $1 AND tunnel_id = $2`,
+      [enrollmentId, tunnelId]
     );
     if (!result.rowCount) return reply.code(404).send({ error: "Enrollment not found" });
     const row = result.rows[0] as { unenroll_token_encrypted: string | null; unenrolled_at: string | null; unenroll_token_expires_at: string | null };
@@ -1163,15 +1176,15 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
-  app.get("/api/stores/:id/command-executions", { preHandler: requireAuth }, async (request, reply) => {
+  app.get("/api/tunnels/:id/command-executions", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const query = commandExecutionListSchema.parse(request.query);
     const offset = (query.page - 1) * query.pageSize;
     const values: unknown[] = [id];
-    const conditions = ["ce.store_id = $1"];
+    const conditions = ["ce.tunnel_id = $1"];
     if (query.search) {
       values.push(query.search);
-      conditions.push(`strpos(lower(concat_ws(' ', ce.script_name, ms.name, ms.description, saved_ms.name, saved_ms.description, st.display_name, st.tenant_code, st.store_code, u.username)), lower($${values.length})) > 0`);
+      conditions.push(`strpos(lower(concat_ws(' ', ce.script_name, ms.name, ms.description, saved_ms.name, saved_ms.description, st.display_name, st.tenant_code, st.tunnel_code, u.username)), lower($${values.length})) > 0`);
     }
     if (query.from) {
       values.push(query.from);
@@ -1190,8 +1203,8 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
            LEFT JOIN managed_scripts saved_ms ON saved_ms.id = saved_sv.script_id`;
     const limitParameter = values.length + 1;
     const offsetParameter = values.length + 2;
-    const [storeResult, executionResult, statsResult] = await Promise.all([
-      pool.query("SELECT 1 FROM stores WHERE id = $1", [id]),
+    const [tunnelResult, executionResult, statsResult] = await Promise.all([
+      pool.query("SELECT 1 FROM tunnels WHERE id = $1", [id]),
       pool.query(
         `SELECT ce.id,
                 ce.enrollment_id AS "enrollmentId",
@@ -1210,8 +1223,8 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
                 ce.created_at AS "createdAt", ce.started_at AS "startedAt", ce.finished_at AS "finishedAt",
                 ce.elapsed_ms AS "elapsedMs", ce.exit_code AS "exitCode",
                 ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy"
-           FROM store_command_executions ce
-           JOIN stores st ON st.id = ce.store_id
+           FROM tunnel_command_executions ce
+           JOIN tunnels st ON st.id = ce.tunnel_id
            ${joins}
           WHERE ${where}
           ORDER BY ce.created_at DESC, ce.id DESC
@@ -1226,14 +1239,14 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
                 (count(*) FILTER (WHERE ce.status = 'cancelled'))::int AS cancelled,
                 (count(*) FILTER (WHERE ce.status = 'scheduled'))::int AS scheduled,
                 (count(*) FILTER (WHERE ce.status = 'running'))::int AS running
-           FROM store_command_executions ce
-           JOIN stores st ON st.id = ce.store_id
+           FROM tunnel_command_executions ce
+           JOIN tunnels st ON st.id = ce.tunnel_id
            ${joins}
           WHERE ${where}`,
         values
       )
     ]);
-    if (!storeResult.rowCount) return reply.code(404).send({ error: "Store not found" });
+    if (!tunnelResult.rowCount) return reply.code(404).send({ error: "Tunnel not found" });
     const summary = statsResult.rows[0];
     const total = summary.total as number;
     return {
@@ -1248,18 +1261,18 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     };
   });
 
-  app.get("/api/stores/:storeId/command-executions/:executionId/logs", { preHandler: requireAuth }, async (request, reply) => {
-    const { storeId, executionId } = z.object({ storeId: z.string().uuid(), executionId: z.string().uuid() }).parse(request.params);
+  app.get("/api/tunnels/:tunnelId/command-executions/:executionId/logs", { preHandler: requireAuth }, async (request, reply) => {
+    const { tunnelId, executionId } = z.object({ tunnelId: z.string().uuid(), executionId: z.string().uuid() }).parse(request.params);
     const query = commandExecutionLogListSchema.parse(request.query);
     const execution = await pool.query(
-      `SELECT id, status, task_id AS "taskId", process_id AS "processId", stdout, stderr, error FROM store_command_executions
-        WHERE id = $1 AND store_id = $2`,
-      [executionId, storeId]
+      `SELECT id, status, task_id AS "taskId", process_id AS "processId", stdout, stderr, error FROM tunnel_command_executions
+        WHERE id = $1 AND tunnel_id = $2`,
+      [executionId, tunnelId]
     );
     if (!execution.rowCount) return reply.code(404).send({ error: "Command execution not found" });
     const logs = await pool.query(
       `SELECT id, stream, line, sequence, created_at AS "createdAt"
-         FROM store_command_execution_logs
+         FROM tunnel_command_execution_logs
         WHERE execution_id = $1 AND id > $2
         ORDER BY id ASC LIMIT $3`,
       [executionId, query.after, query.limit]
@@ -1267,16 +1280,16 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     return { execution: execution.rows[0], logs: logs.rows, nextAfter: logs.rows.at(-1)?.id ?? query.after };
   });
 
-  app.post("/api/stores/:storeId/command-executions/:executionId/cancel", { preHandler: requireAuth }, async (request, reply) => {
-    const { storeId, executionId } = z.object({ storeId: z.string().uuid(), executionId: z.string().uuid() }).parse(request.params);
+  app.post("/api/tunnels/:tunnelId/command-executions/:executionId/cancel", { preHandler: requireAuth }, async (request, reply) => {
+    const { tunnelId, executionId } = z.object({ tunnelId: z.string().uuid(), executionId: z.string().uuid() }).parse(request.params);
     try {
-      const result = await cancelCommandExecution(storeId, executionId);
+      const result = await cancelCommandExecution(tunnelId, executionId);
       await writeAudit({
         actorUserId: request.authUser!.id,
-        action: "store.command_execution_cancelled",
-        entityType: "store_command_execution",
+        action: "tunnel.command_execution_cancelled",
+        entityType: "tunnel_command_execution",
         entityId: executionId,
-        details: { storeId, taskId: result.taskId }
+        details: { tunnelId, taskId: result.taskId }
       });
       return reply.code(202).send(result);
     } catch (error) {
@@ -1286,13 +1299,13 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.post("/api/stores/:id/commands/execute", { preHandler: requireAuth }, async (request, reply) => {
+  app.post("/api/tunnels/:id/commands/execute", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = executeScriptSchema.parse(request.body);
     const enrollmentResult = await pool.query(
       `SELECT id, platform
          FROM enrollments
-        WHERE store_id = $1
+        WHERE tunnel_id = $1
           AND status IN ('ready', 'installed')
           AND unenrolled_at IS NULL
           AND deleted_at IS NULL
@@ -1301,7 +1314,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       [id]
     );
     const enrollment = enrollmentResult.rows[0];
-    if (!enrollment) return reply.code(409).send({ error: "This store has no active enrollment" });
+    if (!enrollment) return reply.code(409).send({ error: "This tunnel has no active enrollment" });
     const enrollmentPlatform = enrollment.platform === "windows" ? "windows" : "unix";
     let executionScript: string;
     let scriptType: "managed" | "inline";
@@ -1355,11 +1368,11 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       scriptLanguage = inlineLanguage;
     }
     const agent = await getCommandAgentConfig(id);
-    if (!agent) return reply.code(409).send({ error: "No command agent route is configured for this store" });
+    if (!agent) return reply.code(409).send({ error: "No command agent route is configured for this tunnel" });
     let argumentValues: ExecutionVariables;
     let argumentSources: ReturnType<typeof describeArgumentValueSources>;
     try {
-      const available = await resolveAvailableVariablesForStore(id);
+      const available = await resolveAvailableVariablesForTunnel(id);
       argumentValues = resolveArgumentValues(scriptArguments, available.variables, body.argumentBindings);
       argumentSources = describeArgumentValueSources(scriptArguments, available.sources, body.argumentBindings);
     } catch (error) {
@@ -1367,7 +1380,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     }
     const dispatchedScript = applyScriptArguments(executionScript, scriptLanguage, argumentValues);
     const executionHandle = await createCommandExecution({
-      storeId: id,
+      tunnelId: id,
       enrollmentId: enrollment.id,
       scriptVersionId,
       requestedBy: request.authUser!.id,
@@ -1382,12 +1395,12 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       argumentSources
     });
     try {
-      const result = await executeStoreScript(id, dispatchedScript, resolvedTimeoutMs, executionHandle);
-      if (!result) return reply.code(409).send({ error: "No command agent route is configured for this store" });
+      const result = await executeTunnelScript(id, dispatchedScript, resolvedTimeoutMs, executionHandle);
+      if (!result) return reply.code(409).send({ error: "No command agent route is configured for this tunnel" });
       await writeAudit({
         actorUserId: request.authUser!.id,
-        action: "store.command_executed",
-        entityType: "store",
+        action: "tunnel.command_executed",
+        entityType: "tunnel",
         entityId: id,
         details: { endpoint: agent.endpoint, executionId: executionHandle.executionId, taskId: result.taskId, enrollmentId: enrollment.id, scriptType, scriptId, scriptVersionId, timeoutMs: resolvedTimeoutMs, argumentNames: Object.keys(argumentValues), status: result.status, success: result.result?.success ?? null, exitCode: result.result?.exitCode ?? null }
       });
@@ -1397,8 +1410,8 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       const message = error instanceof Error ? error.message : "Command agent execution failed";
       await writeAudit({
         actorUserId: request.authUser!.id,
-        action: "store.command_executed",
-        entityType: "store",
+        action: "tunnel.command_executed",
+        entityType: "tunnel",
         entityId: id,
         details: { endpoint: agent.endpoint, executionId: executionHandle.executionId, enrollmentId: enrollment.id, scriptType, scriptId, scriptVersionId, timeoutMs: resolvedTimeoutMs, success: false, error: message }
       });
@@ -1406,7 +1419,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.post("/api/stores/:id/execution-variables/resolve", { preHandler: requireAuth }, async (request, reply) => {
+  app.post("/api/tunnels/:id/execution-variables/resolve", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = resolveExecutionVariablesSchema.parse(request.body);
     let argumentsList: ScriptArgument[] = [];
@@ -1419,44 +1432,44 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       argumentsList = scriptArgumentsSchema.parse(result.rows[0].arguments);
     }
     try {
-      const available = await resolveAvailableVariablesForStore(id);
+      const available = await resolveAvailableVariablesForTunnel(id);
       return { arguments: argumentsList, availableVariables: available.variables, sources: available.sources };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Unable to resolve available variables";
-      return reply.code(message === "Store not found" ? 404 : 409).send({ error: message });
+      return reply.code(message === "Tunnel not found" ? 404 : 409).send({ error: message });
     }
   });
 
-  app.put("/api/stores/:id/execution-variables", { preHandler: requireAuth }, async (request, reply) => {
+  app.put("/api/tunnels/:id/execution-variables", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = z.object({ variables: executionVariablesSchema }).parse(request.body);
     const result = await pool.query(
-      "UPDATE stores SET execution_variables = $1, updated_at = now() WHERE id = $2 RETURNING display_name",
+      "UPDATE tunnels SET execution_variables = $1, updated_at = now() WHERE id = $2 RETURNING display_name",
       [body.variables, id]
     );
-    if (!result.rowCount) return reply.code(404).send({ error: "Store not found" });
-    await writeAudit({ actorUserId: request.authUser!.id, action: "store.execution_variables_updated", entityType: "store", entityId: id, details: { variableNames: Object.keys(body.variables) } });
+    if (!result.rowCount) return reply.code(404).send({ error: "Tunnel not found" });
+    await writeAudit({ actorUserId: request.authUser!.id, action: "tunnel.execution_variables_updated", entityType: "tunnel", entityId: id, details: { variableNames: Object.keys(body.variables) } });
     return { variables: body.variables };
   });
 
-  app.put("/api/stores/:storeId/enrollments/:enrollmentId/execution-variables", { preHandler: requireAuth }, async (request, reply) => {
-    const { storeId, enrollmentId } = z.object({ storeId: z.string().uuid(), enrollmentId: z.string().uuid() }).parse(request.params);
+  app.put("/api/tunnels/:tunnelId/enrollments/:enrollmentId/execution-variables", { preHandler: requireAuth }, async (request, reply) => {
+    const { tunnelId, enrollmentId } = z.object({ tunnelId: z.string().uuid(), enrollmentId: z.string().uuid() }).parse(request.params);
     const body = z.object({ variables: executionVariablesSchema }).parse(request.body);
     const result = await pool.query(
       `UPDATE enrollments
           SET execution_variables = $1, updated_at = now()
-        WHERE id = $2 AND store_id = $3
+        WHERE id = $2 AND tunnel_id = $3
         RETURNING NULLIF(host_info->>'machineName', '') AS "computerName"`,
-      [body.variables, enrollmentId, storeId]
+      [body.variables, enrollmentId, tunnelId]
     );
     if (!result.rowCount) return reply.code(404).send({ error: "Enrollment not found" });
-    await writeAudit({ actorUserId: request.authUser!.id, action: "enrollment.execution_variables_updated", entityType: "enrollment", entityId: enrollmentId, details: { storeId, variableNames: Object.keys(body.variables) } });
+    await writeAudit({ actorUserId: request.authUser!.id, action: "enrollment.execution_variables_updated", entityType: "enrollment", entityId: enrollmentId, details: { tunnelId, variableNames: Object.keys(body.variables) } });
     return { variables: body.variables };
   });
 
-  app.post("/api/stores/:storeId/commands/executions/:executionId/save-script", { preHandler: requireAuth }, async (request, reply) => {
-    const { storeId, executionId } = z.object({
-      storeId: z.string().uuid(),
+  app.post("/api/tunnels/:tunnelId/commands/executions/:executionId/save-script", { preHandler: requireAuth }, async (request, reply) => {
+    const { tunnelId, executionId } = z.object({
+      tunnelId: z.string().uuid(),
       executionId: z.string().uuid()
     }).parse(request.params);
     const body = saveInlineExecutionSchema.parse(request.body ?? {});
@@ -1464,10 +1477,10 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       const executionResult = await client.query(
         `SELECT id, script_type, script_name, script_platform, script_language, script,
                 saved_script_id, saved_script_version_id
-           FROM store_command_executions
-          WHERE id = $1 AND store_id = $2
+           FROM tunnel_command_executions
+          WHERE id = $1 AND tunnel_id = $2
           FOR UPDATE`,
-        [executionId, storeId]
+        [executionId, tunnelId]
       );
       const execution = executionResult.rows[0];
       if (!execution) return null;
@@ -1498,7 +1511,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
         [script.rows[0].id, execution.script, request.authUser!.id]
       );
       await client.query(
-        `UPDATE store_command_executions
+        `UPDATE tunnel_command_executions
             SET script_type = 'managed', script_version_id = $2, script_version_number = 1,
                 saved_script_id = $1, saved_script_version_id = $2, saved_at = now()
           WHERE id = $3`,
@@ -1506,10 +1519,10 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       );
       await writeAudit({
         actorUserId: request.authUser!.id,
-        action: "store.inline_execution_saved",
-        entityType: "store_command_execution",
+        action: "tunnel.inline_execution_saved",
+        entityType: "tunnel_command_execution",
         entityId: executionId,
-        details: { storeId, scriptId: script.rows[0].id, scriptVersionId: version.rows[0].id, name }
+        details: { tunnelId, scriptId: script.rows[0].id, scriptVersionId: version.rows[0].id, name }
       }, client);
       return {
         executionId,
@@ -1524,33 +1537,35 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     return reply.code(saved.alreadySaved ? 200 : 201).send(saved);
   });
 
-  app.post("/api/stores", { preHandler: requireAuth }, async (request, reply) => {
-    const body = createStoreSchema.parse(request.body);
-    const storeId = await withTransaction(async (client) => {
+  app.post("/api/tunnels", { preHandler: requireAuth }, async (request, reply) => {
+    const body = createTunnelSchema.parse(request.body);
+    let tunnelId: string;
+    try {
+      tunnelId = await withTransaction(async (client) => {
       const allocation = await selectZone(client, body.zoneId);
       const publications = body.publications ?? [{ suffix: "", routes: [{ kind: "service" as const, path: "/", serviceUrl: body.originUrl! }] }];
       const prepared = body.publications
-        ? preparePublications(body.storeCode, allocation.zoneName, publications)
-        : publications.map((publication) => ({ ...publication, hostname: `${slugifyLabel(`${body.tenantCode}-${body.storeCode}`)}.${allocation.zoneName}` }));
+        ? preparePublications(body.tunnelCode, allocation.zoneName, publications)
+        : publications.map((publication) => ({ ...publication, hostname: `${slugifyLabel(`${body.tenantCode}-${body.tunnelCode}`)}.${allocation.zoneName}` }));
       const primary = prepared[0];
       if (!primary) throw new Error("At least one published endpoint is required");
       const primaryRoute = primary.routes.find((route) => route.path === "/") ?? primary.routes[0];
       if (!primaryRoute) throw new Error("The primary published endpoint requires at least one route");
       const result = await client.query(
-        `INSERT INTO stores(tenant_code, store_code, display_name, origin_url, account_id, zone_id, hostname)
+        `INSERT INTO tunnels(tenant_code, tunnel_code, display_name, origin_url, account_id, zone_id, hostname)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
-         RETURNING id, tenant_code AS "tenantCode", store_code AS "storeCode", display_name AS "displayName", hostname`,
-        [body.tenantCode, body.storeCode, body.displayName, primaryRoute.serviceUrl, allocation.accountId, allocation.zoneId, primary.hostname]
+         RETURNING id, tenant_code AS "tenantCode", tunnel_code AS "tunnelCode", display_name AS "displayName", hostname`,
+        [body.tenantCode, body.tunnelCode, body.displayName, primaryRoute.serviceUrl, allocation.accountId, allocation.zoneId, primary.hostname]
       );
       for (const publication of prepared) {
         const inserted = await client.query(
-          `INSERT INTO store_publications(store_id, suffix, hostname)
-           VALUES ($1, $2, $3) RETURNING id`,
-          [result.rows[0].id, publication.suffix, publication.hostname]
+          `INSERT INTO tunnel_publications(tunnel_id, suffix, custom_label, hostname)
+           VALUES ($1, $2, $3, $4) RETURNING id`,
+          [result.rows[0].id, publication.suffix, publication.customLabel ?? null, publication.hostname]
         );
         for (const [index, route] of publication.routes.entries()) {
           await client.query(
-            `INSERT INTO store_routes(publication_id, path, service_url, route_kind, sort_order)
+            `INSERT INTO tunnel_routes(publication_id, path, service_url, route_kind, sort_order)
              VALUES ($1, $2, $3, $4, $5)`,
             [inserted.rows[0].id, route.path, route.serviceUrl, route.kind ?? "service", index]
           );
@@ -1558,8 +1573,8 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       }
       await writeAudit({
         actorUserId: request.authUser!.id,
-        action: "store.created",
-        entityType: "store",
+        action: "tunnel.created",
+        entityType: "tunnel",
         entityId: result.rows[0].id,
         details: {
           hostnames: prepared.map((publication) => publication.hostname),
@@ -1569,115 +1584,121 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
         }
       }, client);
       return result.rows[0].id as string;
-    });
+      });
+    } catch (error) {
+      if ((error as { code?: string }).code === "23505") {
+        return reply.code(409).send({ error: "A tunnel with this hostname already exists in this zone" });
+      }
+      throw error;
+    }
     const created = await pool.query(`
-      SELECT s.id, s.tenant_code AS "tenantCode", s.store_code AS "storeCode", s.display_name AS "displayName", s.execution_variables AS "executionVariables",
-             s.origin_url AS "originUrl", s.hostname, s.tunnel_id AS "tunnelId", s.tunnel_name AS "tunnelName",
-             s.tunnel_status AS "tunnelStatus", s.onboarding_status AS "onboardingStatus",
+      SELECT s.id, s.tenant_code AS "tenantCode", s.tunnel_code AS "tunnelCode", s.display_name AS "displayName", s.execution_variables AS "executionVariables",
+             s.origin_url AS "originUrl", s.hostname, s.cf_tunnel_id AS "cfTunnelId", s.cf_tunnel_name AS "cfTunnelName",
+             s.cf_tunnel_status AS "cfTunnelStatus", s.onboarding_status AS "onboardingStatus",
              s.rdp_status AS "rdpStatus", s.rdp_target_ip::text AS "rdpTargetIp",
              s.rdp_url AS "rdpUrl", s.rdp_last_error AS "rdpLastError",
              s.last_connected_at AS "lastConnectedAt", s.last_verified_at AS "lastVerifiedAt", s.last_error AS "lastError",
              s.created_at AS "createdAt", a.id AS "accountId", a.cf_account_id AS "cfAccountId", a.name AS "accountName", z.id AS "zoneId", z.name AS "zoneName",
              ${publicationsJson} AS publications,
              ${commandAgentJson} AS "commandAgent"
-        FROM stores s JOIN cloudflare_accounts a ON a.id = s.account_id JOIN zones z ON z.id = s.zone_id
+        FROM tunnels s JOIN cloudflare_accounts a ON a.id = s.account_id JOIN zones z ON z.id = s.zone_id
        WHERE s.id = $1
-    `, [storeId]);
-    return reply.code(201).send({ store: created.rows[0] });
+    `, [tunnelId]);
+    return reply.code(201).send({ tunnel: created.rows[0] });
   });
 
-  app.patch("/api/stores/:id/zone", { preHandler: requireAuth }, async (request, reply) => {
+  app.patch("/api/tunnels/:id/zone", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = z.object({ zoneId: z.string().uuid() }).parse(request.body);
     try {
       const result = await withTransaction(async (client) => {
-        const storeResult = await client.query(
-          `SELECT s.id, s.tenant_code, s.store_code, s.zone_id, s.tunnel_id,
+        const tunnelResult = await client.query(
+          `SELECT s.id, s.tenant_code, s.tunnel_code, s.zone_id, s.cf_tunnel_id,
                   NOT EXISTS (
                     SELECT 1 FROM enrollments e
-                     WHERE e.store_id = s.id AND e.status IN ('ready', 'installed')
+                     WHERE e.tunnel_id = s.id AND e.status IN ('ready', 'installed')
                        AND e.unenrolled_at IS NULL AND e.deleted_at IS NULL
                   ) AS "noActiveEnrollment"
-             FROM stores s WHERE s.id = $1 FOR UPDATE`,
+             FROM tunnels s WHERE s.id = $1 FOR UPDATE`,
           [id]
         );
-        const store = storeResult.rows[0];
-        if (!store) return { kind: "missing" as const };
-        if (store.tunnel_id || !store.noActiveEnrollment) return { kind: "blocked" as const };
-        if (store.zone_id === body.zoneId) return { kind: "same_zone" as const };
+        const tunnel = tunnelResult.rows[0];
+        if (!tunnel) return { kind: "missing" as const };
+        if (tunnel.cf_tunnel_id || !tunnel.noActiveEnrollment) return { kind: "blocked" as const };
+        if (tunnel.zone_id === body.zoneId) return { kind: "same_zone" as const };
 
         const allocation = await selectZone(client, body.zoneId);
         const publications = await client.query(
-          "SELECT id, suffix FROM store_publications WHERE store_id = $1 ORDER BY created_at",
+          "SELECT id, suffix, custom_label FROM tunnel_publications WHERE tunnel_id = $1 ORDER BY created_at",
           [id]
         );
-        const baseLabel = slugifyLabel(`${store.tenant_code}-${store.store_code}`);
+        const baseLabel = slugifyLabel(`${tunnel.tenant_code}-${tunnel.tunnel_code}`);
         const prepared = publications.rows.map((publication) => ({
           id: publication.id as string,
-          hostname: `${publication.suffix ? `${baseLabel}-${publication.suffix}` : baseLabel}.${allocation.zoneName}`
+          hostname: `${publication.custom_label || (publication.suffix ? `${baseLabel}-${publication.suffix}` : baseLabel)}.${allocation.zoneName}`
         }));
         const primary = prepared[0];
-        if (!primary) throw new Error("Store has no published endpoints");
+        if (!primary) throw new Error("Tunnel has no published endpoints");
 
         await client.query(
-          "UPDATE stores SET account_id = $1, zone_id = $2, hostname = $3, updated_at = now() WHERE id = $4",
+          "UPDATE tunnels SET account_id = $1, zone_id = $2, hostname = $3, updated_at = now() WHERE id = $4",
           [allocation.accountId, allocation.zoneId, primary.hostname, id]
         );
         for (const publication of prepared) {
           await client.query(
-            "UPDATE store_publications SET hostname = $1, updated_at = now() WHERE id = $2",
+            "UPDATE tunnel_publications SET hostname = $1, updated_at = now() WHERE id = $2",
             [publication.hostname, publication.id]
           );
         }
-        // Defensive: a fully deprovisioned store should already have these
+        // Defensive: a fully deprovisioned tunnel should already have these
         // cleared, but a zone-scoped WAF ruleset reference from the old zone
         // would 404 if reused, so make sure none linger.
         await client.query(
-          `UPDATE store_routes r SET waf_ruleset_id = null, waf_rule_id = null, updated_at = now()
-             FROM store_publications p WHERE r.publication_id = p.id AND p.store_id = $1`,
+          `UPDATE tunnel_routes r SET waf_ruleset_id = null, waf_rule_id = null, updated_at = now()
+             FROM tunnel_publications p WHERE r.publication_id = p.id AND p.tunnel_id = $1`,
           [id]
         );
         await writeAudit({
           actorUserId: request.authUser!.id,
-          action: "store.zone_reassigned",
-          entityType: "store",
+          action: "tunnel.zone_reassigned",
+          entityType: "tunnel",
           entityId: id,
-          details: { fromZoneId: store.zone_id, toZoneId: allocation.zoneId, hostnames: prepared.map((publication) => publication.hostname) }
+          details: { fromZoneId: tunnel.zone_id, toZoneId: allocation.zoneId, hostnames: prepared.map((publication) => publication.hostname) }
         }, client);
         return { kind: "ok" as const };
       });
-      if (result.kind === "missing") return reply.code(404).send({ error: "Store not found" });
-      if (result.kind === "blocked") return reply.code(409).send({ error: "The store must have no active enrollment and be fully unenrolled before its account/zone can be changed" });
-      if (result.kind === "same_zone") return reply.code(409).send({ error: "Store is already assigned to this zone" });
+      if (result.kind === "missing") return reply.code(404).send({ error: "Tunnel not found" });
+      if (result.kind === "blocked") return reply.code(409).send({ error: "The tunnel must have no active enrollment and be fully unenrolled before its account/zone can be changed" });
+      if (result.kind === "same_zone") return reply.code(409).send({ error: "Tunnel is already assigned to this zone" });
       return { success: true };
     } catch (error) {
       if ((error as { code?: string }).code === "23505") {
-        return reply.code(409).send({ error: "A store with this hostname already exists in the target zone" });
+        return reply.code(409).send({ error: "A tunnel with this hostname already exists in the target zone" });
       }
       return reply.code(400).send({ error: error instanceof Error ? error.message : "Unable to change account/zone" });
     }
   });
 
-  app.put("/api/stores/:id/connectivity", { preHandler: requireAuth }, async (request, reply) => {
+  app.put("/api/tunnels/:id/connectivity", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = connectivitySchema.parse(request.body);
-    const update = await withTransaction(async (client) => {
-      const storeResult = await client.query(
-        `SELECT s.id, s.store_code, s.tunnel_id, z.name AS zone_name
-           FROM stores s JOIN zones z ON z.id = s.zone_id
+    const runUpdate = () => withTransaction(async (client) => {
+      const tunnelResult = await client.query(
+        `SELECT s.id, s.tunnel_code, s.cf_tunnel_id, z.name AS zone_name
+           FROM tunnels s JOIN zones z ON z.id = s.zone_id
           WHERE s.id = $1
           FOR UPDATE OF s`,
         [id]
       );
-      const store = storeResult.rows[0];
-      if (!store) return null;
+      const tunnel = tunnelResult.rows[0];
+      if (!tunnel) return null;
 
       const existingResult = await client.query(
         `SELECT p.hostname, p.dns_record_id,
                 r.path, r.waf_enabled, r.waf_allowed_ips, r.waf_ruleset_id, r.waf_rule_id
-           FROM store_publications p
-           LEFT JOIN store_routes r ON r.publication_id = p.id
-          WHERE p.store_id = $1
+           FROM tunnel_publications p
+           LEFT JOIN tunnel_routes r ON r.publication_id = p.id
+          WHERE p.tunnel_id = $1
           ORDER BY p.created_at, r.sort_order, r.created_at`,
         [id]
       );
@@ -1692,7 +1713,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
           ruleId: route.waf_rule_id
         }])
       );
-      const prepared = preparePublications(store.store_code, store.zone_name, body.publications);
+      const prepared = preparePublications(tunnel.tunnel_code, tunnel.zone_name, body.publications);
       const desiredHostnames = new Set(prepared.map((publication) => publication.hostname));
       const desiredRouteKeys = new Set(prepared.flatMap((publication) => publication.routes.map((route) => `${publication.hostname}${route.path}`)));
       const removedDnsRecordIds = [...new Set<string>(existingResult.rows
@@ -1706,18 +1727,18 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
           rulesetId: route.waf_ruleset_id as string | null
         }));
 
-      await client.query("DELETE FROM store_publications WHERE store_id = $1", [id]);
+      await client.query("DELETE FROM tunnel_publications WHERE tunnel_id = $1", [id]);
       for (const publication of prepared) {
         const existing = existingByHostname.get(publication.hostname);
         const inserted = await client.query(
-          `INSERT INTO store_publications(store_id, suffix, hostname, dns_record_id, status)
-           VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-          [id, publication.suffix, publication.hostname, existing?.dnsRecordId ?? null, existing?.dnsRecordId ? "active" : "pending"]
+          `INSERT INTO tunnel_publications(tunnel_id, suffix, custom_label, hostname, dns_record_id, status)
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+          [id, publication.suffix, publication.customLabel ?? null, publication.hostname, existing?.dnsRecordId ?? null, existing?.dnsRecordId ? "active" : "pending"]
         );
         for (const [index, route] of publication.routes.entries()) {
           const waf = existingWafByRoute.get(`${publication.hostname}${route.path}`);
           await client.query(
-            `INSERT INTO store_routes(publication_id, path, service_url, route_kind, sort_order, waf_enabled, waf_allowed_ips, waf_ruleset_id, waf_rule_id)
+            `INSERT INTO tunnel_routes(publication_id, path, service_url, route_kind, sort_order, waf_enabled, waf_allowed_ips, waf_ruleset_id, waf_rule_id)
              VALUES ($1, $2, $3, $4, $5, COALESCE($6, true), COALESCE($7, ARRAY[]::text[]), $8, $9)`,
             [inserted.rows[0].id, route.path, route.serviceUrl, route.kind, index, waf?.enabled ?? null, waf?.allowedIps ?? null, waf?.rulesetId ?? null, waf?.ruleId ?? null]
           );
@@ -1728,13 +1749,13 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       const primaryRoute = primary.routes.find((route) => route.path === "/") ?? primary.routes[0];
       if (!primaryRoute) throw new Error("The primary published endpoint requires at least one route");
       await client.query(
-        "UPDATE stores SET hostname = $1, origin_url = $2, dns_record_id = $3, last_error = null, updated_at = now() WHERE id = $4",
+        "UPDATE tunnels SET hostname = $1, origin_url = $2, dns_record_id = $3, last_error = null, updated_at = now() WHERE id = $4",
         [primary.hostname, primaryRoute.serviceUrl, existingByHostname.get(primary.hostname)?.dnsRecordId ?? null, id]
       );
       await writeAudit({
         actorUserId: request.authUser!.id,
-        action: "store.connectivity_updated",
-        entityType: "store",
+        action: "tunnel.connectivity_updated",
+        entityType: "tunnel",
         entityId: id,
         details: {
           hostnames: prepared.map((publication) => publication.hostname),
@@ -1743,12 +1764,21 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
           removedWafRouteCount: removedWafRoutes.length
         }
       }, client);
-      return { tunnelId: store.tunnel_id as string | null, removedDnsRecordIds, removedWafRoutes };
+      return { cfTunnelId: tunnel.cf_tunnel_id as string | null, removedDnsRecordIds, removedWafRoutes };
     });
-    if (!update) return reply.code(404).send({ error: "Store not found" });
+    let update: Awaited<ReturnType<typeof runUpdate>>;
+    try {
+      update = await runUpdate();
+    } catch (error) {
+      if ((error as { code?: string }).code === "23505") {
+        return reply.code(409).send({ error: "A tunnel with this hostname already exists in this zone" });
+      }
+      throw error;
+    }
+    if (!update) return reply.code(404).send({ error: "Tunnel not found" });
 
     try {
-      const applied = update.tunnelId ? await reconfigureStore(id, update.removedDnsRecordIds, update.removedWafRoutes) : false;
+      const applied = update.cfTunnelId ? await reconfigureTunnel(id, update.removedDnsRecordIds, update.removedWafRoutes) : false;
       return { success: true, applied };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Connectivity update failed";
@@ -1756,23 +1786,23 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
-  app.post("/api/stores/:id/enrollments", { preHandler: requireAuth }, async (request, reply) => {
+  app.post("/api/tunnels/:id/enrollments", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = enrollmentSchema.parse(request.body ?? {});
     const rawToken = createOpaqueToken();
     const expiresAt = new Date(Date.now() + body.expiresInHours * 60 * 60 * 1000);
     const issued = await withTransaction(async (client) => {
-      const store = await client.query("SELECT id FROM stores WHERE id = $1 FOR UPDATE", [id]);
-      if (!store.rowCount) throw new Error("Store not found");
+      const tunnel = await client.query("SELECT id FROM tunnels WHERE id = $1 FOR UPDATE", [id]);
+      if (!tunnel.rowCount) throw new Error("Tunnel not found");
       await ensureCommandAgentToken(client, id);
       // Claiming this new link auto-unenrolls any other active enrollment for
-      // this store server-side (see reconcilePriorEnrollments in enrollment.ts),
+      // this tunnel server-side (see reconcilePriorEnrollments in enrollment.ts),
       // so we only need to flag the transitional state here, not pre-issue
       // cleanup scripts for the operator to run manually.
       const active = await client.query(
         `SELECT id, platform, created_at
            FROM enrollments
-          WHERE store_id = $1
+          WHERE tunnel_id = $1
             AND status IN ('claimed', 'provisioning', 'ready', 'installed')
             AND unenrolled_at IS NULL
             AND deleted_at IS NULL
@@ -1781,11 +1811,11 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
       );
       const hasActivePrevious = (active.rowCount ?? 0) > 0;
       await client.query(
-        "UPDATE enrollments SET status = 'revoked', updated_at = now() WHERE store_id = $1 AND status IN ('url_issued', 'claimed', 'failed')",
+        "UPDATE enrollments SET status = 'revoked', updated_at = now() WHERE tunnel_id = $1 AND status IN ('url_issued', 'claimed', 'failed')",
         [id]
       );
       const result = await client.query(
-        `INSERT INTO enrollments(store_id, token_hash, token_encrypted, expires_at, created_by)
+        `INSERT INTO enrollments(tunnel_id, token_hash, token_encrypted, expires_at, created_by)
          VALUES ($1, $2, $3, $4, $5) RETURNING id`,
         [id, hashToken(rawToken), encryptSecret(rawToken), expiresAt, request.authUser!.id]
       );
@@ -1800,7 +1830,7 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
         await client.query(
           `UPDATE enrollments
               SET unenroll_token_hash = $1, unenroll_token_encrypted = $2,
-                  unenroll_token_expires_at = $3, unenroll_tunnel_id = (SELECT tunnel_id FROM stores WHERE id = $4),
+                  unenroll_token_expires_at = $3, unenroll_cf_tunnel_id = (SELECT cf_tunnel_id FROM tunnels WHERE id = $4),
                   unenroll_requested_at = now(), unenroll_last_error = null,
                   superseded_by_enrollment_id = $5, updated_at = now()
             WHERE id = $6`,
@@ -1816,13 +1846,13 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
         unenrollCommands.push({ enrollmentId: previous.id, createdAt: previous.created_at, token: unenrollToken });
       }
       await client.query(
-        "UPDATE stores SET onboarding_status = $1, last_error = null, updated_at = now() WHERE id = $2",
+        "UPDATE tunnels SET onboarding_status = $1, last_error = null, updated_at = now() WHERE id = $2",
         [hasActivePrevious ? "waiting_for_new_enrollment" : "url_issued", id]
       );
       await writeAudit({
         actorUserId: request.authUser!.id,
         action: "enrollment.issued",
-        entityType: "store",
+        entityType: "tunnel",
         entityId: id,
         details: { enrollmentId: result.rows[0].id, expiresAt, hasActivePrevious }
       }, client);
@@ -1842,89 +1872,89 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     });
   });
 
-  app.post("/api/stores/:id/enrollments/revoke", { preHandler: requireAuth }, async (request, reply) => {
+  app.post("/api/tunnels/:id/enrollments/revoke", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const revoked = await withTransaction(async (client) => {
-      const store = await client.query("SELECT id, onboarding_status FROM stores WHERE id = $1 FOR UPDATE", [id]);
-      if (!store.rowCount) return null;
+      const tunnel = await client.query("SELECT id, onboarding_status FROM tunnels WHERE id = $1 FOR UPDATE", [id]);
+      if (!tunnel.rowCount) return null;
       const result = await client.query(
         `UPDATE enrollments SET status = 'revoked', updated_at = now()
-            WHERE store_id = $1 AND status IN ('url_issued', 'claimed', 'provisioning', 'ready', 'failed')
+            WHERE tunnel_id = $1 AND status IN ('url_issued', 'claimed', 'provisioning', 'ready', 'failed')
           RETURNING id`,
         [id]
       );
-      if (["url_issued", "claimed", "provisioning", "failed"].includes(store.rows[0].onboarding_status)) {
-        await client.query("UPDATE stores SET onboarding_status = 'revoked', updated_at = now() WHERE id = $1", [id]);
+      if (["url_issued", "claimed", "provisioning", "failed"].includes(tunnel.rows[0].onboarding_status)) {
+        await client.query("UPDATE tunnels SET onboarding_status = 'revoked', updated_at = now() WHERE id = $1", [id]);
       }
       await writeAudit({
         actorUserId: request.authUser!.id,
         action: "enrollment.revoked",
-        entityType: "store",
+        entityType: "tunnel",
         entityId: id,
         details: { enrollmentCount: result.rowCount }
       }, client);
       return result.rowCount;
     });
-    if (revoked === null) return reply.code(404).send({ error: "Store not found" });
+    if (revoked === null) return reply.code(404).send({ error: "Tunnel not found" });
     return { success: true, revoked };
   });
 
-  app.post("/api/stores/:id/verify", { preHandler: requireAuth }, async (request, reply) => {
+  app.post("/api/tunnels/:id/verify", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = z.object({ publicationId: z.string().uuid().optional(), routeId: z.string().uuid().optional() }).parse(request.body ?? {});
-    const storeAccount = await pool.query("SELECT account_id FROM stores WHERE id = $1", [id]);
-    if (storeAccount.rows[0]?.account_id) {
-      await synchronizeAccount(storeAccount.rows[0].account_id as string).catch(() => undefined);
+    const tunnelAccount = await pool.query("SELECT account_id FROM tunnels WHERE id = $1", [id]);
+    if (tunnelAccount.rows[0]?.account_id) {
+      await synchronizeAccount(tunnelAccount.rows[0].account_id as string).catch(() => undefined);
     }
-    const result = await verifyStoreEndpoints(id, {
+    const result = await verifyTunnelEndpoints(id, {
       actorUserId: request.authUser!.id,
       ...(body.publicationId ? { publicationId: body.publicationId } : {}),
       ...(body.routeId ? { routeId: body.routeId } : {})
     });
-    if (!result) return reply.code(404).send({ error: body.routeId ? "Ingress route not found" : body.publicationId ? "Published endpoint not found" : "Store not found" });
+    if (!result) return reply.code(404).send({ error: body.routeId ? "Ingress route not found" : body.publicationId ? "Published endpoint not found" : "Tunnel not found" });
     return result;
   });
 
-  app.post("/api/stores/refresh", { preHandler: requireAuth }, async (request) => {
-    const body = refreshStoresSchema.parse(request.body);
+  app.post("/api/tunnels/refresh", { preHandler: requireAuth }, async (request) => {
+    const body = refreshTunnelsSchema.parse(request.body);
     const accountIds = await pool.query(
-      "SELECT DISTINCT account_id FROM stores WHERE id = ANY($1::uuid[]) AND account_id IS NOT NULL",
-      [body.storeIds]
+      "SELECT DISTINCT account_id FROM tunnels WHERE id = ANY($1::uuid[]) AND account_id IS NOT NULL",
+      [body.tunnelIds]
     );
     // Tunnel status (online/offline) only ever comes from Cloudflare's own tunnel
     // list, never from the endpoint reachability checks below.
     await Promise.all(accountIds.rows.map((row) => synchronizeAccount(row.account_id as string).catch(() => undefined)));
-    const results: Array<{ storeId: string; success: boolean; error?: string }> = [];
+    const results: Array<{ tunnelId: string; success: boolean; error?: string }> = [];
     let nextIndex = 0;
     const worker = async () => {
-      while (nextIndex < body.storeIds.length) {
-        const storeId = body.storeIds[nextIndex++]!;
+      while (nextIndex < body.tunnelIds.length) {
+        const tunnelId = body.tunnelIds[nextIndex++]!;
         try {
-          const result = await verifyStoreEndpoints(storeId, {
+          const result = await verifyTunnelEndpoints(tunnelId, {
             actorUserId: request.authUser!.id,
             attempts: 2,
             retryDelayMs: 1_000
           });
-          results.push({ storeId, success: result?.success ?? false, ...(!result ? { error: "Store not found" } : {}) });
+          results.push({ tunnelId, success: result?.success ?? false, ...(!result ? { error: "Tunnel not found" } : {}) });
         } catch (error) {
           results.push({
-            storeId,
+            tunnelId,
             success: false,
-            error: error instanceof Error ? error.message : "Store refresh failed"
+            error: error instanceof Error ? error.message : "Tunnel refresh failed"
           });
         }
       }
     };
-    await Promise.all(Array.from({ length: Math.min(5, body.storeIds.length) }, () => worker()));
+    await Promise.all(Array.from({ length: Math.min(5, body.tunnelIds.length) }, () => worker()));
     const refreshed = results.filter((result) => result.success).length;
     return { success: refreshed === results.length, refreshed, failed: results.length - refreshed, results };
   });
 
-  app.post("/api/stores/:id/rdp/retry", { preHandler: requireAuth }, async (request, reply) => {
+  app.post("/api/tunnels/:id/rdp/retry", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
-    const store = await pool.query("SELECT id, rdp_target_ip FROM stores WHERE id = $1", [id]);
-    if (!store.rowCount) return reply.code(404).send({ error: "Store not found" });
-    if (!store.rows[0].rdp_target_ip) {
+    const tunnel = await pool.query("SELECT id, rdp_target_ip FROM tunnels WHERE id = $1", [id]);
+    if (!tunnel.rowCount) return reply.code(404).send({ error: "Tunnel not found" });
+    if (!tunnel.rows[0].rdp_target_ip) {
       return reply.code(409).send({ error: "The Windows installer has not reported an RDP target IP" });
     }
     const result = await provisionBrowserRdp(id);
@@ -1932,15 +1962,15 @@ export async function storeRoutes(app: FastifyInstance): Promise<void> {
     return result;
   });
 
-  app.post("/api/stores/:id/diagnose", { preHandler: requireAuth }, async (request, reply) => {
+  app.post("/api/tunnels/:id/diagnose", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const enrollment = await pool.query(
       `SELECT id, platform FROM enrollments
-        WHERE store_id = $1 AND deleted_at IS NULL AND unenrolled_at IS NULL
+        WHERE tunnel_id = $1 AND deleted_at IS NULL AND unenrolled_at IS NULL
         ORDER BY COALESCE(installed_at, claimed_at, created_at) DESC LIMIT 1`,
       [id]
     );
-    if (!enrollment.rowCount) return reply.code(404).send({ error: "No enrollment found for this store" });
+    if (!enrollment.rowCount) return reply.code(404).send({ error: "No enrollment found for this tunnel" });
     const rawToken = createOpaqueToken();
     const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
     const diagnosticRun = await pool.query(

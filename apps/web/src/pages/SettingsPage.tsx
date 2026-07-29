@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Braces, Globe2, KeyRound, LogOut, RefreshCw, Save, ServerCog, ShieldCheck } from "lucide-react";
+import { Braces, Globe2, KeyRound, LogOut, RefreshCw, Save, ServerCog, ShieldCheck, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 import { ApiError, api } from "../api";
@@ -7,7 +7,8 @@ import { CopyButton } from "../components/CopyButton";
 import { FieldHelp } from "../components/FieldHelp";
 import { AddVariableButton, ExecutionVariablesEditor } from "../components/ExecutionVariablesEditor";
 import { PageHeader } from "../components/PageHeader";
-import type { AppSettings, ExecutionVariables, User } from "../types";
+import { BRAND_ICON_COMPONENTS, BRAND_ICON_OPTIONS } from "../components/brand-icons";
+import type { AppSettings, Branding, ExecutionVariables, User } from "../types";
 
 type McpSettingsResponse = {
   settings: AppSettings["mcp"];
@@ -20,7 +21,7 @@ function formatDate(value: string | null): string {
 
 // Written literally into the snippets. Clients that expand environment variables
 // resolve it; the others carry a note telling the operator to paste the token in.
-const MCP_TOKEN_REF = "${CLOUDFLARE_MAN_MCP_TOKEN}";
+const MCP_TOKEN_REF = "${CFMAN_MCP_TOKEN}";
 
 type McpClientId = "claude-code" | "claude-desktop" | "codex" | "gemini-cli" | "cursor" | "vscode";
 
@@ -42,12 +43,12 @@ const MCP_CLIENTS: McpClientProfile[] = [
     windowsPath: "%USERPROFILE%\\.claude.json  -  or .mcp.json in the project root",
     macosPath: "~/.claude.json  -  or .mcp.json in the project root",
     notes: [
-      "Expands ${VAR} from the environment, so exporting CLOUDFLARE_MAN_MCP_TOKEN keeps the token out of the file.",
-      "Equivalent CLI: claude mcp add --transport http cloudflare-man <endpoint> --header \"Authorization: Bearer $CLOUDFLARE_MAN_MCP_TOKEN\"",
+      "Expands ${VAR} from the environment, so exporting CFMAN_MCP_TOKEN keeps the token out of the file.",
+      "Equivalent CLI: claude mcp add --transport http cfman <endpoint> --header \"Authorization: Bearer $CFMAN_MCP_TOKEN\"",
       "Use .mcp.json to share the server with a repository, or ~/.claude.json to keep it to your user account."
     ],
     buildConfig: (endpoint) => JSON.stringify({
-      mcpServers: { "cloudflare-man": { type: "http", url: endpoint, headers: { Authorization: `Bearer ${MCP_TOKEN_REF}` } } }
+      mcpServers: { "cfman": { type: "http", url: endpoint, headers: { Authorization: `Bearer ${MCP_TOKEN_REF}` } } }
     }, null, 2)
   },
   {
@@ -58,11 +59,11 @@ const MCP_CLIENTS: McpClientProfile[] = [
     macosPath: "~/Library/Application Support/Claude/claude_desktop_config.json",
     notes: [
       "Claude Desktop speaks stdio only, so mcp-remote proxies the Streamable HTTP endpoint. Node.js 18+ must be installed.",
-      "Environment variables are not expanded here - replace ${CLOUDFLARE_MAN_MCP_TOKEN} with the token value.",
+      "Environment variables are not expanded here - replace ${CFMAN_MCP_TOKEN} with the token value.",
       "Quit Claude Desktop completely and reopen it; closing the window alone does not reload the config."
     ],
     buildConfig: (endpoint) => JSON.stringify({
-      mcpServers: { "cloudflare-man": { command: "npx", args: ["-y", "mcp-remote", endpoint, "--header", `Authorization: Bearer ${MCP_TOKEN_REF}`] } }
+      mcpServers: { "cfman": { command: "npx", args: ["-y", "mcp-remote", endpoint, "--header", `Authorization: Bearer ${MCP_TOKEN_REF}`] } }
     }, null, 2)
   },
   {
@@ -74,9 +75,9 @@ const MCP_CLIENTS: McpClientProfile[] = [
     notes: [
       "Codex uses TOML, not JSON - append the block to the existing config.toml instead of replacing the file.",
       "Headers go under http_headers, not the headers key used by the JSON clients.",
-      "Replace ${CLOUDFLARE_MAN_MCP_TOKEN} with the token value."
+      "Replace ${CFMAN_MCP_TOKEN} with the token value."
     ],
-    buildConfig: (endpoint) => `[mcp_servers.cloudflare-man]
+    buildConfig: (endpoint) => `[mcp_servers.cfman]
 url = "${endpoint}"
 http_headers = { Authorization = "Bearer ${MCP_TOKEN_REF}" }`
   },
@@ -92,7 +93,7 @@ http_headers = { Authorization = "Bearer ${MCP_TOKEN_REF}" }`
       "A .gemini/settings.json inside the project overrides the user-level file."
     ],
     buildConfig: (endpoint) => JSON.stringify({
-      mcpServers: { "cloudflare-man": { httpUrl: endpoint, headers: { Authorization: `Bearer ${MCP_TOKEN_REF}` } } }
+      mcpServers: { "cfman": { httpUrl: endpoint, headers: { Authorization: `Bearer ${MCP_TOKEN_REF}` } } }
     }, null, 2)
   },
   {
@@ -102,11 +103,11 @@ http_headers = { Authorization = "Bearer ${MCP_TOKEN_REF}" }`
     windowsPath: "%USERPROFILE%\\.cursor\\mcp.json  -  or .cursor\\mcp.json in the project",
     macosPath: "~/.cursor/mcp.json  -  or .cursor/mcp.json in the project",
     notes: [
-      "Replace ${CLOUDFLARE_MAN_MCP_TOKEN} with the token value.",
+      "Replace ${CFMAN_MCP_TOKEN} with the token value.",
       "Reload the MCP server from Cursor Settings > MCP after saving."
     ],
     buildConfig: (endpoint) => JSON.stringify({
-      mcpServers: { "cloudflare-man": { url: endpoint, headers: { Authorization: `Bearer ${MCP_TOKEN_REF}` } } }
+      mcpServers: { "cfman": { url: endpoint, headers: { Authorization: `Bearer ${MCP_TOKEN_REF}` } } }
     }, null, 2)
   },
   {
@@ -120,7 +121,7 @@ http_headers = { Authorization = "Bearer ${MCP_TOKEN_REF}" }`
       "Prefer an input prompt over a literal token so it is not committed with the workspace."
     ],
     buildConfig: (endpoint) => JSON.stringify({
-      servers: { "cloudflare-man": { type: "http", url: endpoint, headers: { Authorization: `Bearer ${MCP_TOKEN_REF}` } } }
+      servers: { "cfman": { type: "http", url: endpoint, headers: { Authorization: `Bearer ${MCP_TOKEN_REF}` } } }
     }, null, 2)
   }
 ];
@@ -155,6 +156,16 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
     onError: (requestError) => toast.error(requestError instanceof ApiError ? requestError.message : "Unable to update MCP server")
   });
   useEffect(() => { if (settingsData?.settings.executionVariables) setGlobalVariables(settingsData.settings.executionVariables); }, [settingsData?.settings.executionVariables]);
+  const [branding, setBranding] = useState<Branding | null>(null);
+  useEffect(() => { if (settingsData?.settings.branding) setBranding(settingsData.settings.branding); }, [settingsData?.settings.branding]);
+  const updateBranding = useMutation({
+    mutationFn: () => api.put<{ branding: Branding }>("/api/settings/branding", branding),
+    onSuccess: (data) => {
+      queryClient.setQueryData<{ settings: AppSettings }>(["settings"], (current) => current ? { settings: { ...current.settings, branding: data.branding } } : current);
+      toast.success("Branding updated");
+    },
+    onError: (requestError) => toast.error(requestError instanceof ApiError ? requestError.message : "Unable to update branding")
+  });
   const updateExecutionVariables = useMutation({
     mutationFn: () => api.put<{ variables: ExecutionVariables }>("/api/settings/execution-variables", { variables: globalVariables }),
     onSuccess: async () => {
@@ -180,7 +191,7 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
   const mcp = settingsData?.settings.mcp;
   const mcpClientProfile = MCP_CLIENTS.find((client) => client.id === mcpClient) ?? MCP_CLIENTS[0]!;
   const mcpConfig = useMemo(
-    () => mcpClientProfile.buildConfig(mcp?.endpoint ?? "https://cloudflare-man.example.com/mcp"),
+    () => mcpClientProfile.buildConfig(mcp?.endpoint ?? "https://cfman.example.com/mcp"),
     [mcpClientProfile, mcp?.endpoint]
   );
   const submit = (event: FormEvent<HTMLFormElement>) => {
@@ -212,20 +223,35 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
       <header><span><Globe2 size={19} /></span><div><h2>Public access</h2></div></header>
       <form className="settings-form" key={settingsData?.settings.publicBaseUrl} onSubmit={submitSettings}>
         {settingsError && <div className="form-error">{settingsError}</div>}
-        <label className="field"><span className="field-label">Public base URL <FieldHelp text="The HTTPS origin reachable from store machines. Enrollment commands, installer callback URLs, and the MCP endpoint use this value. Enter a full origin without a path." /></span><input name="publicBaseUrl" defaultValue={settingsData?.settings.publicBaseUrl ?? ""} placeholder="https://cloudflare-man.example.com" disabled={settingsLoading} required /></label>
+        <label className="field"><span className="field-label">Public base URL <FieldHelp text="The HTTPS origin reachable from tunnel machines. Enrollment commands, installer callback URLs, and the MCP endpoint use this value. Enter a full origin without a path." /></span><input name="publicBaseUrl" defaultValue={settingsData?.settings.publicBaseUrl ?? ""} placeholder="https://cfman.example.com" disabled={settingsLoading} required /></label>
         <button className="button button-primary" disabled={settingsLoading || updateSettings.isPending}><Save size={15} />{updateSettings.isPending ? "Saving..." : "Save URL"}</button>
       </form>
     </section>
 
+    <section className="settings-section">
+      <header><span><Sparkles size={19} /></span><div><h2>Branding</h2></div></header>
+      <div className="settings-form branding-settings-form">
+        <div className="branding-icon-picker">
+          {BRAND_ICON_OPTIONS.map((option) => {
+            const OptionIcon = BRAND_ICON_COMPONENTS[option];
+            return <button key={option} type="button" className={`branding-icon-option ${branding?.icon === option ? "active" : ""}`} aria-label={`Use ${option} icon`} aria-pressed={branding?.icon === option} onClick={() => setBranding((current) => current ? { ...current, icon: option } : current)}><OptionIcon size={17} /></button>;
+          })}
+        </div>
+        <label className="field"><span className="field-label">Title <FieldHelp text="Shown next to the icon at the top of the sidebar on every page. Keep it short." /></span><input value={branding?.title ?? ""} maxLength={40} onChange={(event) => setBranding((current) => current ? { ...current, title: event.target.value } : current)} placeholder="CFMan" /></label>
+        <label className="field"><span className="field-label">Subtitle <FieldHelp text="A short tagline shown under the title in the sidebar." /></span><input value={branding?.subtitle ?? ""} maxLength={80} onChange={(event) => setBranding((current) => current ? { ...current, subtitle: event.target.value } : current)} placeholder="Easy Cloudflare tunnels" /></label>
+        <div className="form-actions"><button className="button button-primary" type="button" disabled={!branding || updateBranding.isPending} onClick={() => updateBranding.mutate()}><Save size={15} />{updateBranding.isPending ? "Saving..." : "Save branding"}</button></div>
+      </div>
+    </section>
+
     <section className="settings-section execution-variable-settings-section">
-      <header><span><Braces size={19} /></span><div className="settings-heading-copy"><h2>Global environment variables</h2><small>Inherited by every saved and inline script execution. Account, zone, store, computer, and run overrides take precedence.</small></div></header>
+      <header><span><Braces size={19} /></span><div className="settings-heading-copy"><h2>Global environment variables</h2><small>Inherited by every saved and inline script execution. Account, zone, tunnel, computer, and run overrides take precedence.</small></div></header>
       <div className="settings-form execution-variable-settings-body"><ExecutionVariablesEditor variables={globalVariables} savedVariables={settingsData?.settings.executionVariables ?? {}} onChange={setGlobalVariables} /><div className="form-actions"><AddVariableButton variables={globalVariables} onChange={setGlobalVariables} /><button className="button button-primary" type="button" disabled={settingsLoading || updateExecutionVariables.isPending} onClick={() => updateExecutionVariables.mutate()}><Save size={15} />{updateExecutionVariables.isPending ? "Saving..." : "Save variables"}</button></div></div>
     </section>
 
     <section className="settings-section mcp-settings-section">
       <header>
         <span><ServerCog size={19} /></span>
-        <div className="settings-heading-copy"><h2>MCP server</h2><small>Expose Cloudflare Man data and administrative operations to trusted MCP clients.</small></div>
+        <div className="settings-heading-copy"><h2>MCP server</h2><small>Expose CFMan data and administrative operations to trusted MCP clients.</small></div>
         <label className="switch-control">
           <input type="checkbox" checked={mcp?.enabled ?? false} disabled={!mcp || updateMcp.isPending} onChange={(event) => updateMcp.mutate(event.target.checked)} />
           <span aria-hidden="true" />
@@ -251,7 +277,7 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
           <div><strong>Client configuration</strong><span>Pick the agent you use to get its snippet, config file, and transport.</span></div>
           <div className="mcp-client-picker">
             <label className="field">
-              <span className="field-label">AI agent <FieldHelp text="Each client stores MCP servers in its own file and format. Clients without native Streamable HTTP support are bridged through mcp-remote, which requires Node.js on the machine running the agent." /></span>
+              <span className="field-label">AI agent <FieldHelp text="Each client tunnels MCP servers in its own file and format. Clients without native Streamable HTTP support are bridged through mcp-remote, which requires Node.js on the machine running the agent." /></span>
               <select value={mcpClient} onChange={(event) => setMcpClient(event.target.value as McpClientId)}>
                 {MCP_CLIENTS.map((client) => <option key={client.id} value={client.id}>{client.label}</option>)}
               </select>
@@ -262,7 +288,7 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
               <div><dt>macOS</dt><dd><code>{mcpClientProfile.macosPath}</code></dd></div>
             </dl>
           </div>
-          <div className="mcp-config-head"><code>CLOUDFLARE_MAN_MCP_TOKEN={mcpToken ?? "<token shown after enable or rotate>"}</code><CopyButton value={mcpConfig} label="Copy config" /></div>
+          <div className="mcp-config-head"><code>CFMAN_MCP_TOKEN={mcpToken ?? "<token shown after enable or rotate>"}</code><CopyButton value={mcpConfig} label="Copy config" /></div>
           <pre><code>{mcpConfig}</code></pre>
           <ul className="mcp-client-notes">{mcpClientProfile.notes.map((note) => <li key={note}>{note}</li>)}</ul>
         </div>
@@ -277,7 +303,7 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
       <header><span><KeyRound size={19} /></span><div><h2>Change password</h2></div></header>
       <form className="password-form" onSubmit={submit}>
         {error && <div className="form-error">{error}</div>}
-        <label className="field"><span className="field-label">Current password <FieldHelp text="The password currently used to sign in to this Cloudflare Man administrator account." /></span><input name="currentPassword" type="password" autoComplete="current-password" required /></label>
+        <label className="field"><span className="field-label">Current password <FieldHelp text="The password currently used to sign in to this CFMan administrator account." /></span><input name="currentPassword" type="password" autoComplete="current-password" required /></label>
         <label className="field"><span className="field-label">New password <FieldHelp text="The new local administrator password. It must contain at least 10 characters and is unrelated to your Cloudflare credentials." /></span><input name="newPassword" type="password" autoComplete="new-password" minLength={10} required /></label>
         <label className="field"><span className="field-label">Confirm new password <FieldHelp text="Enter the new password again to prevent an accidental typo before it replaces the current password." /></span><input name="confirmPassword" type="password" autoComplete="new-password" minLength={10} required /></label>
         <button className="button button-primary" disabled={changePassword.isPending}>{changePassword.isPending ? "Updating..." : "Update password"}</button>

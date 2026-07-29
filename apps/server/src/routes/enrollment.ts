@@ -6,12 +6,12 @@ import { config } from "../config.js";
 import { getPublicBaseUrl } from "../lib/app-settings.js";
 import { writeAudit } from "../lib/audit.js";
 import { pool, withTransaction } from "../lib/database.js";
-import { deprovisionStore, isStoreTunnelActive, provisionStore, withStoreCloudflareLock } from "../lib/provisioning.js";
+import { deprovisionTunnel, tunnelHasActiveCfTunnel, provisionTunnel, withTunnelCloudflareLock } from "../lib/provisioning.js";
 import { provisionBrowserRdp } from "../lib/rdp.js";
 import { ensureCommandAgentWafAllowsCloudflareMan } from "../lib/route-waf.js";
 import { decryptSecret, hashToken } from "../lib/security.js";
-import { scheduleStoreVerification, verifyStoreEndpoints } from "../lib/store-verification.js";
-import { automaticUnenrollmentScript, createCommandExecution, ensureCommandAgentToken, executeStoreScript, getCommandAgentConfig, recordCommandExecutionLog, recordCommandExecutionReport, recordCommandExecutionStarted } from "../lib/command-agent.js";
+import { scheduleTunnelVerification, verifyTunnelEndpoints } from "../lib/tunnel-verification.js";
+import { automaticUnenrollmentScript, createCommandExecution, ensureCommandAgentToken, executeTunnelScript, getCommandAgentConfig, recordCommandExecutionLog, recordCommandExecutionReport, recordCommandExecutionStarted } from "../lib/command-agent.js";
 import { synchronizeAccount } from "./accounts.js";
 
 const tokenParams = z.object({ token: z.string().min(30).max(200) });
@@ -91,10 +91,10 @@ const commandExecutionLogSchema = z.object({
 
 async function findEnrollment(token: string) {
   const result = await pool.query(
-    `SELECT e.id, e.store_id, e.status, e.expires_at, e.install_id, e.claimed_at, e.claimed_by, e.created_by, e.platform,
+    `SELECT e.id, e.tunnel_id, e.status, e.expires_at, e.install_id, e.claimed_at, e.claimed_by, e.created_by, e.platform,
             e.deleted_at, e.unenrolled_at,
             e.host_info, s.hostname
-       FROM enrollments e JOIN stores s ON s.id = e.store_id
+       FROM enrollments e JOIN tunnels s ON s.id = e.tunnel_id
       WHERE e.token_hash = $1 AND e.deleted_at IS NULL`,
     [hashToken(token)]
   );
@@ -103,9 +103,9 @@ async function findEnrollment(token: string) {
 
 async function findUnenrollment(token: string) {
   const result = await pool.query(
-    `SELECT e.id, e.store_id, e.status, e.unenroll_token_expires_at, e.unenroll_tunnel_id,
+    `SELECT e.id, e.tunnel_id, e.status, e.unenroll_token_expires_at, e.unenroll_cf_tunnel_id,
             e.unenroll_reason, e.unenrolled_at, e.deleted_at, s.hostname
-       FROM enrollments e JOIN stores s ON s.id = e.store_id
+       FROM enrollments e JOIN tunnels s ON s.id = e.tunnel_id
       WHERE e.unenroll_token_hash = $1 AND e.deleted_at IS NULL`,
     [hashToken(token)]
   );
@@ -116,10 +116,10 @@ async function findDiagnose(token: string) {
   const result = await pool.query(
     `SELECT dr.id AS diagnostic_run_id, dr.status AS diagnostic_run_status,
             dr.expires_at AS diagnose_token_expires_at,
-            e.id AS enrollment_id, e.store_id, e.deleted_at, s.hostname
+            e.id AS enrollment_id, e.tunnel_id, e.deleted_at, s.hostname
        FROM enrollment_diagnostic_runs dr
        JOIN enrollments e ON e.id = dr.enrollment_id
-       JOIN stores s ON s.id = e.store_id
+       JOIN tunnels s ON s.id = e.tunnel_id
       WHERE dr.token_hash = $1 AND dr.status IN ('pending', 'running') AND e.deleted_at IS NULL`,
     [hashToken(token)]
   );
@@ -176,24 +176,24 @@ function normalizeScriptPlatform(platform: string | null | undefined): "windows"
   return platform === "windows" ? "windows" : "unix";
 }
 
-function noStore(reply: FastifyReply): void {
-  reply.header("Cache-Control", "no-store, private");
+function noTunnel(reply: FastifyReply): void {
+  reply.header("Cache-Control", "no-tunnel, private");
   reply.header("X-Robots-Tag", "noindex, nofollow");
   reply.header("Referrer-Policy", "no-referrer");
 }
 
-async function commandAgentToken(storeId: string): Promise<string> {
-  return ensureCommandAgentToken(pool, storeId);
+async function commandAgentToken(tunnelId: string): Promise<string> {
+  return ensureCommandAgentToken(pool, tunnelId);
 }
 
 type PreviousMachineIdentity = {
   hostname: string | undefined;
   installId: string | undefined;
-  tunnelId: string | undefined;
+  cfTunnelId: string | undefined;
 };
 
 async function reconcileTargetPriorEnrollments(
-  storeId: string,
+  tunnelId: string,
   keepEnrollmentId: string,
   requestedBy: string | null,
   previousMachine: PreviousMachineIdentity,
@@ -201,26 +201,26 @@ async function reconcileTargetPriorEnrollments(
 ): Promise<void> {
   const previous = await pool.query(
     `SELECT e.id, e.platform, e.install_id, e.unenroll_token_encrypted,
-            e.unenroll_token_expires_at, s.hostname, s.tunnel_id
+            e.unenroll_token_expires_at, s.hostname, s.cf_tunnel_id
        FROM enrollments e
-       JOIN stores s ON s.id = e.store_id
-      WHERE store_id = $1
+       JOIN tunnels s ON s.id = e.tunnel_id
+      WHERE tunnel_id = $1
         AND e.id <> $2
         AND e.status IN ('claimed', 'provisioning', 'ready', 'installed')
         AND e.unenrolled_at IS NULL
         AND e.deleted_at IS NULL
       ORDER BY COALESCE(e.installed_at, e.claimed_at, e.created_at) DESC`,
-    [storeId, keepEnrollmentId]
+    [tunnelId, keepEnrollmentId]
   );
   if (!previous.rowCount) return;
 
   const localMatch = previous.rows.find((enrollment) =>
     previousMachine.hostname === enrollment.hostname
     && previousMachine.installId === enrollment.install_id
-    && previousMachine.tunnelId === enrollment.tunnel_id
+    && previousMachine.cfTunnelId === enrollment.cf_tunnel_id
   );
-  const localCleanupVerified = localMatch && previousMachine.tunnelId
-    ? await isStoreTunnelActive(storeId, previousMachine.tunnelId).catch(() => false)
+  const localCleanupVerified = localMatch && previousMachine.cfTunnelId
+    ? await tunnelHasActiveCfTunnel(tunnelId, previousMachine.cfTunnelId).catch(() => false)
     : false;
 
   for (const enrollment of previous.rows) {
@@ -231,7 +231,7 @@ async function reconcileTargetPriorEnrollments(
       && new Date(enrollment.unenroll_token_expires_at) > new Date()
       ? decryptSecret(enrollment.unenroll_token_encrypted)
       : null;
-    const agent = await getCommandAgentConfig(storeId);
+    const agent = await getCommandAgentConfig(tunnelId);
     if (!platform || !token || !agent || agent.status !== "ready") {
       await pool.query(
         "UPDATE enrollments SET unenroll_last_error = $1, unenroll_reason = 'override', updated_at = now() WHERE id = $2",
@@ -245,7 +245,7 @@ async function reconcileTargetPriorEnrollments(
     const cleanupUrl = `${baseUrl}/e/${token}/${platform === "windows" ? "unenroll.ps1" : "unenroll.sh"}`;
     const script = automaticUnenrollmentScript(platform, cleanupUrl);
     const executionHandle = await createCommandExecution({
-      storeId,
+      tunnelId,
       enrollmentId: enrollment.id,
       scriptVersionId: null,
       requestedBy,
@@ -258,7 +258,7 @@ async function reconcileTargetPriorEnrollments(
       scriptVersion: null
     });
     try {
-      const result = await executeStoreScript(storeId, script, 30_000, executionHandle);
+      const result = await executeTunnelScript(tunnelId, script, 30_000, executionHandle);
       await pool.query(
         `UPDATE enrollments
             SET unenroll_reason = 'override', unenroll_last_error = $1, updated_at = now()
@@ -273,7 +273,7 @@ async function reconcileTargetPriorEnrollments(
     }
   }
 
-  await deprovisionStore(storeId, "override", lockClient);
+  await deprovisionTunnel(tunnelId, "override", lockClient);
   if (localCleanupVerified) {
     await pool.query(
       `UPDATE enrollments
@@ -285,37 +285,37 @@ async function reconcileTargetPriorEnrollments(
   }
 }
 
-async function reconcilePreviousMachineStore(
-  targetStoreId: string,
+async function reconcilePreviousMachineTunnel(
+  targetTunnelId: string,
   keepEnrollmentId: string,
   previousMachine: PreviousMachineIdentity
 ): Promise<void> {
-  if (!previousMachine.hostname || !previousMachine.installId || !previousMachine.tunnelId) return;
+  if (!previousMachine.hostname || !previousMachine.installId || !previousMachine.cfTunnelId) return;
   const match = await pool.query(
-    `SELECT s.id AS store_id, e.id AS enrollment_id
-       FROM stores s
-       JOIN enrollments e ON e.store_id = s.id
-      WHERE s.hostname = $1 AND s.id <> $2 AND s.tunnel_id = $3
+    `SELECT s.id AS tunnel_id, e.id AS enrollment_id
+       FROM tunnels s
+       JOIN enrollments e ON e.tunnel_id = s.id
+      WHERE s.hostname = $1 AND s.id <> $2 AND s.cf_tunnel_id = $3
         AND e.install_id = $4
         AND e.status IN ('claimed', 'provisioning', 'ready', 'installed')
         AND e.unenrolled_at IS NULL AND e.deleted_at IS NULL
       ORDER BY COALESCE(e.installed_at, e.claimed_at, e.created_at) DESC
       LIMIT 1`,
-    [previousMachine.hostname, targetStoreId, previousMachine.tunnelId, previousMachine.installId]
+    [previousMachine.hostname, targetTunnelId, previousMachine.cfTunnelId, previousMachine.installId]
   );
-  const previous = match.rows[0] as { store_id: string; enrollment_id: string } | undefined;
+  const previous = match.rows[0] as { tunnel_id: string; enrollment_id: string } | undefined;
   if (!previous) return;
-  const active = await isStoreTunnelActive(previous.store_id, previousMachine.tunnelId).catch(() => false);
+  const active = await tunnelHasActiveCfTunnel(previous.tunnel_id, previousMachine.cfTunnelId).catch(() => false);
   if (!active) return;
-  await withStoreCloudflareLock(previous.store_id, async (lockClient) => {
+  await withTunnelCloudflareLock(previous.tunnel_id, async (lockClient) => {
     const stillMatches = await pool.query(
-      `SELECT 1 FROM stores s JOIN enrollments e ON e.store_id = s.id
-        WHERE s.id = $1 AND s.tunnel_id = $2 AND e.id = $3 AND e.install_id = $4
+      `SELECT 1 FROM tunnels s JOIN enrollments e ON e.tunnel_id = s.id
+        WHERE s.id = $1 AND s.cf_tunnel_id = $2 AND e.id = $3 AND e.install_id = $4
           AND e.unenrolled_at IS NULL AND e.deleted_at IS NULL`,
-      [previous.store_id, previousMachine.tunnelId, previous.enrollment_id, previousMachine.installId]
+      [previous.tunnel_id, previousMachine.cfTunnelId, previous.enrollment_id, previousMachine.installId]
     );
     if (!stillMatches.rowCount) return;
-    await deprovisionStore(previous.store_id, "override", lockClient);
+    await deprovisionTunnel(previous.tunnel_id, "override", lockClient);
     await pool.query(
       `UPDATE enrollments
           SET status = 'unenrolled', unenrolled_at = COALESCE(unenrolled_at, now()),
@@ -324,10 +324,10 @@ async function reconcilePreviousMachineStore(
       [previous.enrollment_id]
     );
     await writeAudit({
-      action: "store.enrollment_replaced_from_local_identity",
-      entityType: "store",
-      entityId: previous.store_id,
-      details: { keepEnrollmentId, previousEnrollmentId: previous.enrollment_id, previousTunnelId: previousMachine.tunnelId }
+      action: "tunnel.enrollment_replaced_from_local_identity",
+      entityType: "tunnel",
+      entityId: previous.tunnel_id,
+      details: { keepEnrollmentId, previousEnrollmentId: previous.enrollment_id, previousTunnelId: previousMachine.cfTunnelId }
     });
   });
 }
@@ -965,7 +965,7 @@ if [ "$EXISTING_ENROLLMENT" -eq 1 ]; then
     REPORT_SENT=1
     exit 1
   fi
-  printf 'An existing store enrollment was detected. Cleanup and override it? [y/N] ' > /dev/tty
+  printf 'An existing tunnel enrollment was detected. Cleanup and override it? [y/N] ' > /dev/tty
   IFS= read -r CONFIRM_OVERRIDE < /dev/tty
   case "$CONFIRM_OVERRIDE" in
     y|Y|yes|YES)
@@ -1137,9 +1137,9 @@ printf '%s' "$ASSIGNED_HOSTNAME" > "$HOSTNAME_FILE"
 chmod 600 "$HOSTNAME_FILE"
 printf '%s' "$CLAIM_TUNNEL_ID" > "$TUNNEL_ID_FILE"
 chmod 600 "$TUNNEL_ID_FILE"
-log_message "info" "complete" "Store tunnel installed successfully for $ASSIGNED_HOSTNAME"
+log_message "info" "complete" "Tunnel tunnel installed successfully for $ASSIGNED_HOSTNAME"
 
-echo "Store tunnel installed: $ASSIGNED_HOSTNAME"
+echo "Tunnel tunnel installed: $ASSIGNED_HOSTNAME"
 `;
 }
 
@@ -1361,7 +1361,7 @@ try {
     ForEach-Object { $_.IPv4Address.IPAddress } |
     Where-Object { $_ -and -not $_.StartsWith("169.254.") } |
     Select-Object -First 1
-  if (-not $rdpTargetIp) { throw "Unable to determine the store LAN IPv4 address." }
+  if (-not $rdpTargetIp) { throw "Unable to determine the tunnel LAN IPv4 address." }
   $listenerReady = $false
   for ($attempt = 0; $attempt -lt 10; $attempt++) {
     if (Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue) { $listenerReady = $true; break }
@@ -1433,9 +1433,9 @@ if ($report.rdp -and -not $report.rdp.ready) {
   Write-Warning "Browser RDP provisioning failed: $($report.rdp.error)"
 }
 Set-Content -Path $hostnameFile -Value $AssignedHostname -NoNewline
-Set-Content -Path $tunnelIdFile -Value ([string]$claim.tunnelId) -NoNewline
-Send-InstallLog -Level "info" -Step "complete" -Message "Store tunnel installed successfully for $AssignedHostname"
-Write-Host "Store tunnel installed: $AssignedHostname"
+Set-Content -Path $tunnelIdFile -Value ([string]$claim.cfTunnelId) -NoNewline
+Send-InstallLog -Level "info" -Step "complete" -Message "Tunnel tunnel installed successfully for $AssignedHostname"
+Write-Host "Tunnel tunnel installed: $AssignedHostname"
 } catch {
   Send-InstallLog -Level "error" -Step "installer" -Message $_.Exception.Message
   if (-not $ReportSent) {
@@ -1535,7 +1535,7 @@ function Send-CleanupLog {
 function Invoke-WithRetry {
   # Matches the unix script's "curl --retry" resilience: a transient network
   # blip here must not leave local cleanup done with the server never told,
-  # since that produces a store that looks installed but has nothing running.
+  # since that produces a tunnel that looks installed but has nothing running.
   param([scriptblock]$Action, [int]$MaxAttempts = 3, [int]$DelaySeconds = 2)
   for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
     try {
@@ -1609,13 +1609,13 @@ try {
 `;
 }
 
-function diagnosticShellScript(hostname: string, publicBaseUrl: string, agentToken: string, storeId: string, diagnosticRunId: string): string {
-  const reportUrl = `${publicBaseUrl}/api/public/stores/diagnose/report`;
+function diagnosticShellScript(hostname: string, publicBaseUrl: string, agentToken: string, tunnelId: string, diagnosticRunId: string): string {
+  const reportUrl = `${publicBaseUrl}/api/public/tunnels/diagnose/report`;
   return `#!/usr/bin/env bash
 set -uo pipefail
 
 ASSIGNED_HOSTNAME='${hostname}'
-STORE_ID='${storeId}'
+TUNNEL_ID='${tunnelId}'
 DIAGNOSTIC_RUN_ID='${diagnosticRunId}'
 AGENT_TOKEN='${agentToken}'
 REPORT_URL='${reportUrl}'
@@ -1662,18 +1662,18 @@ fi
 
 echo "----------------------------------------"
 echo "Reporting results to cloudflare-man..."
-REPORT_BODY="$(printf '{"storeId":"%s","diagnosticRunId":"%s","agentToken":"%s","cloudflaredRunning":%s,"hostnameMatch":%s,"localHostname":"%s","agentHealthy":%s}' "$STORE_ID" "$DIAGNOSTIC_RUN_ID" "$AGENT_TOKEN" "$CLOUDFLARED_RUNNING" "$HOSTNAME_MATCH" "$LOCAL_HOSTNAME" "$AGENT_HEALTHY")"
+REPORT_BODY="$(printf '{"tunnelId":"%s","diagnosticRunId":"%s","agentToken":"%s","cloudflaredRunning":%s,"hostnameMatch":%s,"localHostname":"%s","agentHealthy":%s}' "$TUNNEL_ID" "$DIAGNOSTIC_RUN_ID" "$AGENT_TOKEN" "$CLOUDFLARED_RUNNING" "$HOSTNAME_MATCH" "$LOCAL_HOSTNAME" "$AGENT_HEALTHY")"
 RESPONSE="$(curl --silent --show-error --max-time 15 -X POST "$REPORT_URL" -H 'Content-Type: application/json' --data "$REPORT_BODY")"
 MESSAGE="$(printf '%s' "$RESPONSE" | grep -o '"message":"[^"]*"' | sed 's/"message":"//;s/"$//')"
 if [ -n "$MESSAGE" ]; then echo "$MESSAGE"; else echo "$RESPONSE"; fi
 `;
 }
 
-function diagnosticPowerShellScript(hostname: string, publicBaseUrl: string, agentToken: string, storeId: string, diagnosticRunId: string): string {
-  const reportUrl = `${publicBaseUrl}/api/public/stores/diagnose/report`;
+function diagnosticPowerShellScript(hostname: string, publicBaseUrl: string, agentToken: string, tunnelId: string, diagnosticRunId: string): string {
+  const reportUrl = `${publicBaseUrl}/api/public/tunnels/diagnose/report`;
   return `$ErrorActionPreference = "Continue"
 $AssignedHostname = "${hostname}"
-$StoreId = "${storeId}"
+$TunnelId = "${tunnelId}"
 $DiagnosticRunId = "${diagnosticRunId}"
 $AgentToken = "${agentToken}"
 $ReportUrl = "${reportUrl}"
@@ -1724,7 +1724,7 @@ try {
 Write-Host "----------------------------------------"
 Write-Host "Reporting results to cloudflare-man..."
 $reportBody = @{
-  storeId = $StoreId
+  tunnelId = $TunnelId
   diagnosticRunId = $DiagnosticRunId
   agentToken = $AgentToken
   cloudflaredRunning = $cloudflaredRunning
@@ -1788,8 +1788,8 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
     if (!enrollment || !["url_issued", "failed"].includes(enrollment.status) || new Date(enrollment.expires_at) <= new Date()) {
       return reply.code(404).type("text/plain").send("Enrollment URL is invalid or expired.\n");
     }
-    noStore(reply);
-    return reply.type("text/x-shellscript; charset=utf-8").send(shellScript(token, enrollment.hostname, await getPublicBaseUrl(), await commandAgentToken(enrollment.store_id), script.id));
+    noTunnel(reply);
+    return reply.type("text/x-shellscript; charset=utf-8").send(shellScript(token, enrollment.hostname, await getPublicBaseUrl(), await commandAgentToken(enrollment.tunnel_id), script.id));
   });
 
   app.get("/e/:token/install.ps1", async (request, reply) => {
@@ -1802,8 +1802,8 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
     if (!enrollment || !["url_issued", "failed"].includes(enrollment.status) || new Date(enrollment.expires_at) <= new Date()) {
       return reply.code(404).type("text/plain").send("Enrollment URL is invalid or expired.\n");
     }
-    noStore(reply);
-    return reply.type("text/plain; charset=utf-8").send(powerShellScript(token, enrollment.hostname, await getPublicBaseUrl(), await commandAgentToken(enrollment.store_id), script.id));
+    noTunnel(reply);
+    return reply.type("text/plain; charset=utf-8").send(powerShellScript(token, enrollment.hostname, await getPublicBaseUrl(), await commandAgentToken(enrollment.tunnel_id), script.id));
   });
 
   app.get("/e/:token/unenroll.sh", async (request, reply) => {
@@ -1816,7 +1816,7 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
     if (!enrollment || enrollment.unenrolled_at || !enrollment.unenroll_token_expires_at || new Date(enrollment.unenroll_token_expires_at) <= new Date()) {
       return reply.code(404).type("text/plain").send("Unenrollment URL is invalid or expired.\n");
     }
-    noStore(reply);
+    noTunnel(reply);
     return reply.type("text/x-shellscript; charset=utf-8").send(shellUnenrollScript(token, enrollment.hostname, await getPublicBaseUrl(), script.id));
   });
 
@@ -1830,7 +1830,7 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
     if (!enrollment || enrollment.unenrolled_at || !enrollment.unenroll_token_expires_at || new Date(enrollment.unenroll_token_expires_at) <= new Date()) {
       return reply.code(404).type("text/plain").send("Unenrollment URL is invalid or expired.\n");
     }
-    noStore(reply);
+    noTunnel(reply);
     return reply.type("text/plain; charset=utf-8").send(powerShellUnenrollScript(token, enrollment.hostname, await getPublicBaseUrl(), script.id));
   });
 
@@ -1841,8 +1841,8 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(404).type("text/plain").send("Diagnostic link is invalid or expired.\n");
     }
     await startDiagnosticRun(diagnose.diagnostic_run_id, "unix");
-    noStore(reply);
-    return reply.type("text/x-shellscript; charset=utf-8").send(diagnosticShellScript(diagnose.hostname, await getPublicBaseUrl(), await commandAgentToken(diagnose.store_id), diagnose.store_id, diagnose.diagnostic_run_id));
+    noTunnel(reply);
+    return reply.type("text/x-shellscript; charset=utf-8").send(diagnosticShellScript(diagnose.hostname, await getPublicBaseUrl(), await commandAgentToken(diagnose.tunnel_id), diagnose.tunnel_id, diagnose.diagnostic_run_id));
   });
 
   app.get("/d/:token/diagnose.ps1", async (request, reply) => {
@@ -1852,8 +1852,8 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
       return reply.code(404).type("text/plain").send("Diagnostic link is invalid or expired.\n");
     }
     await startDiagnosticRun(diagnose.diagnostic_run_id, "windows");
-    noStore(reply);
-    return reply.type("text/plain; charset=utf-8").send(diagnosticPowerShellScript(diagnose.hostname, await getPublicBaseUrl(), await commandAgentToken(diagnose.store_id), diagnose.store_id, diagnose.diagnostic_run_id));
+    noTunnel(reply);
+    return reply.type("text/plain; charset=utf-8").send(diagnosticPowerShellScript(diagnose.hostname, await getPublicBaseUrl(), await commandAgentToken(diagnose.tunnel_id), diagnose.tunnel_id, diagnose.diagnostic_run_id));
   });
 
   app.post("/api/public/enrollments/claim", {
@@ -1875,7 +1875,7 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
           AND deleted_at IS NULL
           AND expires_at > now()
           AND (claimed_at IS NULL OR install_id = $3 OR $5 = true)
-      RETURNING id, store_id, created_by`,
+      RETURNING id, tunnel_id, created_by`,
       [body.platform, body.machineName ?? request.ip, body.installId ?? null, tokenHash, body.overrideExisting, body.osName ?? null, body.osVersion ?? null, body.osBuild ?? null, body.architecture ?? null, body.machineName ?? null]
     );
     let enrollment = claimed.rows[0];
@@ -1883,11 +1883,11 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
       const expired = await pool.query(
         `UPDATE enrollments SET status = 'expired', updated_at = now()
           WHERE token_hash = $1 AND status IN ('url_issued', 'failed') AND expires_at <= now()
-        RETURNING store_id`,
+        RETURNING tunnel_id`,
         [tokenHash]
       );
       if (expired.rows[0]) {
-        await pool.query("UPDATE stores SET onboarding_status = 'expired', updated_at = now() WHERE id = $1", [expired.rows[0].store_id]);
+        await pool.query("UPDATE tunnels SET onboarding_status = 'expired', updated_at = now() WHERE id = $1", [expired.rows[0].tunnel_id]);
         return reply.code(410).send({ error: "Enrollment has expired" });
       }
       const existing = await findEnrollment(body.token);
@@ -1919,12 +1919,12 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
       const previousMachine = {
         hostname: body.previousHostname,
         installId: body.previousInstallId,
-        tunnelId: body.previousTunnelId
+        cfTunnelId: body.previousTunnelId
       };
       try {
-        await reconcilePreviousMachineStore(enrollment.store_id, enrollment.id, previousMachine);
+        await reconcilePreviousMachineTunnel(enrollment.tunnel_id, enrollment.id, previousMachine);
       } catch (error) {
-        const message = error instanceof Error ? error.message : "Unable to reconcile the previous store";
+        const message = error instanceof Error ? error.message : "Unable to reconcile the previous tunnel";
         await pool.query(
           `INSERT INTO enrollment_logs(enrollment_id, enrollment_script_id, level, step, message, metadata, phase)
            VALUES ($1, $2, 'warn', 'claim', $3, $4::jsonb, 'enroll')`,
@@ -1932,17 +1932,17 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
         );
       }
       const provision = async (lockClient?: PoolClient) => {
-        await reconcileTargetPriorEnrollments(enrollment.store_id, enrollment.id, enrollment.created_by ?? null, previousMachine, lockClient);
-        return provisionStore(enrollment.store_id);
+        await reconcileTargetPriorEnrollments(enrollment.tunnel_id, enrollment.id, enrollment.created_by ?? null, previousMachine, lockClient);
+        return provisionTunnel(enrollment.tunnel_id);
       };
-      const provisioned = await withStoreCloudflareLock(enrollment.store_id, provision);
-      const agentToken = await commandAgentToken(enrollment.store_id);
+      const provisioned = await withTunnelCloudflareLock(enrollment.tunnel_id, provision);
+      const agentToken = await commandAgentToken(enrollment.tunnel_id);
       await pool.query("UPDATE enrollments SET status = 'ready', last_error = null, updated_at = now() WHERE id = $1", [enrollment.id]);
       if (request.headers.accept?.includes("text/plain")) {
-        noStore(reply);
-        return reply.type("text/plain").send(`${provisioned.tunnelToken}\n${agentToken}\n${provisioned.tunnelId}`);
+        noTunnel(reply);
+        return reply.type("text/plain").send(`${provisioned.tunnelToken}\n${agentToken}\n${provisioned.cfTunnelId}`);
       }
-      noStore(reply);
+      noTunnel(reply);
       return { ...provisioned, agentToken };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Provisioning failed";
@@ -2076,13 +2076,13 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
       [enrollment.id, body.platform, scriptId]
     );
     try {
-      const cloudflareDeprovisioned = await withStoreCloudflareLock(enrollment.store_id, async (lockClient) => {
-        const store = await pool.query("SELECT tunnel_id FROM stores WHERE id = $1", [enrollment.store_id]);
-        const currentTunnelId = store.rows[0]?.tunnel_id as string | null | undefined;
-        const shouldDeprovision = enrollment.unenroll_tunnel_id
-          ? currentTunnelId === enrollment.unenroll_tunnel_id
+      const cloudflareDeprovisioned = await withTunnelCloudflareLock(enrollment.tunnel_id, async (lockClient) => {
+        const tunnel = await pool.query("SELECT cf_tunnel_id FROM tunnels WHERE id = $1", [enrollment.tunnel_id]);
+        const currentTunnelId = tunnel.rows[0]?.cf_tunnel_id as string | null | undefined;
+        const shouldDeprovision = enrollment.unenroll_cf_tunnel_id
+          ? currentTunnelId === enrollment.unenroll_cf_tunnel_id
           : Boolean(currentTunnelId && !enrollment.unenrolled_at);
-        if (shouldDeprovision) await deprovisionStore(enrollment.store_id, "unenroll", lockClient);
+        if (shouldDeprovision) await deprovisionTunnel(enrollment.tunnel_id, "unenroll", lockClient);
         await withTransaction(async (client) => {
           await client.query(
             `UPDATE enrollments
@@ -2138,9 +2138,9 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
     );
     const latest = await pool.query(
       `SELECT id FROM enrollments
-        WHERE store_id = $1 AND deleted_at IS NULL
+        WHERE tunnel_id = $1 AND deleted_at IS NULL
         ORDER BY created_at DESC, id DESC LIMIT 1`,
-      [enrollment.store_id]
+      [enrollment.tunnel_id]
     );
     const stateApplicable = !enrollment.unenrolled_at
       && enrollment.status !== "revoked"
@@ -2178,22 +2178,22 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
       }
       if (body.agentReady !== undefined || body.agentError) {
         await client.query(
-          `UPDATE store_command_agents
+          `UPDATE tunnel_command_agents
               SET status = $1, last_seen_at = CASE WHEN $2 THEN now() ELSE last_seen_at END,
                   last_error = $3, updated_at = now()
-            WHERE store_id = $4`,
-          [body.agentReady ? "ready" : "failed", body.agentReady ?? false, body.agentError ?? null, enrollment.store_id]
+            WHERE tunnel_id = $4`,
+          [body.agentReady ? "ready" : "failed", body.agentReady ?? false, body.agentError ?? null, enrollment.tunnel_id]
         );
       }
       const provider = await client.query(
-        `SELECT a.provider_mode, s.account_id FROM stores s JOIN cloudflare_accounts a ON a.id = s.account_id WHERE s.id = $1`,
-        [enrollment.store_id]
+        `SELECT a.provider_mode, s.account_id FROM tunnels s JOIN cloudflare_accounts a ON a.id = s.account_id WHERE s.id = $1`,
+        [enrollment.tunnel_id]
       );
       const isMock = provider.rows[0]?.provider_mode === "mock";
       accountId = provider.rows[0]?.account_id;
       scheduleVerification = success && !isMock;
       await client.query(
-        `UPDATE stores SET onboarding_status = $1, tunnel_status = CASE WHEN $2 THEN 'healthy' ELSE tunnel_status END,
+        `UPDATE tunnels SET onboarding_status = $1, cf_tunnel_status = CASE WHEN $2 THEN 'healthy' ELSE cf_tunnel_status END,
          cloudflared_version = $3, last_connected_at = CASE WHEN $2 THEN now() ELSE last_connected_at END,
          last_verified_at = CASE WHEN $2 THEN now() ELSE last_verified_at END, last_error = $4,
          rdp_status = CASE
@@ -2216,26 +2216,26 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
           body.rdpTargetIp ?? null,
           body.rdpPort ?? null,
           body.rdpError ?? null,
-          enrollment.store_id
+          enrollment.tunnel_id
         ]
       );
     });
     let rdp: Awaited<ReturnType<typeof provisionBrowserRdp>> | undefined;
     if (success && enrollment.platform === "windows") {
       rdp = body.rdpEnabled && body.rdpTargetIp
-        ? await provisionBrowserRdp(enrollment.store_id)
+        ? await provisionBrowserRdp(enrollment.tunnel_id)
         : { ready: false, error: body.rdpError ?? "Windows Remote Desktop was not enabled" };
     }
     if (scheduleVerification) {
-      scheduleStoreVerification(enrollment.store_id);
+      scheduleTunnelVerification(enrollment.tunnel_id);
       if (accountId) void synchronizeAccount(accountId).catch(() => undefined);
-      void ensureCommandAgentWafAllowsCloudflareMan(enrollment.store_id).catch(() => undefined);
+      void ensureCommandAgentWafAllowsCloudflareMan(enrollment.tunnel_id).catch(() => undefined);
     }
     return { success: true, stateApplied: true, ...(rdp ? { rdp } : {}) };
   });
 
   const diagnoseReportSchema = z.object({
-    storeId: z.string().uuid(),
+    tunnelId: z.string().uuid(),
     diagnosticRunId: z.string().uuid(),
     agentToken: z.string().min(1).max(500),
     cloudflaredRunning: z.boolean(),
@@ -2244,43 +2244,43 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
     agentHealthy: z.boolean()
   });
 
-  app.post("/api/public/stores/diagnose/report", {
+  app.post("/api/public/tunnels/diagnose/report", {
     config: { rateLimit: { max: 20, timeWindow: "1 minute" } }
   }, async (request, reply) => {
     const body = diagnoseReportSchema.parse(request.body);
-    const agent = await pool.query("SELECT token_encrypted FROM store_command_agents WHERE store_id = $1", [body.storeId]);
+    const agent = await pool.query("SELECT token_encrypted FROM tunnel_command_agents WHERE tunnel_id = $1", [body.tunnelId]);
     const storedToken = agent.rows[0]?.token_encrypted ? decryptSecret(agent.rows[0].token_encrypted as string) : null;
     if (!storedToken || storedToken !== body.agentToken) {
       return reply.code(401).send({ error: "Invalid diagnostic credentials" });
     }
-    const store = await pool.query("SELECT account_id, hostname FROM stores WHERE id = $1", [body.storeId]);
-    if (!store.rowCount) return reply.code(404).send({ error: "Store not found" });
+    const tunnel = await pool.query("SELECT account_id, hostname FROM tunnels WHERE id = $1", [body.tunnelId]);
+    if (!tunnel.rowCount) return reply.code(404).send({ error: "Tunnel not found" });
 
     const diagnosticRun = await pool.query(
       `SELECT dr.id, dr.enrollment_id, dr.status
          FROM enrollment_diagnostic_runs dr
          JOIN enrollments e ON e.id = dr.enrollment_id
-        WHERE dr.id = $1 AND e.store_id = $2 AND e.deleted_at IS NULL
+        WHERE dr.id = $1 AND e.tunnel_id = $2 AND e.deleted_at IS NULL
           AND dr.status IN ('pending', 'running') AND dr.expires_at > now()`,
-      [body.diagnosticRunId, body.storeId]
+      [body.diagnosticRunId, body.tunnelId]
     );
     if (!diagnosticRun.rowCount) return reply.code(404).send({ error: "Diagnostic run not found" });
 
     const currentEnrollment = await pool.query(
       `SELECT id, status FROM enrollments
-        WHERE store_id = $1 AND deleted_at IS NULL AND unenrolled_at IS NULL
+        WHERE tunnel_id = $1 AND deleted_at IS NULL AND unenrolled_at IS NULL
         ORDER BY COALESCE(installed_at, claimed_at, created_at) DESC LIMIT 1`,
-      [body.storeId]
+      [body.tunnelId]
     );
 
-    // Edge case: this machine has since been overridden by a *different* store's
-    // enrollment (the local state file now points at another store's hostname).
-    // Detect it precisely and mark this store's enrollment unenrolled instead of
+    // Edge case: this machine has since been overridden by a *different* tunnel's
+    // enrollment (the local state file now points at another tunnel's hostname).
+    // Detect it precisely and mark this tunnel's enrollment unenrolled instead of
     // reporting a vague mismatch.
-    if (body.localHostname && body.localHostname !== store.rows[0].hostname) {
+    if (body.localHostname && body.localHostname !== tunnel.rows[0].hostname) {
       const supersededBy = await pool.query(
-        "SELECT id, display_name FROM stores WHERE hostname = $1 AND id <> $2",
-        [body.localHostname, body.storeId]
+        "SELECT id, display_name FROM tunnels WHERE hostname = $1 AND id <> $2",
+        [body.localHostname, body.tunnelId]
       );
       if (supersededBy.rowCount) {
         if (currentEnrollment.rows[0] && currentEnrollment.rows[0].status !== "unenrolled") {
@@ -2293,15 +2293,15 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
               WHERE id = $1`,
             [currentEnrollment.rows[0].id]
           );
-          await deprovisionStore(body.storeId, "override").catch(() => undefined);
+          await deprovisionTunnel(body.tunnelId, "override").catch(() => undefined);
           await writeAudit({
-            action: "store.enrollment_superseded_detected",
-            entityType: "store",
-            entityId: body.storeId,
-            details: { supersededByStoreId: supersededBy.rows[0].id, supersededByStoreName: supersededBy.rows[0].display_name, localHostname: body.localHostname }
+            action: "tunnel.enrollment_superseded_detected",
+            entityType: "tunnel",
+            entityId: body.tunnelId,
+            details: { supersededByTunnelId: supersededBy.rows[0].id, supersededByTunnelName: supersededBy.rows[0].display_name, localHostname: body.localHostname }
           });
         }
-        const message = `This machine now belongs to store "${supersededBy.rows[0].display_name}" - this enrollment has been marked unenrolled.`;
+        const message = `This machine now belongs to tunnel "${supersededBy.rows[0].display_name}" - this enrollment has been marked unenrolled.`;
         await withTransaction(async (client) => {
           await client.query(
             `INSERT INTO enrollment_logs(enrollment_id, level, step, message, metadata, phase, diagnostic_run_id)
@@ -2328,11 +2328,11 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
       }
     }
 
-    await synchronizeAccount(store.rows[0].account_id).catch(() => undefined);
-    const tunnelStatusResult = await pool.query("SELECT tunnel_status FROM stores WHERE id = $1", [body.storeId]);
-    const tunnelOnline = ["healthy", "degraded"].includes(tunnelStatusResult.rows[0]?.tunnel_status);
+    await synchronizeAccount(tunnel.rows[0].account_id).catch(() => undefined);
+    const cfTunnelStatusResult = await pool.query("SELECT cf_tunnel_status FROM tunnels WHERE id = $1", [body.tunnelId]);
+    const tunnelOnline = ["healthy", "degraded"].includes(cfTunnelStatusResult.rows[0]?.cf_tunnel_status);
 
-    const endpointResult = await verifyStoreEndpoints(body.storeId).catch(() => null);
+    const endpointResult = await verifyTunnelEndpoints(body.tunnelId).catch(() => null);
     const endpointOk = endpointResult?.success ?? false;
 
     const allHealthy = tunnelOnline && body.cloudflaredRunning && body.hostnameMatch && body.agentHealthy && endpointOk;
@@ -2344,24 +2344,24 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
       );
       reconciled = true;
       await writeAudit({
-        action: "store.enrollment_reconciled",
-        entityType: "store",
-        entityId: body.storeId,
+        action: "tunnel.enrollment_reconciled",
+        entityType: "tunnel",
+        entityId: body.tunnelId,
         details: { tunnelOnline, endpointOk, ...body, agentToken: undefined }
       });
     } else if (!allHealthy) {
       const problems: string[] = [];
       if (!body.cloudflaredRunning) problems.push("cloudflared is not running on the machine");
-      if (!body.hostnameMatch) problems.push("the local install is not registered for this store's hostname");
+      if (!body.hostnameMatch) problems.push("the local install is not registered for this tunnel's hostname");
       if (!body.agentHealthy) problems.push("the command agent is not responding locally");
       if (!tunnelOnline) problems.push("Cloudflare reports the tunnel as offline");
       if (!endpointOk) problems.push("the published endpoint is not reachable");
       if (problems.length) {
-        await pool.query("UPDATE stores SET last_error = $1, updated_at = now() WHERE id = $2", [problems.join("; "), body.storeId]);
+        await pool.query("UPDATE tunnels SET last_error = $1, updated_at = now() WHERE id = $2", [problems.join("; "), body.tunnelId]);
         await writeAudit({
-          action: "store.diagnose_reported_issue",
-          entityType: "store",
-          entityId: body.storeId,
+          action: "tunnel.diagnose_reported_issue",
+          entityType: "tunnel",
+          entityId: body.tunnelId,
           details: { tunnelOnline, endpointOk, ...body, agentToken: undefined }
         });
       }
@@ -2374,7 +2374,7 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
       : !body.cloudflaredRunning
         ? "Found a problem: cloudflared is not running on this machine."
         : !body.hostnameMatch
-          ? "Found a problem: this machine's local install is registered for a different store."
+          ? "Found a problem: this machine's local install is registered for a different tunnel."
           : !body.agentHealthy
             ? "Found a problem: the command agent is not responding locally."
             : !tunnelOnline
@@ -2383,7 +2383,7 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
 
     const checks = [
       { step: "cloudflared", passed: body.cloudflaredRunning, message: body.cloudflaredRunning ? "cloudflared is running on the machine" : "cloudflared is not running on the machine" },
-      { step: "local-enrollment", passed: body.hostnameMatch, message: body.hostnameMatch ? `Local enrollment matches ${store.rows[0].hostname}` : `Local enrollment reports ${body.localHostname || "no assigned hostname"}` },
+      { step: "local-enrollment", passed: body.hostnameMatch, message: body.hostnameMatch ? `Local enrollment matches ${tunnel.rows[0].hostname}` : `Local enrollment reports ${body.localHostname || "no assigned hostname"}` },
       { step: "command-agent", passed: body.agentHealthy, message: body.agentHealthy ? "Command agent is responding locally" : "Command agent is not responding locally" },
       { step: "cloudflare-tunnel", passed: tunnelOnline, message: tunnelOnline ? "Cloudflare reports the tunnel online" : "Cloudflare reports the tunnel offline" },
       { step: "published-endpoints", passed: endpointOk, message: endpointOk ? "Published endpoints are reachable" : "One or more published endpoints are not reachable" }

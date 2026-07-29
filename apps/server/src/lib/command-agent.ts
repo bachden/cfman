@@ -24,7 +24,7 @@ printf '%s\n' 'Automatic unenrollment scheduled. The command agent and cloudflar
 type Queryable = Pick<PoolClient, "query">;
 
 export type CommandAgentConfig = {
-  storeId: string;
+  tunnelId: string;
   hostname: string;
   path: string;
   endpoint: string;
@@ -34,38 +34,38 @@ export type CommandAgentConfig = {
   lastError: string | null;
 };
 
-export async function ensureCommandAgentToken(client: Queryable, storeId: string): Promise<string> {
-  const existing = await client.query("SELECT token_encrypted FROM store_command_agents WHERE store_id = $1", [storeId]);
+export async function ensureCommandAgentToken(client: Queryable, tunnelId: string): Promise<string> {
+  const existing = await client.query("SELECT token_encrypted FROM tunnel_command_agents WHERE tunnel_id = $1", [tunnelId]);
   if (existing.rows[0]?.token_encrypted) return decryptSecret(existing.rows[0].token_encrypted as string);
   const token = createOpaqueToken();
   await client.query(
-    `INSERT INTO store_command_agents(store_id, token_encrypted)
+    `INSERT INTO tunnel_command_agents(tunnel_id, token_encrypted)
      VALUES ($1, $2)
-     ON CONFLICT (store_id) DO NOTHING`,
-    [storeId, encryptSecret(token)]
+     ON CONFLICT (tunnel_id) DO NOTHING`,
+    [tunnelId, encryptSecret(token)]
   );
-  const inserted = await client.query("SELECT token_encrypted FROM store_command_agents WHERE store_id = $1", [storeId]);
-  if (!inserted.rows[0]?.token_encrypted) throw new Error("Unable to initialize the store command agent");
+  const inserted = await client.query("SELECT token_encrypted FROM tunnel_command_agents WHERE tunnel_id = $1", [tunnelId]);
+  if (!inserted.rows[0]?.token_encrypted) throw new Error("Unable to initialize the tunnel command agent");
   return decryptSecret(inserted.rows[0].token_encrypted as string);
 }
 
-export async function getCommandAgentConfig(storeId: string): Promise<CommandAgentConfig | null> {
+export async function getCommandAgentConfig(tunnelId: string): Promise<CommandAgentConfig | null> {
   const result = await pool.query(
-    `SELECT s.id AS store_id, p.hostname, r.path, ca.token_encrypted, ca.status,
+    `SELECT s.id AS tunnel_id, p.hostname, r.path, ca.token_encrypted, ca.status,
             ca.last_seen_at, ca.last_error
-       FROM stores s
-       JOIN store_publications p ON p.store_id = s.id
-       JOIN store_routes r ON r.publication_id = p.id AND r.route_kind = 'command_agent'
-       JOIN store_command_agents ca ON ca.store_id = s.id
+       FROM tunnels s
+       JOIN tunnel_publications p ON p.tunnel_id = s.id
+       JOIN tunnel_routes r ON r.publication_id = p.id AND r.route_kind = 'command_agent'
+       JOIN tunnel_command_agents ca ON ca.tunnel_id = s.id
       WHERE s.id = $1
       ORDER BY p.created_at, r.sort_order, r.created_at
       LIMIT 1`,
-    [storeId]
+    [tunnelId]
   );
   const row = result.rows[0];
   if (!row) return null;
   return {
-    storeId: row.store_id,
+    tunnelId: row.tunnel_id,
     hostname: row.hostname,
     path: row.path,
     endpoint: `https://${row.hostname}${row.path}`,
@@ -99,7 +99,7 @@ export type CommandExecutionHandle = {
 
 export async function createCommandExecution(
   input: {
-    storeId: string;
+    tunnelId: string;
     enrollmentId: string | null;
     scriptVersionId: string | null;
     requestedBy: string | null;
@@ -117,15 +117,15 @@ export async function createCommandExecution(
 ): Promise<CommandExecutionHandle> {
   const reportToken = createOpaqueToken();
   const result = await pool.query(
-    `INSERT INTO store_command_executions(
-       store_id, enrollment_id, script_version_id, requested_by, script, timeout_ms,
+    `INSERT INTO tunnel_command_executions(
+       tunnel_id, enrollment_id, script_version_id, requested_by, script, timeout_ms,
        script_type, script_name, script_platform, script_language, script_version_number,
        report_token_hash, bulk_execution_id, environment_variables, argument_sources
      )
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
      RETURNING id`,
     [
-      input.storeId,
+      input.tunnelId,
       input.enrollmentId,
       input.scriptVersionId,
       input.requestedBy,
@@ -152,7 +152,7 @@ async function finishCommandExecution(
   result: Partial<CommandExecutionResult> & { error?: string }
 ): Promise<void> {
   await pool.query(
-    `UPDATE store_command_executions
+    `UPDATE tunnel_command_executions
         SET status = $1, finished_at = now(), elapsed_ms = $2, exit_code = $3,
             stdout = $4, stderr = $5, error = $6
       WHERE id = $7 AND status IN ('scheduled', 'running')`,
@@ -175,7 +175,7 @@ export async function recordCommandExecutionStarted(
   processId: number
 ): Promise<boolean> {
   const updated = await pool.query(
-    `UPDATE store_command_executions
+    `UPDATE tunnel_command_executions
         SET status = 'running', task_id = $1, process_id = $2,
             started_at = COALESCE(started_at, now()), error = null
       WHERE id = $3 AND report_token_hash = $4 AND status IN ('scheduled', 'running')`,
@@ -191,11 +191,11 @@ export async function recordCommandExecutionReport(
 ): Promise<boolean> {
   const status = result.status ?? (result.error === "Script timed out" ? "timed_out" : result.success ? "succeeded" : "failed");
   const updated = await pool.query(
-    `UPDATE store_command_executions
+    `UPDATE tunnel_command_executions
         SET status = $1, started_at = COALESCE(started_at, now()), finished_at = now(), elapsed_ms = $2,
             exit_code = $3,
-            stdout = CASE WHEN EXISTS (SELECT 1 FROM store_command_execution_logs l WHERE l.execution_id = $7 AND l.stream = 'stdout') THEN stdout ELSE $4 END,
-            stderr = CASE WHEN EXISTS (SELECT 1 FROM store_command_execution_logs l WHERE l.execution_id = $7 AND l.stream = 'stderr') THEN stderr ELSE $5 END,
+            stdout = CASE WHEN EXISTS (SELECT 1 FROM tunnel_command_execution_logs l WHERE l.execution_id = $7 AND l.stream = 'stdout') THEN stdout ELSE $4 END,
+            stderr = CASE WHEN EXISTS (SELECT 1 FROM tunnel_command_execution_logs l WHERE l.execution_id = $7 AND l.stream = 'stderr') THEN stderr ELSE $5 END,
             error = $6, reported_at = now()
       WHERE id = $7 AND report_token_hash = $8
         AND (
@@ -217,24 +217,24 @@ export async function recordCommandExecutionReport(
   return Boolean(updated.rowCount);
 }
 
-export async function cancelCommandExecution(storeId: string, executionId: string): Promise<{
+export async function cancelCommandExecution(tunnelId: string, executionId: string): Promise<{
   executionId: string;
   taskId: string;
   status: "cancelled";
 }> {
   const current = await pool.query(
     `SELECT id, status, COALESCE(task_id, id::text) AS task_id
-       FROM store_command_executions
-      WHERE id = $1 AND store_id = $2`,
-    [executionId, storeId]
+       FROM tunnel_command_executions
+      WHERE id = $1 AND tunnel_id = $2`,
+    [executionId, tunnelId]
   );
   const execution = current.rows[0] as { id: string; status: string; task_id: string } | undefined;
   if (!execution) throw new Error("Command execution not found");
   if (!['scheduled', 'running'].includes(execution.status)) {
     throw new Error(`Only scheduled or running executions can be cancelled; current status is ${execution.status}`);
   }
-  const agent = await getCommandAgentConfig(storeId);
-  if (!agent) throw new Error("No command agent route is configured for this store");
+  const agent = await getCommandAgentConfig(tunnelId);
+  if (!agent) throw new Error("No command agent route is configured for this tunnel");
   const response = await fetch(`${agent.endpoint.replace(/\/$/, "")}/executions/${executionId}/cancel`, {
     method: "POST",
     headers: { "X-Cloudflare-Man-Agent-Token": agent.token },
@@ -249,14 +249,14 @@ export async function cancelCommandExecution(storeId: string, executionId: strin
   }
   const taskId = payload.taskId ?? execution.task_id;
   const updated = await pool.query(
-    `UPDATE store_command_executions
+    `UPDATE tunnel_command_executions
         SET status = 'cancelled', task_id = COALESCE(task_id, $1),
             cancel_requested_at = now(), finished_at = now(),
             elapsed_ms = CASE WHEN started_at IS NULL THEN 0 ELSE GREATEST(0, EXTRACT(EPOCH FROM (now() - started_at)) * 1000)::int END,
             error = 'Execution cancelled by an operator'
-      WHERE id = $2 AND store_id = $3 AND status IN ('scheduled', 'running')
+      WHERE id = $2 AND tunnel_id = $3 AND status IN ('scheduled', 'running')
       RETURNING id`,
-    [taskId, executionId, storeId]
+    [taskId, executionId, tunnelId]
   );
   if (!updated.rowCount) throw new Error("Command execution finished before cancellation was recorded");
   return { executionId, taskId, status: "cancelled" };
@@ -271,10 +271,10 @@ export async function recordCommandExecutionLog(
 ): Promise<boolean> {
   const result = await pool.query(
     `WITH execution AS (
-       SELECT id FROM store_command_executions
+       SELECT id FROM tunnel_command_executions
         WHERE id = $1 AND report_token_hash = $2
      ), inserted AS (
-       INSERT INTO store_command_execution_logs(execution_id, stream, line, sequence)
+       INSERT INTO tunnel_command_execution_logs(execution_id, stream, line, sequence)
        SELECT execution.id, $3, $4, $5 FROM execution
        ON CONFLICT (execution_id, sequence) WHERE sequence IS NOT NULL DO NOTHING
        RETURNING id
@@ -289,7 +289,7 @@ export async function recordCommandExecutionLog(
   // Keep the existing history response useful without making the stream table
   // mandatory for consumers that only read the final execution snapshot.
   await pool.query(
-    `UPDATE store_command_executions
+    `UPDATE tunnel_command_executions
         SET ${stream} = LEFT(${stream} || CASE WHEN ${stream} = '' THEN '' ELSE E'\\n' END || $1, 20000)
       WHERE id = $2`,
     [line, executionId]
@@ -311,16 +311,16 @@ function describeCommandAgentError(error: unknown): string {
   return error.message;
 }
 
-export async function executeStoreScript(
-  storeId: string,
+export async function executeTunnelScript(
+  tunnelId: string,
   script: string,
   timeoutMs: number,
   execution?: CommandExecutionHandle
 ): Promise<CommandExecutionDispatch | null> {
-  const agent = await getCommandAgentConfig(storeId);
+  const agent = await getCommandAgentConfig(tunnelId);
   const startedAt = Date.now();
   if (!agent) {
-    if (execution) await finishCommandExecution(execution.executionId, "failed", startedAt, { error: "No command agent route is configured for this store" });
+    if (execution) await finishCommandExecution(execution.executionId, "failed", startedAt, { error: "No command agent route is configured for this tunnel" });
     return null;
   }
   try {
@@ -350,16 +350,16 @@ export async function executeStoreScript(
       const taskId = payload.taskId ?? execution?.executionId ?? payload.executionId ?? "";
       if (execution) {
         await pool.query(
-          `UPDATE store_command_executions SET task_id = $1
+          `UPDATE tunnel_command_executions SET task_id = $1
             WHERE id = $2 AND status IN ('scheduled', 'running')`,
           [taskId, execution.executionId]
         );
       }
       await pool.query(
-        `UPDATE store_command_agents
+        `UPDATE tunnel_command_agents
             SET status = 'ready', last_seen_at = now(), last_error = null, updated_at = now()
-          WHERE store_id = $1`,
-        [storeId]
+          WHERE tunnel_id = $1`,
+        [tunnelId]
       );
       return {
         scheduled: true,
@@ -384,10 +384,10 @@ export async function executeStoreScript(
       );
     }
     await pool.query(
-      `UPDATE store_command_agents
+      `UPDATE tunnel_command_agents
           SET status = 'ready', last_seen_at = now(), last_error = null, updated_at = now()
-        WHERE store_id = $1`,
-      [storeId]
+        WHERE tunnel_id = $1`,
+      [tunnelId]
     );
     return {
       scheduled: false,
@@ -407,10 +407,10 @@ export async function executeStoreScript(
       );
     }
     await pool.query(
-      `UPDATE store_command_agents
+      `UPDATE tunnel_command_agents
           SET status = 'failed', last_error = $1, updated_at = now()
-        WHERE store_id = $2`,
-      [message, storeId]
+        WHERE tunnel_id = $2`,
+      [message, tunnelId]
     );
     throw new Error(message);
   }
