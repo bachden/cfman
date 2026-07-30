@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { AlertTriangle, Braces, CheckCircle2, ChevronLeft, ChevronRight, FilePlus2, Globe2, Layers3, MonitorUp, RefreshCw, Save, Search, Settings2, ShieldAlert, ShieldCheck, TerminalSquare, Trash2, Unplug } from "lucide-react";
+import { AlertTriangle, Braces, CheckCircle2, ChevronLeft, ChevronRight, ExternalLink, FilePlus2, Globe2, Layers3, MonitorUp, RefreshCw, Save, Search, Settings2, ShieldAlert, ShieldCheck, TerminalSquare, Trash2, Unplug } from "lucide-react";
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
@@ -17,7 +17,7 @@ import { Modal } from "./Modal";
 import { ScriptEditor } from "./ScriptEditor";
 import { SearchableSelect } from "./SearchableSelect";
 import { SideDrawer } from "./SideDrawer";
-import { StatusBadge, tunnelNeedsFastPolling, tunnelOnlineStatus } from "./StatusBadge";
+import { StatusBadge, activeEnrollmentPlatform, cfmanSelfPublication, isCfmanSelfTunnel, tunnelNeedsFastPolling, tunnelOnlineStatus } from "./StatusBadge";
 
 export type { TunnelDrawerTab };
 
@@ -46,6 +46,12 @@ export function TunnelDrawer({ tunnelId, tab, onTabChange, onClose, zIndex }: { 
     }
   });
   const currentTunnel = detailData?.tunnel;
+  const { data: settingsData } = useQuery({ queryKey: ["settings"], queryFn: () => api.get<{ settings: AppSettings }>("/api/settings") });
+  const publicBaseUrl = settingsData?.settings.publicBaseUrl;
+  const isCfmanSelf = currentTunnel ? isCfmanSelfTunnel(currentTunnel, publicBaseUrl) : false;
+  const drawerHostPlatform = currentTunnel ? activeEnrollmentPlatform(currentTunnel) : null;
+  const sshRoutePublication = currentTunnel?.publications.find((publication) => publication.routes.some((route) => route.serviceUrl.startsWith("ssh://")));
+  const sshDirectRouteCommand = sshRoutePublication ? `ssh -o ProxyCommand="cloudflared access ssh --hostname ${sshRoutePublication.hostname}" ${currentTunnel?.sshUsername ?? "root"}@${sshRoutePublication.hostname}` : "";
   const enrollmentPageSize = 5;
   const { data: enrollmentData } = useQuery({
     queryKey: ["tunnel-enrollments", tunnelId, enrollmentPage, enrollmentPageSize],
@@ -67,6 +73,20 @@ export function TunnelDrawer({ tunnelId, tab, onTabChange, onClose, zIndex }: { 
     mutationFn: (routeId: string) => api.post<{ success: boolean; check: { statusCode: number | null; latencyMs: number; error?: string }; checks: unknown[] }>(`/api/tunnels/${tunnelId}/verify`, { routeId }),
     onSuccess: async (result) => { await Promise.all([queryClient.invalidateQueries({ queryKey: ["tunnels"] }), queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnelId] })]); if (result.success) toast.success("Endpoint verified"); else toast.error(result.check.error ?? "Endpoint is unreachable"); },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Verification failed")
+  });
+  const reconcileCfmanSelf = useMutation({
+    mutationFn: () => api.post<{ hostname: string; routes: Array<{ path: string; created: boolean }>; warning: string | null }>(`/api/tunnels/${tunnelId}/reconcile-cfman-self`),
+    onSuccess: async (result) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["tunnels"] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnelId] })
+      ]);
+      const created = result.routes.filter((route) => route.created).map((route) => route.path);
+      if (result.warning) toast.warning(result.warning);
+      else if (created.length) toast.success(`Created missing route${created.length === 1 ? "" : "s"}: ${created.join(", ")}`);
+      else toast.success("Already up to date - WAF rule and remote-agent routes are correct");
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to reconcile CFMan's own WAF configuration")
   });
   const deleteEnrollment = useMutation({
     mutationFn: (enrollmentId: string) => api.delete<{ hardDeleted: boolean; logCount?: number }>(`/api/tunnels/${tunnelId}/enrollments/${enrollmentId}`),
@@ -121,6 +141,17 @@ export function TunnelDrawer({ tunnelId, tab, onTabChange, onClose, zIndex }: { 
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "RDP provisioning failed")
   });
+  const retrySsh = useMutation({
+    mutationFn: () => api.post(`/api/tunnels/${tunnelId}/ssh/retry`),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["tunnels"] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnelId] })
+      ]);
+      toast.success("Browser SSH provisioned");
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "SSH provisioning failed")
+  });
   const deletePreflightMutation = useMutation({
     mutationFn: () => api.get<TunnelDeletePreflight>(`/api/tunnels/${tunnelId}/delete-preflight`),
     onSuccess: (result) => setDeletePreflight(result),
@@ -159,7 +190,7 @@ export function TunnelDrawer({ tunnelId, tab, onTabChange, onClose, zIndex }: { 
   const close = () => { setAutoExpandEnrollmentId(null); setUnenrollTarget(null); setDeleteEnrollmentTarget(null); setDeleteOpen(false); setDeletePreflight(null); setDeleteName(""); setEditingConnectivity(false); setWafRoute(null); setTroubleshootOpen(false); onClose(); };
   return (
     <>
-    <SideDrawer open={Boolean(tunnelId)} zIndex={zIndex} title={<div className="drawer-heading"><strong>{currentTunnel?.displayName ?? "Tunnel details"}</strong>{currentTunnel && <StatusBadge status={tunnelOnlineStatus(currentTunnel.cfTunnelStatus)} />}</div>} onClose={close}>
+    <SideDrawer open={Boolean(tunnelId)} zIndex={zIndex} title={<div className="drawer-heading"><strong>{currentTunnel?.displayName ?? "Tunnel details"}</strong>{isCfmanSelf && <span className="cfman-self-tag" title="This tunnel is CFMan's own self-hosted target">CFMAN SELF</span>}{currentTunnel && <StatusBadge status={tunnelOnlineStatus(currentTunnel.cfTunnelStatus)} />}</div>} onClose={close}>
       {currentTunnel && <div className="tunnel-drawer-content">
         <nav className="tunnel-drawer-tabs" aria-label="Tunnel detail sections">
           <button className={tab === "overall" ? "active" : ""} type="button" onClick={() => onTabChange("overall")}>Overall</button>
@@ -167,6 +198,7 @@ export function TunnelDrawer({ tunnelId, tab, onTabChange, onClose, zIndex }: { 
           <button className={tab === "connect" ? "active" : ""} type="button" onClick={() => onTabChange("connect")}>Connect</button>
         </nav>
         {tab === "overall" && <div className="tunnel-drawer-tab">
+          {currentTunnel.wafWarning && <div className="inline-alert"><AlertTriangle size={14} />WAF rule could not be applied for one or more routes - they're reachable without WAF protection: {currentTunnel.wafWarning}</div>}
           <section className="tunnel-drawer-section">
             <header className="tunnel-section-heading"><div><h3>Tunnel overview</h3><span>Tunnel assignment and infrastructure</span></div><div className="tunnel-section-heading-actions"><button className="button button-secondary" type="button" onClick={() => setTunnelVariablesOpen(true)}><Braces size={15} />Variables</button></div></header>
             <dl className="detail-list">
@@ -203,10 +235,10 @@ export function TunnelDrawer({ tunnelId, tab, onTabChange, onClose, zIndex }: { 
           })()}
         </div>}
         {tab === "ingress" && <div className="tunnel-drawer-tab">
-          {editingConnectivity ? <EditConnectivityPanel tunnel={currentTunnel} onClose={() => setEditingConnectivity(false)} /> : <section className="tunnel-drawer-section publication-summary"><header className="tunnel-section-heading"><div><h3>Published endpoints</h3><span>{currentTunnel.publications.length} hostname{currentTunnel.publications.length === 1 ? "" : "s"}</span></div><button className="button button-secondary" type="button" onClick={() => setEditingConnectivity(true)}><Settings2 size={15} />Edit connectivity</button></header>{currentTunnel.publications.map((publication) => <div className="publication-summary-item" key={publication.id}><div className="publication-summary-head"><code>{publication.hostname}</code><StatusBadge status={publication.status} /></div>{publication.routes.map((route) => <div className="publication-route" key={route.id}><code>{route.path}</code><span>→</span><code>{route.kind === "command_agent" ? "CFMan command agent" : route.serviceUrl}</code><div className="publication-route-actions"><button className="button button-secondary publication-verify-button" type="button" onClick={() => verify.mutate(route.id)} disabled={verify.isPending}><CheckCircle2 size={15} />{verify.isPending && verify.variables === route.id ? "Checking..." : "Verify endpoint"}</button><button className={`button button-secondary publication-waf-button ${route.wafEnabled && route.wafRuleId ? "waf-active" : ""}`} type="button" title={route.wafEnabled && !route.wafRuleId ? "WAF policy is pending application" : "Manage route WAF"} onClick={() => setWafRoute(route)}><ShieldCheck size={15} />WAF</button></div></div>)}</div>)}</section>}
+          {editingConnectivity ? <EditConnectivityPanel tunnel={currentTunnel} onClose={() => setEditingConnectivity(false)} /> : <section className="tunnel-drawer-section publication-summary"><header className="tunnel-section-heading"><div><h3>Published endpoints</h3><span>{currentTunnel.publications.length} hostname{currentTunnel.publications.length === 1 ? "" : "s"}</span></div><button className="button button-secondary" type="button" onClick={() => setEditingConnectivity(true)}><Settings2 size={15} />Edit connectivity</button></header>{currentTunnel.publications.map((publication) => <div className="publication-summary-item" key={publication.id}><div className="publication-summary-head"><code>{publication.hostname}</code>{isCfmanSelf && cfmanSelfPublication(currentTunnel, publicBaseUrl)?.id === publication.id && <><span className="cfman-self-tag" title="This tunnel is CFMan's own self-hosted target">CFMAN SELF</span><button className="button button-secondary button-small publication-reconcile-button" type="button" title="Check and fix CFMan's own remote-agent routes and merged WAF rule for this hostname" disabled={reconcileCfmanSelf.isPending} onClick={() => reconcileCfmanSelf.mutate()}><RefreshCw size={14} className={reconcileCfmanSelf.isPending ? "spin-icon" : undefined} />{reconcileCfmanSelf.isPending ? "Reconciling..." : "Reconcile"}</button></>}<StatusBadge status={publication.status} /></div>{publication.routes.map((route) => { const isSshRoute = route.serviceUrl.startsWith("ssh://"); return <div className="publication-route" key={route.id}><code>{route.path}</code><span>→</span><code>{route.kind === "command_agent" ? "CFMan command agent" : isSshRoute ? `SSH ${route.serviceUrl.replace("ssh://", "")}` : route.serviceUrl}</code><div className="publication-route-actions">{!isSshRoute && <button className="button button-secondary publication-verify-button" type="button" onClick={() => verify.mutate(route.id)} disabled={verify.isPending}><CheckCircle2 size={15} />{verify.isPending && verify.variables === route.id ? "Checking..." : "Verify endpoint"}</button>}<button className={`button button-secondary publication-waf-button ${route.wafEnabled && route.wafRuleId ? "waf-active" : ""}`} type="button" title={route.wafEnabled && !route.wafRuleId ? "WAF policy is pending application" : "Manage route WAF"} onClick={() => setWafRoute(route)}><ShieldCheck size={15} />WAF</button></div></div>; })}</div>)}</section>}
         </div>}
         {tab === "connect" && <div className="tunnel-drawer-tab tunnel-connect-tab">
-          <section className="tunnel-drawer-section rdp-section">
+          {drawerHostPlatform === "windows" && <section className="tunnel-drawer-section rdp-section">
             <header className="tunnel-section-heading"><div><h3>Remote desktop</h3><span>{currentTunnel.rdpUrl ? new URL(currentTunnel.rdpUrl).hostname : "Browser RDP gateway"}</span></div><StatusBadge status={currentTunnel.rdpStatus} /></header>
             <div className="rdp-connection-row">
               <div className="rdp-connection-item"><span className="rdp-connection-label">Target</span><code className="rdp-connection-value" title={currentTunnel.rdpTargetIp ? `${currentTunnel.rdpTargetIp}:3389` : "Awaiting Windows installer"}>{currentTunnel.rdpTargetIp ? `${currentTunnel.rdpTargetIp}:3389` : "Awaiting Windows installer"}</code></div>
@@ -214,7 +246,19 @@ export function TunnelDrawer({ tunnelId, tab, onTabChange, onClose, zIndex }: { 
               <div className="rdp-connection-action">{currentTunnel.rdpStatus === "ready" && currentTunnel.rdpUrl && <a className="button button-primary" href={currentTunnel.rdpUrl} target="_blank" rel="noreferrer"><MonitorUp size={16} />Remote desktop</a>}{currentTunnel.rdpTargetIp && currentTunnel.rdpStatus !== "ready" && <button className="button button-secondary" onClick={() => retryRdp.mutate()} disabled={retryRdp.isPending}><RefreshCw size={15} />{retryRdp.isPending ? "Retrying..." : "Retry RDP"}</button>}</div>
             </div>
             {currentTunnel.rdpLastError && <div className="inline-alert">{currentTunnel.rdpLastError}</div>}
-          </section>
+          </section>}
+          {drawerHostPlatform === "unix" && <section className="tunnel-drawer-section rdp-section ssh-section">
+            <header className="tunnel-section-heading"><div><h3>SSH</h3><span>{currentTunnel.sshUrl ? new URL(currentTunnel.sshUrl).hostname : "Browser SSH gateway"}</span></div><StatusBadge status={currentTunnel.sshStatus} /></header>
+            <div className="rdp-connection-row">
+              <div className="rdp-connection-item"><span className="rdp-connection-label">Target</span><code className="rdp-connection-value" title={currentTunnel.sshTargetIp ? `${currentTunnel.sshUsername ?? "root"}@${currentTunnel.sshTargetIp}:${currentTunnel.sshPort}` : "Awaiting Linux installer"}>{currentTunnel.sshTargetIp ? `${currentTunnel.sshUsername ?? "root"}@${currentTunnel.sshTargetIp}:${currentTunnel.sshPort}` : "Awaiting Linux installer"}</code></div>
+              <div className="rdp-connection-item"><span className="rdp-connection-label">Gateway</span><code className="rdp-connection-value" title={currentTunnel.sshUrl ?? "Not provisioned"}>{currentTunnel.sshUrl ?? "Not provisioned"}</code></div>
+              <div className="rdp-connection-action">{currentTunnel.sshStatus === "ready" && currentTunnel.sshUrl && <a className="button button-primary" href={currentTunnel.sshUrl} target="_blank" rel="noreferrer"><TerminalSquare size={16} />Browser SSH</a>}{currentTunnel.sshTargetIp && sshRoutePublication && currentTunnel.sshStatus !== "ready" && <button className="button button-secondary" onClick={() => retrySsh.mutate()} disabled={retrySsh.isPending}><RefreshCw size={15} />{retrySsh.isPending ? "Retrying..." : "Retry SSH"}</button>}</div>
+            </div>
+            {currentTunnel.sshTargetIp && !sshRoutePublication && <div className="inline-note"><TerminalSquare size={14} /><span>SSH was detected on this machine ({currentTunnel.sshUsername ?? "root"}@{currentTunnel.sshTargetIp}:{currentTunnel.sshPort}) but no ssh:// ingress route exists yet. Add a subdomain with an <code>ssh://{currentTunnel.sshTargetIp}:{currentTunnel.sshPort}</code> route to enable direct and browser SSH access.<div className="inline-note-action"><button className="button button-secondary button-small" type="button" onClick={() => setEditingConnectivity(true)}><Settings2 size={15} />Edit connectivity</button></div></span></div>}
+            {sshRoutePublication && <div className="inline-note"><TerminalSquare size={14} /><span>Direct route, using whatever SSH key or password is already authorized on the target machine:<div className="inline-note-code-row"><code>{sshDirectRouteCommand}</code><CopyButton value={sshDirectRouteCommand} label="Copy SSH command" iconOnly /></div></span></div>}
+            {currentTunnel.sshLastError && <div className="inline-alert">{currentTunnel.sshLastError}</div>}
+          </section>}
+          {!drawerHostPlatform && <div className="inline-note"><ShieldCheck size={15} />Remote desktop or SSH access appears here automatically once a Windows or Linux enrollment finishes installing.</div>}
           {currentTunnel.commandAgent ? <CommandExecutionPanel tunnel={currentTunnel} /> : <div className="inline-alert">This tunnel does not have a command agent endpoint.</div>}
         </div>}
       </div>}
@@ -515,6 +559,27 @@ const quickScriptDefaults = {
   unix: "printf 'Tunnel: %s\\n' \"$(hostname)\"\n"
 };
 
+// A name is required before Execute enables, but requiring the operator to
+// type one before they can run a quick one-off script means they see working
+// code with a disabled button. Deriving a default from the script's first
+// meaningful line - stripped of shebang/comment markers, cut at a word
+// boundary rather than mid-word - keeps the field populated (and still
+// editable) without ever blocking on it.
+function deriveInlineScriptName(content: string): string {
+  const firstLine = content
+    .split("\n")
+    .map((line) => line.trim())
+    .find((line) => line.length > 0);
+  if (!firstLine) return "";
+  const stripped = firstLine.replace(/^#!.*$/, "").replace(/^(#|\/\/)+\s*/, "").trim();
+  const candidate = stripped || firstLine;
+  const maxLength = 60;
+  if (candidate.length <= maxLength) return candidate;
+  const truncated = candidate.slice(0, maxLength);
+  const lastSpace = truncated.lastIndexOf(" ");
+  return `${lastSpace > 20 ? truncated.slice(0, lastSpace) : truncated}…`;
+}
+
 function ArgumentSummary({ data, loading, error }: { data: { arguments: ScriptArgument[]; availableVariables: ExecutionVariables } | undefined; loading: boolean; error: unknown }) {
   if (loading) return <div className="quiet-empty">Resolving available variables...</div>;
   if (error) return <div className="inline-alert">{error instanceof Error ? error.message : "Unable to resolve available variables"}</div>;
@@ -532,6 +597,7 @@ function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
   const [timeoutSeconds, setTimeoutSeconds] = useState(60);
   const [executionMode, setExecutionMode] = useState<"saved" | "inline">("saved");
   const [inlineName, setInlineName] = useState("");
+  const [inlineNameTouched, setInlineNameTouched] = useState(false);
   const [inlineContent, setInlineContent] = useState(quickScriptDefaults.windows);
   const [inlineLanguage, setInlineLanguage] = useState<"powershell" | "bash" | "sh">("powershell");
   const [historyPage, setHistoryPage] = useState(1);
@@ -549,8 +615,7 @@ function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
   const [quickArguments, setQuickArguments] = useState<import("../types").ScriptArgument[]>([]);
   const [executeConfirmOpen, setExecuteConfirmOpen] = useState(false);
   const [argumentBindings, setArgumentBindings] = useState<ArgumentBindings>({});
-  const activeEnrollment = [...(tunnel.enrollments ?? [])].filter((enrollment) => enrollment.isCurrent && ["ready", "installed"].includes(enrollment.status) && enrollment.unenrolledAt === null && enrollment.deletedAt === null).sort((left, right) => new Date(right.installedAt ?? right.createdAt).getTime() - new Date(left.installedAt ?? left.createdAt).getTime())[0];
-  const hostPlatform = activeEnrollment?.platform ?? null;
+  const hostPlatform = activeEnrollmentPlatform(tunnel);
   const historyPageSize = 10;
   const historyParams = new URLSearchParams({ page: String(historyPage), pageSize: String(historyPageSize) });
   if (historySearch.trim()) historyParams.set("search", historySearch.trim());
@@ -590,7 +655,8 @@ function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
     if (!hostPlatform) return;
     const language = hostPlatform === "windows" ? "powershell" : "bash";
     setInlineLanguage(language);
-    setInlineName("");
+    setInlineName(deriveInlineScriptName(quickScriptDefaults[hostPlatform]));
+    setInlineNameTouched(false);
     setInlineContent(quickScriptDefaults[hostPlatform]);
     setSelectedScriptId("");
     setSelectedVersionId("");
@@ -602,6 +668,10 @@ function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
     setHistoryTo("");
     setExpandedExecutionId(null);
   }, [hostPlatform, tunnel.id]);
+  useEffect(() => {
+    if (inlineNameTouched) return;
+    setInlineName(deriveInlineScriptName(inlineContent));
+  }, [inlineContent, inlineNameTouched]);
   useEffect(() => {
     setHistoryPage(1);
     setExpandedExecutionId(null);
@@ -720,7 +790,7 @@ function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
           {selectedScript && selectedScriptVersion && <div className="command-script-preview"><header><div><strong>Script preview</strong><span>{selectedScript.name} · Version {selectedScriptVersion.version}</span></div><code>{selectedScript.language}</code></header><ScriptEditor value={selectedScriptVersion.content} language={selectedScript.language} height="220px" readOnly /></div>}
         </div> : <div className="command-inline-script">
           <div className="command-inline-heading"><div><strong>Inline script</strong><span>Runs once and stays outside the library unless saved from history.</span></div></div>
-          <div className="command-inline-metadata"><label className="field"><span className="field-label">Name <FieldHelp text="Identifies this one-off execution in tunnel history. It is also used if you later save the execution to the script library." /></span><input value={inlineName} maxLength={120} onChange={(event) => setInlineName(event.target.value)} placeholder="One-off maintenance" /></label>{hostPlatform === "unix" ? <label className="field"><span className="field-label">Language</span><select aria-label="Inline script language" value={inlineLanguage} onChange={(event) => setInlineLanguage(event.target.value as typeof inlineLanguage)}><option value="bash">Bash</option><option value="sh">POSIX sh</option></select></label> : <label className="field"><span className="field-label">Language</span><input value="PowerShell" disabled /></label>}</div>
+          <div className="command-inline-metadata"><label className="field"><span className="field-label">Name <FieldHelp text="Identifies this one-off execution in tunnel history. It is also used if you later save the execution to the script library. Defaults from the script's first line until you edit it." /></span><input value={inlineName} maxLength={120} onChange={(event) => { setInlineName(event.target.value); setInlineNameTouched(true); }} placeholder="One-off maintenance" /></label>{hostPlatform === "unix" ? <label className="field"><span className="field-label">Language</span><select aria-label="Inline script language" value={inlineLanguage} onChange={(event) => setInlineLanguage(event.target.value as typeof inlineLanguage)}><option value="bash">Bash</option><option value="sh">POSIX sh</option></select></label> : <label className="field"><span className="field-label">Language</span><input value="PowerShell" disabled /></label>}</div>
           <ScriptEditor value={inlineContent} language={inlineLanguage} height="220px" onChange={setInlineContent} />
         </div>}
         <div className="command-execution-controls"><ArgumentSummary data={resolvedVariableData} loading={variablesLoading} error={variablesError} /><button className="button button-primary command-execute-button" type="button" disabled={!canExecute} onClick={() => { setArgumentBindings({}); setExecuteConfirmOpen(true); }}><TerminalSquare size={15} />Execute script</button></div>
@@ -793,10 +863,10 @@ function EditConnectivityPanel({ tunnel, onClose }: { tunnel: Tunnel; onClose: (
   };
   return <section className="tunnel-drawer-section connectivity-inline-editor">
     <header className="tunnel-section-heading"><div><h3>Edit connectivity</h3><span>{tunnel.displayName} · update published subdomains and ingress paths</span></div><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button></header>
-    {error && <div className="form-error">{error}</div>}
     <div className="connectivity-scope"><div><span>Cloudflare account</span><strong>{tunnel.accountName}</strong></div><div><span>DNS zone</span><strong>{tunnel.zoneName}</strong></div><div><span>Tunnel</span><strong className="mono">{tunnel.cfTunnelId ?? "Pending installation"}</strong></div></div>
     <ConnectivityEditor tunnelId={tunnel.tunnelCode} zoneName={tunnel.zoneName} publications={publications} onChange={setPublications} />
     <div className="form-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button><button className="button button-primary" type="button" onClick={save} disabled={mutation.isPending}>{mutation.isPending ? "Updating..." : "Save connectivity"}</button></div>
+    {error && <div className="form-error">{error}</div>}
   </section>;
 }
 
@@ -807,9 +877,18 @@ function RouteWafDialog({ tunnel, route, onClose }: { tunnel: Tunnel | null; rou
   const [error, setError] = useState("");
   const { data, isLoading } = useQuery({
     queryKey: ["route-waf", tunnel?.id, route?.id],
-    queryFn: () => api.get<{ waf: { enabled: boolean; allowedIps: string[]; defaulted: boolean; cloudflareManIps: string[]; currentIp: string | null } }>(`/api/tunnels/${tunnel!.id}/routes/${route!.id}/waf`),
+    queryFn: () => api.get<{ waf: { enabled: boolean; allowedIps: string[]; defaulted: boolean; cloudflareManIps: string[]; currentIp: string | null; mandatory: boolean; remoteAgentPath: boolean; remoteAgentWarning: string | null; ruleId: string | null } }>(`/api/tunnels/${tunnel!.id}/routes/${route!.id}/waf`),
     enabled: Boolean(tunnel && route)
   });
+  const mandatory = data?.waf.mandatory ?? false;
+  const remoteAgentPath = data?.waf.remoteAgentPath ?? false;
+  // Cloudflare folds every WAF-protected route in the zone into a shared
+  // pool of custom rules (see CloudflareClient.configureZoneWaf) rather than
+  // one rule per route, so this deep link goes straight to whichever pool
+  // rule currently contains this route instead of a generic rules list.
+  const wafRuleUrl = data?.waf.ruleId && tunnel?.cfAccountId
+    ? `https://dash.cloudflare.com/${encodeURIComponent(tunnel.cfAccountId)}/${encodeURIComponent(tunnel.zoneName)}/security/security-rules/custom-rules/${encodeURIComponent(data.waf.ruleId)}`
+    : null;
   useEffect(() => {
     if (!route) return;
     setEnabled(route.wafEnabled);
@@ -822,17 +901,18 @@ function RouteWafDialog({ tunnel, route, onClose }: { tunnel: Tunnel | null; rou
     setAllowedIps(data.waf.allowedIps.join("\n"));
   }, [data]);
   const mutation = useMutation({
-    mutationFn: () => api.patch<{ waf: { enabled: boolean; allowedIps: string[] } }>(`/api/tunnels/${tunnel!.id}/routes/${route!.id}/waf`, {
-      enabled,
+    mutationFn: () => api.patch<{ waf: { enabled: boolean; allowedIps: string[] }; warning: string | null }>(`/api/tunnels/${tunnel!.id}/routes/${route!.id}/waf`, {
+      enabled: mandatory ? true : enabled,
       allowedIps: allowedIps.split(/[\n,]+/).map((value) => value.trim()).filter(Boolean)
     }),
-    onSuccess: async () => {
+    onSuccess: async (result) => {
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnel?.id] }),
         queryClient.invalidateQueries({ queryKey: ["tunnels"] }),
         queryClient.invalidateQueries({ queryKey: ["route-waf", tunnel?.id, route?.id] })
       ]);
-      toast.success("Route WAF updated");
+      if (result.warning) toast.warning(result.warning);
+      else toast.success("Route WAF updated");
       onClose();
     },
     onError: (requestError) => setError(requestError instanceof Error ? requestError.message : "Unable to update route WAF")
@@ -853,13 +933,17 @@ function RouteWafDialog({ tunnel, route, onClose }: { tunnel: Tunnel | null; rou
     {route && <div className="route-waf-dialog">
       {error && <div className="form-error">{error}</div>}
       {isLoading ? <div className="quiet-empty">Loading WAF policy...</div> : <>
-        <label className="checkbox-field"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /><span><strong>Allow-list protection</strong><small>When enabled, Cloudflare blocks every source IP except the addresses below.</small></span></label>
-        <label className="field"><span className="field-label">Allowed CFMan IPs or CIDRs <FieldHelp text="Use one public IPv4, IPv6, or CIDR per line. Leave the list unchanged to use the server's configured CFMan source IP. Never use 0.0.0.0/0 unless this route is intentionally public." /></span><textarea value={allowedIps} onChange={(event) => setAllowedIps(event.target.value)} rows={4} placeholder="203.0.113.10/32" disabled={!enabled} /></label>
+        {mandatory
+          ? <div className="inline-alert"><ShieldAlert size={15} />This is the command agent route - its remote command execution endpoint - so allow-list protection always stays on and can't be disabled here.</div>
+          : <label className="checkbox-field"><input type="checkbox" checked={enabled} onChange={(event) => setEnabled(event.target.checked)} /><span><strong>Allow-list protection</strong><small>When enabled, Cloudflare blocks every source IP except the addresses below.</small></span></label>}
+        {(mandatory || enabled) && wafRuleUrl && <a className="mono detail-link route-waf-rule-link" href={wafRuleUrl} target="_blank" rel="noreferrer"><ExternalLink size={13} />Open the Cloudflare custom rule protecting this route</a>}
+        {remoteAgentPath && (mandatory || enabled) && <div className="inline-alert"><ShieldAlert size={15} />{data?.waf.remoteAgentWarning}</div>}
+        <label className="field"><span className="field-label">Allowed CFMan IPs or CIDRs <FieldHelp text="Use one public IPv4, IPv6, or CIDR per line. Leave the list unchanged to use the server's configured CFMan source IP. Never use 0.0.0.0/0 unless this route is intentionally public." /></span><textarea value={allowedIps} onChange={(event) => setAllowedIps(event.target.value)} rows={4} placeholder="203.0.113.10/32" disabled={!mandatory && !enabled} /></label>
         <div className="route-waf-quick-add">
           <button className="button button-secondary" type="button" onClick={addCloudflareManOrigin} disabled={!missingCloudflareManIps.length}><ShieldCheck size={15} />Add CFMan origin{cloudflareManIps.length ? ` (${cloudflareManIps.join(", ")})` : ""}</button>
           <button className="button button-secondary" type="button" onClick={addMyIp} disabled={!myIp || currentIps.includes(myIp)}><Globe2 size={15} />Add my current IP{myIp ? ` (${myIp})` : ""}</button>
         </div>
-        {data?.waf.defaulted && <div className="inline-alert"><ShieldCheck size={15} />The addresses were resolved from CFMAN_WAF_ALLOWED_IPS or the CFMan server's public IP.</div>}
+        {data?.waf.defaulted && <div className="inline-note"><ShieldCheck size={15} />The addresses were resolved from CFMAN_WAF_ALLOWED_IPS or the CFMan server's public IP.</div>}
       </>}
       <div className="form-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button><button className="button button-primary" type="button" onClick={() => mutation.mutate()} disabled={isLoading || mutation.isPending}>{mutation.isPending ? "Updating..." : "Save WAF policy"}</button></div>
     </div>}

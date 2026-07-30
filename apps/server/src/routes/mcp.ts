@@ -84,7 +84,8 @@ const routeSchema = z.object({
   serviceUrl: z.string().optional().describe("HTTP/HTTPS origin; omit or use an empty string for command_agent routes")
 });
 const publicationSchema = z.object({
-  suffix: z.string().default("").describe("Subdomain suffix; empty creates the tunnel's primary hostname"),
+  suffix: z.string().default("").describe("Subdomain suffix; empty creates the tunnel's primary hostname. Ignored when customLabel is set."),
+  customLabel: z.string().optional().describe("Full subdomain label used verbatim instead of the tunnel-id-derived suffix, e.g. \"cfman\" for cfman.example.com"),
   routes: z.array(routeSchema).min(1)
 });
 const mcpNameFilterFields = {
@@ -311,6 +312,9 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     const { tunnelId, routeId, ...body } = args;
     return callApi(app, token, "PATCH", `/api/tunnels/${tunnelId}/routes/${routeId}/waf`, body);
   });
+  registerApiTool(server, app, token, "cfman_reconcile_cfman_self_waf", "For a tunnel that is CFMan's own self-hosted target, backfill any missing remote-agent routes and rebuild the zone's merged WAF rule; reports what was created and any outstanding warning. Fails with 409 if the tunnel is not CFMan's own.", {
+    tunnelId: z.string().uuid()
+  }, (args) => callApi(app, token, "POST", `/api/tunnels/${args.tunnelId}/reconcile-cfman-self`));
   registerApiTool(server, app, token, "cfman_create_enrollment", "Issue a tunnel enrollment URL and any cleanup commands for an existing connected enrollment.", {
     tunnelId: z.string().uuid(),
     expiresInHours: z.number().int().min(1).max(168).default(24)
@@ -348,6 +352,9 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
   registerApiTool(server, app, token, "cfman_retry_rdp", "Retry browser RDP provisioning for a tunnel with a reported Windows target.", {
     tunnelId: z.string().uuid()
   }, (args) => callApi(app, token, "POST", `/api/tunnels/${args.tunnelId}/rdp/retry`));
+  registerApiTool(server, app, token, "cfman_retry_ssh", "Retry browser SSH provisioning for a tunnel with a reported Linux target.", {
+    tunnelId: z.string().uuid()
+  }, (args) => callApi(app, token, "POST", `/api/tunnels/${args.tunnelId}/ssh/retry`));
   registerApiTool(server, app, token, "cfman_execute_script", "Schedule a saved script version on the tunnel's command agent. Returns a stable execution/task identifier and scheduled status; poll execution history or logs for running and terminal results.", {
     tunnelId: z.string().uuid(),
     scriptVersionId: z.string().uuid(),

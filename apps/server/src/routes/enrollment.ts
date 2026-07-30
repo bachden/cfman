@@ -8,6 +8,7 @@ import { writeAudit } from "../lib/audit.js";
 import { pool, withTransaction } from "../lib/database.js";
 import { deprovisionTunnel, tunnelHasActiveCfTunnel, provisionTunnel, withTunnelCloudflareLock } from "../lib/provisioning.js";
 import { provisionBrowserRdp } from "../lib/rdp.js";
+import { provisionBrowserSsh } from "../lib/ssh.js";
 import { ensureCommandAgentWafAllowsCloudflareMan } from "../lib/route-waf.js";
 import { decryptSecret, hashToken } from "../lib/security.js";
 import { scheduleTunnelVerification, verifyTunnelEndpoints } from "../lib/tunnel-verification.js";
@@ -41,6 +42,11 @@ const reportSchema = z.object({
   rdpTargetIp: z.string().refine((value) => isIP(value) === 4, "RDP target must be an IPv4 address").optional(),
   rdpPort: z.number().int().min(1).max(65535).optional(),
   rdpError: z.string().max(2000).optional(),
+  sshEnabled: z.boolean().optional(),
+  sshTargetIp: z.string().refine((value) => isIP(value) === 4, "SSH target must be an IPv4 address").optional(),
+  sshPort: z.number().int().min(1).max(65535).optional(),
+  sshUsername: z.string().max(100).optional(),
+  sshError: z.string().max(2000).optional(),
   agentReady: z.boolean().optional(),
   agentError: z.string().max(2000).optional(),
   osName: z.string().max(200).optional(),
@@ -339,6 +345,7 @@ import os
 import queue
 import signal
 import subprocess
+import sys
 import threading
 import time
 import urllib.request
@@ -347,6 +354,7 @@ from collections import deque
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 TOKEN = "${agentToken}"
+USER_AGENT = "cfman-command-agent/1.0"
 MAX_SCRIPT_BYTES = 65536
 PORT = 47831
 TASK_DIRECTORY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "command-executions")
@@ -372,17 +380,25 @@ def write_task_state(task, status, process_id=None):
 
 def post_json(url, payload, timeout=10, attempts=3):
     if not isinstance(url, str) or not url:
-        return
+        return False
     body = json.dumps(payload).encode("utf-8")
+    last_error = None
     for attempt in range(attempts):
         try:
-            callback = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"}, method="POST")
+            callback = urllib.request.Request(url, data=body, headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "User-Agent": USER_AGENT
+            }, method="POST")
             with urllib.request.urlopen(callback, timeout=timeout) as response:
                 response.read()
-            return
-        except Exception:
+            return True
+        except Exception as error:
+            last_error = error
             if attempt + 1 < attempts:
                 time.sleep(1 if timeout <= 5 else 2)
+    print("Command agent callback failed: {}".format(last_error), file=sys.stderr, flush=True)
+    return False
 
 def run_execution(request_payload, task):
     started = time.monotonic()
@@ -975,13 +991,16 @@ if [ "$EXISTING_ENROLLMENT" -eq 1 ]; then
         if [ -n "$CLEANUP_OUTPUT" ]; then log_message "info" "cleanup" "$CLEANUP_OUTPUT"; fi
       fi
       if command -v systemctl >/dev/null 2>&1; then
+        systemctl disable --now cfman-command-agent.service >/dev/null 2>&1 || true
         systemctl disable --now cloudflare-man-command-agent.service >/dev/null 2>&1 || true
-        rm -f /etc/systemd/system/cloudflare-man-command-agent.service
+        rm -f /etc/systemd/system/cfman-command-agent.service /etc/systemd/system/cloudflare-man-command-agent.service
         systemctl daemon-reload >/dev/null 2>&1 || true
       fi
       if command -v launchctl >/dev/null 2>&1; then
+        launchctl bootout system/cfman.command-agent >/dev/null 2>&1 || true
+        launchctl bootout system/dev.cfman.command-agent >/dev/null 2>&1 || true
         launchctl bootout system/dev.cloudflare-man.command-agent >/dev/null 2>&1 || true
-        rm -f /Library/LaunchDaemons/dev.cloudflare-man.command-agent.plist
+        rm -f /Library/LaunchDaemons/cfman.command-agent.plist /Library/LaunchDaemons/dev.cfman.command-agent.plist /Library/LaunchDaemons/dev.cloudflare-man.command-agent.plist
       fi
       pkill -f "cloudflare-man/command-agent.py" >/dev/null 2>&1 || true
       rm -rf "$STATE_DIR"
@@ -1045,7 +1064,8 @@ fi
 if [ -n "$SERVICE_OUTPUT" ]; then log_message "info" "service" "$SERVICE_OUTPUT"; fi
 if [ "$OS_NAME" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
   mkdir -p /etc/systemd/system/cloudflared.service.d
-  cat > /etc/systemd/system/cloudflared.service.d/10-cloudflare-man-restart.conf <<EOF
+  rm -f /etc/systemd/system/cloudflared.service.d/10-cloudflare-man-restart.conf
+  cat > /etc/systemd/system/cloudflared.service.d/10-cfman-restart.conf <<EOF
 [Unit]
 StartLimitIntervalSec=0
 [Service]
@@ -1086,9 +1106,9 @@ ${unixAgentProgram(agentToken)}
 PYTHON
 chmod 700 "$AGENT_SCRIPT"
 if [ "$OS_NAME" = "linux" ] && command -v systemctl >/dev/null 2>&1; then
-  cat > /etc/systemd/system/cloudflare-man-command-agent.service <<EOF
+  cat > /etc/systemd/system/cfman-command-agent.service <<EOF
 [Unit]
-Description=cloudflare-man command agent
+Description=CFMan command agent
 After=network.target
 StartLimitIntervalSec=0
 [Service]
@@ -1099,23 +1119,28 @@ RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
+  systemctl disable --now cloudflare-man-command-agent.service >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/cloudflare-man-command-agent.service
   systemctl daemon-reload
-  systemctl enable --now cloudflare-man-command-agent.service
+  systemctl enable --now cfman-command-agent.service
 elif [ "$OS_NAME" = "darwin" ] && command -v launchctl >/dev/null 2>&1; then
-  cat > /Library/LaunchDaemons/dev.cloudflare-man.command-agent.plist <<EOF
+  cat > /Library/LaunchDaemons/cfman.command-agent.plist <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
-<key>Label</key><string>dev.cloudflare-man.command-agent</string>
+<key>Label</key><string>cfman.command-agent</string>
 <key>ProgramArguments</key><array><string>$PYTHON_BIN</string><string>$AGENT_SCRIPT</string></array>
 <key>RunAtLoad</key><true/><key>KeepAlive</key><true/>
-<key>StandardOutPath</key><string>/var/log/cloudflare-man-command-agent.log</string>
-<key>StandardErrorPath</key><string>/var/log/cloudflare-man-command-agent.error.log</string>
+<key>StandardOutPath</key><string>/var/log/cfman-command-agent.log</string>
+<key>StandardErrorPath</key><string>/var/log/cfman-command-agent.error.log</string>
 </dict></plist>
 EOF
   launchctl bootout system/dev.cloudflare-man.command-agent >/dev/null 2>&1 || true
-  launchctl bootstrap system /Library/LaunchDaemons/dev.cloudflare-man.command-agent.plist
-  launchctl enable system/dev.cloudflare-man.command-agent
+  launchctl bootout system/dev.cfman.command-agent >/dev/null 2>&1 || true
+  rm -f /Library/LaunchDaemons/dev.cloudflare-man.command-agent.plist /Library/LaunchDaemons/dev.cfman.command-agent.plist
+  launchctl bootout system/cfman.command-agent >/dev/null 2>&1 || true
+  launchctl bootstrap system /Library/LaunchDaemons/cfman.command-agent.plist
+  launchctl enable system/cfman.command-agent
 else
   log_message "error" "command-agent" "A supported service manager (systemd or launchd) is required"
   exit 1
@@ -1130,8 +1155,48 @@ if [ "$AGENT_READY" != true ]; then
   exit 1
 fi
 log_message "info" "command-agent" "Local command agent is ready"
+
+SSH_ENABLED=false
+SSH_TARGET_IP=""
+SSH_USERNAME=""
+SSH_ERROR=""
+if [ "$OS_NAME" = "linux" ]; then
+  log_message "info" "ssh" "Checking SSH access"
+  SSH_USERNAME="\${SUDO_USER:-root}"
+  if command -v sshd >/dev/null 2>&1 || [ -x /usr/sbin/sshd ]; then
+    SSH_TARGET_IP="$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \\([0-9.]*\\).*/\\1/p' | head -n 1)"
+    if [ -z "$SSH_TARGET_IP" ]; then SSH_TARGET_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"; fi
+    if [ -z "$SSH_TARGET_IP" ]; then
+      SSH_ERROR="Unable to determine the tunnel LAN IPv4 address."
+    else
+      SSH_LISTENER_READY=false
+      for attempt in 1 2 3 4 5; do
+        if { command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ':22[[:space:]]'; } \\
+          || { command -v netstat >/dev/null 2>&1 && netstat -ltn 2>/dev/null | grep -q ':22[[:space:]]'; }; then
+          SSH_LISTENER_READY=true
+          break
+        fi
+        sleep 1
+      done
+      if [ "$SSH_LISTENER_READY" != true ]; then
+        SSH_ERROR="sshd is not listening on port 22"
+      else
+        SSH_ENABLED=true
+        log_message "info" "ssh" "SSH is listening on $SSH_TARGET_IP:22 for user $SSH_USERNAME"
+      fi
+    fi
+  else
+    SSH_ERROR="sshd is not installed on this machine"
+  fi
+  if [ -n "$SSH_ERROR" ]; then log_message "warn" "ssh" "$SSH_ERROR"; fi
+fi
+
 log_message "info" "report" "Reporting successful installation"
-curl --silent --show-error --fail --retry 3 --retry-all-errors -X POST "$REPORT_URL" -H 'Content-Type: application/json' --data "{\\"token\\":\\"$ENROLLMENT_TOKEN\\",\\"scriptId\\":\\"$SCRIPT_ID\\",\\"status\\":\\"installed\\",\\"platform\\":\\"unix\\",\\"version\\":\\"$VERSION\\",\\"agentReady\\":$AGENT_READY,\\"osName\\":\\"$OS_DISPLAY_NAME\\",\\"osVersion\\":\\"$OS_VERSION\\",\\"osBuild\\":\\"$OS_BUILD\\",\\"architecture\\":\\"$MACHINE_ARCH\\",\\"machineName\\":\\"$MACHINE_NAME\\"}" >/dev/null
+REPORT_FIELDS="\\"token\\":\\"$ENROLLMENT_TOKEN\\",\\"scriptId\\":\\"$SCRIPT_ID\\",\\"status\\":\\"installed\\",\\"platform\\":\\"unix\\",\\"version\\":\\"$VERSION\\",\\"agentReady\\":$AGENT_READY,\\"osName\\":\\"$OS_DISPLAY_NAME\\",\\"osVersion\\":\\"$OS_VERSION\\",\\"osBuild\\":\\"$OS_BUILD\\",\\"architecture\\":\\"$MACHINE_ARCH\\",\\"machineName\\":\\"$MACHINE_NAME\\",\\"sshEnabled\\":$SSH_ENABLED,\\"sshPort\\":22"
+if [ -n "$SSH_TARGET_IP" ]; then REPORT_FIELDS="$REPORT_FIELDS,\\"sshTargetIp\\":\\"$SSH_TARGET_IP\\""; fi
+if [ -n "$SSH_USERNAME" ]; then REPORT_FIELDS="$REPORT_FIELDS,\\"sshUsername\\":\\"$SSH_USERNAME\\""; fi
+if [ -n "$SSH_ERROR" ]; then REPORT_FIELDS="$REPORT_FIELDS,\\"sshError\\":\\"$SSH_ERROR\\""; fi
+curl --silent --show-error --fail --retry 3 --retry-all-errors -X POST "$REPORT_URL" -H 'Content-Type: application/json' --data "{$REPORT_FIELDS}" >/dev/null
 REPORT_SENT=1
 printf '%s' "$ASSIGNED_HOSTNAME" > "$HOSTNAME_FILE"
 chmod 600 "$HOSTNAME_FILE"
@@ -1274,8 +1339,10 @@ if ($existingEnrollment) {
   # cloudflared's own uninstall does not remove this key, and a leftover key makes
   # the next "service install" fail with "Cannot install event logger".
   Remove-Item -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\Cloudflared" -Recurse -Force -ErrorAction SilentlyContinue
-  Stop-ScheduledTask -TaskName "CloudflareManCommandAgent" -ErrorAction SilentlyContinue
-  Unregister-ScheduledTask -TaskName "CloudflareManCommandAgent" -Confirm:$false -ErrorAction SilentlyContinue
+  foreach ($taskName in @("CFManCommandAgent", "CloudflareManCommandAgent")) {
+    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+  }
   Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -like "*cloudflare-man*command-agent.ps1*" } |
     ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName Terminate -ErrorAction SilentlyContinue | Out-Null }
@@ -1384,7 +1451,7 @@ try {
 ${windowsAgentProgram(agentToken)}
 '@
   Set-Content -Path $agentScript -Value $agentProgram -Encoding UTF8
-  $taskName = "CloudflareManCommandAgent"
+  $taskName = "CFManCommandAgent"
   $taskAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \`"$agentScript\`""
   $taskTrigger = New-ScheduledTaskTrigger -AtStartup
   $taskPrincipal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
@@ -1494,13 +1561,16 @@ if command -v cloudflared >/dev/null 2>&1; then
   cloudflared service uninstall >/dev/null 2>&1 || true
 fi
 if command -v systemctl >/dev/null 2>&1; then
+  systemctl disable --now cfman-command-agent.service >/dev/null 2>&1 || true
   systemctl disable --now cloudflare-man-command-agent.service >/dev/null 2>&1 || true
-  rm -f /etc/systemd/system/cloudflare-man-command-agent.service
+  rm -f /etc/systemd/system/cfman-command-agent.service /etc/systemd/system/cloudflare-man-command-agent.service
   systemctl daemon-reload >/dev/null 2>&1 || true
 fi
 if command -v launchctl >/dev/null 2>&1; then
+  launchctl bootout system/cfman.command-agent >/dev/null 2>&1 || true
+  launchctl bootout system/dev.cfman.command-agent >/dev/null 2>&1 || true
   launchctl bootout system/dev.cloudflare-man.command-agent >/dev/null 2>&1 || true
-  rm -f /Library/LaunchDaemons/dev.cloudflare-man.command-agent.plist
+  rm -f /Library/LaunchDaemons/cfman.command-agent.plist /Library/LaunchDaemons/dev.cfman.command-agent.plist /Library/LaunchDaemons/dev.cloudflare-man.command-agent.plist
 fi
 rm -rf "/var/lib/cloudflare-man" "/Library/Application Support/cloudflare-man"
 curl --silent --show-error --fail --retry 3 --retry-all-errors -X POST "$REPORT_URL" \\
@@ -1577,8 +1647,10 @@ try {
       }
     }
   }
-  Stop-ScheduledTask -TaskName "CloudflareManCommandAgent" -ErrorAction SilentlyContinue
-  Unregister-ScheduledTask -TaskName "CloudflareManCommandAgent" -Confirm:$false -ErrorAction SilentlyContinue
+  foreach ($taskName in @("CFManCommandAgent", "CloudflareManCommandAgent")) {
+    Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
+  }
   Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -like "*cloudflare-man*command-agent.ps1*" } |
     ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName Terminate -ErrorAction SilentlyContinue | Out-Null }
@@ -2203,7 +2275,16 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
            ELSE 'failed'
          END,
          rdp_target_ip = COALESCE($8::inet, rdp_target_ip), rdp_port = COALESCE($9, rdp_port),
-         rdp_last_error = $10, updated_at = now()
+         rdp_last_error = $10,
+         ssh_status = CASE
+           WHEN NOT $5 THEN ssh_status
+           WHEN $6 <> 'unix' THEN 'disabled'
+           WHEN $12 THEN 'enabled'
+           ELSE 'failed'
+         END,
+         ssh_target_ip = COALESCE($13::inet, ssh_target_ip), ssh_port = COALESCE($14, ssh_port),
+         ssh_username = COALESCE($15, ssh_username), ssh_last_error = $16,
+         updated_at = now()
          WHERE id = $11`,
         [
           success ? (isMock ? "active" : "connector_online") : retryablePreflightFailure ? "url_issued" : "failed",
@@ -2216,7 +2297,12 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
           body.rdpTargetIp ?? null,
           body.rdpPort ?? null,
           body.rdpError ?? null,
-          enrollment.tunnel_id
+          enrollment.tunnel_id,
+          body.sshEnabled ?? false,
+          body.sshTargetIp ?? null,
+          body.sshPort ?? null,
+          body.sshUsername ?? null,
+          body.sshError ?? null
         ]
       );
     });
@@ -2226,12 +2312,20 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
         ? await provisionBrowserRdp(enrollment.tunnel_id)
         : { ready: false, error: body.rdpError ?? "Windows Remote Desktop was not enabled" };
     }
+    let ssh: Awaited<ReturnType<typeof provisionBrowserSsh>> | undefined;
+    if (success && enrollment.platform === "unix") {
+      if (body.sshEnabled && body.sshTargetIp) {
+        ssh = await provisionBrowserSsh(enrollment.tunnel_id);
+      } else {
+        ssh = { ready: false, error: body.sshError ?? "SSH was not detected as enabled on this machine" };
+      }
+    }
     if (scheduleVerification) {
       scheduleTunnelVerification(enrollment.tunnel_id);
       if (accountId) void synchronizeAccount(accountId).catch(() => undefined);
       void ensureCommandAgentWafAllowsCloudflareMan(enrollment.tunnel_id).catch(() => undefined);
     }
-    return { success: true, stateApplied: true, ...(rdp ? { rdp } : {}) };
+    return { success: true, stateApplied: true, ...(rdp ? { rdp } : {}), ...(ssh ? { ssh } : {}) };
   });
 
   const diagnoseReportSchema = z.object({

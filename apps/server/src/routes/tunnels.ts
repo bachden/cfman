@@ -10,8 +10,9 @@ import { pool, withTransaction } from "../lib/database.js";
 import { appendNameFilter, nameFilterFields, validateNameFilter } from "../lib/name-filter.js";
 import { decryptSecret, encryptSecret } from "../lib/security.js";
 import { reconfigureTunnel } from "../lib/provisioning.js";
-import { defaultWafAllowedIps, isValidIpOrCidr, resolveWafAllowedIps } from "../lib/route-waf.js";
+import { CFMAN_REMOTE_AGENT_WAF_WARNING, cloudflareManPublicHostname, defaultWafAllowedIps, ensureCloudflareManRemoteAgentRoutes, isCfmanRemoteAgentPath, isCloudflareManPublicHostname, isValidIpOrCidr, reconcileZoneWaf, resolveWafAllowedIps } from "../lib/route-waf.js";
 import { provisionBrowserRdp } from "../lib/rdp.js";
+import { provisionBrowserSsh, syncBrowserSsh } from "../lib/ssh.js";
 import { verifyTunnelEndpoints } from "../lib/tunnel-verification.js";
 import { synchronizeAccount } from "./accounts.js";
 import { createOpaqueToken, hashToken } from "../lib/security.js";
@@ -19,8 +20,8 @@ import { selectZone, slugifyLabel } from "../lib/tunnels.js";
 import { automaticUnenrollmentScript, cancelCommandExecution, createCommandExecution, executeTunnelScript, getCommandAgentConfig, ensureCommandAgentToken, COMMAND_AGENT_SERVICE_URL } from "../lib/command-agent.js";
 import { argumentBindingsSchema, applyScriptArguments, describeArgumentValueSources, executionVariablesSchema, resolveArgumentValues, resolveAvailableVariablesForTunnel, scriptArgumentsSchema, type ExecutionVariables, type ScriptArgument } from "../lib/execution-variables.js";
 
-const serviceUrlSchema = z.string().url().refine((value) => value.startsWith("http://") || value.startsWith("https://"), {
-  message: "Service URL must use HTTP or HTTPS"
+const serviceUrlSchema = z.string().url().refine((value) => value.startsWith("http://") || value.startsWith("https://") || value.startsWith("ssh://"), {
+  message: "Service URL must use HTTP, HTTPS, or SSH"
 });
 const optionalServiceUrlSchema = z.preprocess(
   (value) => typeof value === "string" && value.trim() === "" ? undefined : value,
@@ -55,6 +56,7 @@ const publicationSchema = z.object({
 
 const publicationsSchema = z.array(publicationSchema).min(1).max(20).superRefine((publications, context) => {
   let commandAgentRoutes = 0;
+  let sshRoutes = 0;
   const labelKeys = new Set<string>();
   publications.forEach((publication, publicationIndex) => {
     const labelKey = publication.customLabel ? `custom:${publication.customLabel}` : `suffix:${publication.suffix}`;
@@ -65,6 +67,7 @@ const publicationsSchema = z.array(publicationSchema).min(1).max(20).superRefine
     const paths = new Set<string>();
     publication.routes.forEach((route, routeIndex) => {
       if (route.kind === "command_agent") commandAgentRoutes += 1;
+      if (route.kind === "service" && route.serviceUrl?.startsWith("ssh://")) sshRoutes += 1;
       if (paths.has(route.path)) {
         context.addIssue({ code: "custom", path: [publicationIndex, "routes", routeIndex, "path"], message: "Each path must be unique within its subdomain" });
       }
@@ -73,6 +76,9 @@ const publicationsSchema = z.array(publicationSchema).min(1).max(20).superRefine
   });
   if (commandAgentRoutes > 1) {
     context.addIssue({ code: "custom", message: "Only one command agent route can be configured per tunnel" });
+  }
+  if (sshRoutes > 1) {
+    context.addIssue({ code: "custom", message: "Only one ssh:// route can be configured per tunnel" });
   }
 });
 
@@ -179,6 +185,7 @@ type TunnelDeleteContext = {
   accountRowId: string;
   cfAccountId: string | null;
   apiTokenEncrypted: string | null;
+  zoneId: string;
   cfZoneId: string | null;
   activeEnrollmentCount: number;
   activeEnrollmentPlatforms: string | null;
@@ -231,6 +238,7 @@ async function loadTunnelDeleteContext(executor: TunnelDeleteExecutor, tunnelId:
     `SELECT s.id, s.display_name AS "displayName", s.tunnel_code AS "tunnelCode",
             s.cf_tunnel_id AS "cfTunnelId", s.cf_tunnel_status AS "cfTunnelStatus",
             s.rdp_route_id AS "rdpRouteId", s.rdp_target_id AS "rdpTargetId", s.rdp_vnet_id AS "rdpVnetId",
+            s.zone_id AS "zoneId",
             a.id AS "accountRowId", a.provider_mode AS "providerMode", a.cf_account_id AS "cfAccountId",
             a.api_token_encrypted AS "apiTokenEncrypted", z.cf_zone_id AS "cfZoneId",
             (SELECT count(*)::int FROM enrollments e
@@ -326,16 +334,10 @@ async function cleanupTunnelResources(context: TunnelDeleteContext): Promise<voi
     context.apiTokenEncrypted ? decryptSecret(context.apiTokenEncrypted) : "mock",
     context.providerMode
   );
-  for (const publication of context.publications) {
-    if (!publication.wafRuleId || !context.cfZoneId) continue;
-    await client.configureRouteWaf({
-      zoneId: context.cfZoneId,
-      hostname: publication.hostname,
-      path: publication.path,
-      enabled: false,
-      allowedIps: [],
-      rulesetId: publication.wafRulesetId
-    });
+  if (context.publications.some((publication) => publication.wafRuleId)) {
+    // Excludes this tunnel's own routes so the zone's merged WAF rule is
+    // rebuilt without them, instead of disabling each route individually.
+    await reconcileZoneWaf(client, context.zoneId, context.cfZoneId, context.providerMode, { excludeTunnelId: context.id });
   }
   const deletedDnsRecords = new Set<string>();
   for (const publication of context.publications) {
@@ -602,7 +604,10 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
              latest_enrollment.status AS "latestEnrollmentStatus",
              s.rdp_status AS "rdpStatus", s.rdp_target_ip::text AS "rdpTargetIp",
              s.rdp_url AS "rdpUrl", s.rdp_last_error AS "rdpLastError",
+             s.ssh_status AS "sshStatus", s.ssh_target_ip::text AS "sshTargetIp", s.ssh_port AS "sshPort",
+             s.ssh_username AS "sshUsername", s.ssh_url AS "sshUrl", s.ssh_last_error AS "sshLastError",
              s.last_connected_at AS "lastConnectedAt", s.last_verified_at AS "lastVerifiedAt", s.last_error AS "lastError",
+             s.waf_warning AS "wafWarning",
              s.created_at AS "createdAt", a.id AS "accountId", a.cf_account_id AS "cfAccountId", a.name AS "accountName", z.id AS "zoneId", z.name AS "zoneName",
              ${publicationsJson} AS publications,
              ${commandAgentJson} AS "commandAgent",
@@ -635,7 +640,10 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
              latest_enrollment.status AS "latestEnrollmentStatus",
              s.rdp_status AS "rdpStatus", s.rdp_target_ip::text AS "rdpTargetIp",
              s.rdp_url AS "rdpUrl", s.rdp_last_error AS "rdpLastError",
+             s.ssh_status AS "sshStatus", s.ssh_target_ip::text AS "sshTargetIp", s.ssh_port AS "sshPort",
+             s.ssh_username AS "sshUsername", s.ssh_url AS "sshUrl", s.ssh_last_error AS "sshLastError",
              s.last_connected_at AS "lastConnectedAt", s.last_verified_at AS "lastVerifiedAt", s.last_error AS "lastError",
+             s.waf_warning AS "wafWarning",
              s.created_at AS "createdAt", a.id AS "accountId", a.cf_account_id AS "cfAccountId", a.name AS "accountName", z.id AS "zoneId", z.name AS "zoneName",
              ${publicationsJson} AS publications,
              ${enrollmentsJson} AS enrollments,
@@ -724,7 +732,7 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/tunnels/:tunnelId/routes/:routeId/waf", { preHandler: requireAuth }, async (request, reply) => {
     const { tunnelId, routeId } = z.object({ tunnelId: z.string().uuid(), routeId: z.string().uuid() }).parse(request.params);
     const result = await pool.query(
-      `SELECT r.id, r.waf_enabled, r.waf_allowed_ips, r.waf_ruleset_id, r.waf_rule_id,
+      `SELECT r.id, r.path, r.route_kind AS "routeKind", r.waf_enabled, r.waf_allowed_ips, r.waf_ruleset_id, r.waf_rule_id, p.hostname,
               a.provider_mode AS "providerMode"
          FROM tunnel_routes r
          JOIN tunnel_publications p ON p.id = r.publication_id
@@ -735,6 +743,10 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
     );
     if (!result.rowCount) return reply.code(404).send({ error: "Ingress route not found" });
     const row = result.rows[0];
+    const publicHostname = await cloudflareManPublicHostname();
+    const remoteAgentPath = isCfmanRemoteAgentPath(row.hostname, row.path, publicHostname);
+    const protectsCloudflareMan = !remoteAgentPath && isCloudflareManPublicHostname(row.hostname, publicHostname);
+    const mandatory = row.routeKind === "command_agent";
     const storedIps = (row.waf_allowed_ips ?? []) as string[];
     // Resolved best-effort so the "CFMan origin" quick-add option can
     // still be offered without breaking the read for routes that already have
@@ -745,7 +757,14 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
     const currentIp = isIP(request.ip) ? `${request.ip}/${request.ip.includes(":") ? 128 : 32}` : null;
     try {
       const allowedIps = await resolveWafAllowedIps(storedIps.length ? storedIps : cloudflareManIps, row.providerMode);
-      return { waf: { enabled: row.waf_enabled, allowedIps, rulesetId: row.waf_ruleset_id, ruleId: row.waf_rule_id, defaulted: !storedIps.length, cloudflareManIps, currentIp } };
+      return {
+        waf: {
+          enabled: mandatory ? true : row.waf_enabled,
+          allowedIps, rulesetId: row.waf_ruleset_id, ruleId: row.waf_rule_id, defaulted: !storedIps.length,
+          cloudflareManIps, currentIp, protectsCloudflareMan, mandatory, remoteAgentPath,
+          remoteAgentWarning: remoteAgentPath ? CFMAN_REMOTE_AGENT_WAF_WARNING : null
+        }
+      };
     } catch (error) {
       return reply.code(502).send({ error: error instanceof Error ? error.message : "Unable to resolve WAF source IP" });
     }
@@ -755,8 +774,8 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
     const { tunnelId, routeId } = z.object({ tunnelId: z.string().uuid(), routeId: z.string().uuid() }).parse(request.params);
     const body = routeWafSchema.parse(request.body ?? {});
     const result = await pool.query(
-      `SELECT r.id, r.path, r.waf_allowed_ips, r.waf_ruleset_id,
-              p.hostname, z.cf_zone_id AS "cfZoneId",
+      `SELECT r.id, r.path, r.route_kind AS "routeKind", r.waf_allowed_ips, r.waf_ruleset_id,
+              p.hostname, s.zone_id AS "zoneId", z.cf_zone_id AS "cfZoneId",
               a.id AS "accountRowId", a.cf_account_id AS "cfAccountId", a.api_token_encrypted AS "apiTokenEncrypted",
               a.provider_mode AS "providerMode"
          FROM tunnel_routes r
@@ -770,7 +789,9 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
     if (!result.rowCount) return reply.code(404).send({ error: "Ingress route not found" });
     const route = result.rows[0] as {
       path: string;
+      routeKind: "service" | "command_agent";
       hostname: string;
+      zoneId: string;
       cfZoneId: string | null;
       accountRowId: string;
       cfAccountId: string | null;
@@ -779,6 +800,14 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
       waf_allowed_ips: string[] | null;
       waf_ruleset_id: string | null;
     };
+    if (route.routeKind === "command_agent" && !body.enabled) {
+      return reply.code(409).send({ error: "WAF cannot be disabled on the command agent route - it is the tunnel's remote command execution endpoint and must always stay protected." });
+    }
+    const publicHostname = await cloudflareManPublicHostname();
+    const remoteAgentPath = isCfmanRemoteAgentPath(route.hostname, route.path, publicHostname);
+    if (body.enabled && !remoteAgentPath && isCloudflareManPublicHostname(route.hostname, publicHostname)) {
+      return reply.code(409).send({ error: "Source-IP WAF cannot be enabled on the CFMan public hostname" });
+    }
     const invalidInput = body.allowedIps.find((value) => !isValidIpOrCidr(value));
     if (invalidInput) return reply.code(400).send({ error: `Invalid WAF allowed IP or CIDR: ${invalidInput}` });
     const allowedIps = body.enabled
@@ -788,35 +817,77 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
     if (invalid) return reply.code(400).send({ error: `Invalid WAF allowed IP or CIDR: ${invalid}` });
     if (body.enabled && !allowedIps.length) return reply.code(400).send({ error: "At least one allowed IP or CIDR is required when WAF is enabled" });
     try {
+      await pool.query(
+        "UPDATE tunnel_routes SET waf_enabled = $1, waf_allowed_ips = $2, updated_at = now() WHERE id = $3",
+        [body.enabled, allowedIps, routeId]
+      );
       const client = new CloudflareClient(
         route.cfAccountId ?? route.accountRowId,
         route.apiTokenEncrypted ? decryptSecret(route.apiTokenEncrypted) : "mock",
         route.providerMode
       );
-      const applied = await client.configureRouteWaf({
-        zoneId: route.cfZoneId ?? "mock-zone",
-        hostname: route.hostname,
-        path: route.path,
-        enabled: body.enabled,
-        allowedIps,
-        rulesetId: route.waf_ruleset_id
-      });
-      await pool.query(
-        `UPDATE tunnel_routes
-            SET waf_enabled = $1, waf_allowed_ips = $2, waf_ruleset_id = $3, waf_rule_id = $4, updated_at = now()
-          WHERE id = $5`,
-        [body.enabled, allowedIps, applied.rulesetId, applied.ruleId, routeId]
+      // Rebuilds the zone's single merged WAF rule from every route that
+      // needs it (see reconcileZoneWaf) - not just this one - so this route's
+      // change lands alongside whatever every other tunnel in the zone
+      // already has, instead of overwriting them.
+      const { warning } = await reconcileZoneWaf(client, route.zoneId, route.cfZoneId, route.providerMode);
+      const refreshed = await pool.query(
+        "SELECT waf_enabled, waf_allowed_ips, waf_ruleset_id, waf_rule_id FROM tunnel_routes WHERE id = $1",
+        [routeId]
       );
+      const state = refreshed.rows[0] as { waf_enabled: boolean; waf_allowed_ips: string[] | null; waf_ruleset_id: string | null; waf_rule_id: string | null };
       await writeAudit({
         actorUserId: request.authUser!.id,
         action: body.enabled ? "route.waf_enabled" : "route.waf_disabled",
         entityType: "tunnel_route",
         entityId: routeId,
-        details: { tunnelId, hostname: route.hostname, path: route.path, allowedIps, rulesetId: applied.rulesetId, ruleId: applied.ruleId }
+        details: { tunnelId, hostname: route.hostname, path: route.path, allowedIps: state.waf_allowed_ips, rulesetId: state.waf_ruleset_id, ruleId: state.waf_rule_id, warning }
       });
-      return { success: true, waf: { enabled: body.enabled, allowedIps, rulesetId: applied.rulesetId, ruleId: applied.ruleId } };
+      return {
+        success: true,
+        waf: { enabled: state.waf_enabled, allowedIps: state.waf_allowed_ips ?? [], rulesetId: state.waf_ruleset_id, ruleId: state.waf_rule_id },
+        warning
+      };
     } catch (error) {
       return reply.code(502).send({ error: error instanceof Error ? error.message : "Unable to apply route WAF" });
+    }
+  });
+
+  // For a tunnel that is CFMan's own self-hosted target (one of its
+  // publications shares CFMan's public hostname): backfills the remote-agent
+  // routes (see CFMAN_REMOTE_AGENT_PATHS) if any are missing, then rebuilds
+  // the zone's merged WAF rule so this tunnel's routes are correctly folded
+  // in. Read the result to answer "are the WAF rules and routes already
+  // correct" - it's idempotent, so calling it when everything is already
+  // right is just a no-op confirmation.
+  app.post("/api/tunnels/:id/reconcile-cfman-self", { preHandler: requireAuth }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const publicHostname = await cloudflareManPublicHostname();
+    const result = await pool.query(
+      `SELECT p.hostname, s.zone_id AS "zoneId", z.cf_zone_id AS "cfZoneId",
+              a.id AS "accountRowId", a.cf_account_id AS "cfAccountId", a.api_token_encrypted AS "apiTokenEncrypted",
+              a.provider_mode AS "providerMode"
+         FROM tunnel_publications p
+         JOIN tunnels s ON s.id = p.tunnel_id
+         JOIN cloudflare_accounts a ON a.id = s.account_id
+         JOIN zones z ON z.id = s.zone_id
+        WHERE p.tunnel_id = $1`,
+      [id]
+    );
+    const row = result.rows.find((candidate) => isCloudflareManPublicHostname(candidate.hostname, publicHostname));
+    if (!result.rowCount) return reply.code(404).send({ error: "Tunnel not found" });
+    if (!row) return reply.code(409).send({ error: "This tunnel is not CFMan's own self-hosted tunnel" });
+    try {
+      const routes = await ensureCloudflareManRemoteAgentRoutes(row.hostname);
+      const client = new CloudflareClient(
+        row.cfAccountId ?? row.accountRowId,
+        row.apiTokenEncrypted ? decryptSecret(row.apiTokenEncrypted) : "mock",
+        row.providerMode
+      );
+      const { warning } = await reconcileZoneWaf(client, row.zoneId, row.cfZoneId, row.providerMode);
+      return { hostname: row.hostname, routes, warning };
+    } catch (error) {
+      return reply.code(502).send({ error: error instanceof Error ? error.message : "Unable to reconcile CFMan's self-hosted WAF configuration" });
     }
   });
 
@@ -1539,6 +1610,7 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
 
   app.post("/api/tunnels", { preHandler: requireAuth }, async (request, reply) => {
     const body = createTunnelSchema.parse(request.body);
+    const publicHostname = await cloudflareManPublicHostname();
     let tunnelId: string;
     try {
       tunnelId = await withTransaction(async (client) => {
@@ -1565,9 +1637,9 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
         );
         for (const [index, route] of publication.routes.entries()) {
           await client.query(
-            `INSERT INTO tunnel_routes(publication_id, path, service_url, route_kind, sort_order)
-             VALUES ($1, $2, $3, $4, $5)`,
-            [inserted.rows[0].id, route.path, route.serviceUrl, route.kind ?? "service", index]
+            `INSERT INTO tunnel_routes(publication_id, path, service_url, route_kind, sort_order, waf_enabled)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [inserted.rows[0].id, route.path, route.serviceUrl, route.kind ?? "service", index, route.kind === "command_agent" ? true : !isCloudflareManPublicHostname(publication.hostname, publicHostname)]
           );
         }
       }
@@ -1591,13 +1663,17 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
       }
       throw error;
     }
+    await ensureCloudflareManRemoteAgentRoutes(publicHostname);
     const created = await pool.query(`
       SELECT s.id, s.tenant_code AS "tenantCode", s.tunnel_code AS "tunnelCode", s.display_name AS "displayName", s.execution_variables AS "executionVariables",
              s.origin_url AS "originUrl", s.hostname, s.cf_tunnel_id AS "cfTunnelId", s.cf_tunnel_name AS "cfTunnelName",
              s.cf_tunnel_status AS "cfTunnelStatus", s.onboarding_status AS "onboardingStatus",
              s.rdp_status AS "rdpStatus", s.rdp_target_ip::text AS "rdpTargetIp",
              s.rdp_url AS "rdpUrl", s.rdp_last_error AS "rdpLastError",
+             s.ssh_status AS "sshStatus", s.ssh_target_ip::text AS "sshTargetIp", s.ssh_port AS "sshPort",
+             s.ssh_username AS "sshUsername", s.ssh_url AS "sshUrl", s.ssh_last_error AS "sshLastError",
              s.last_connected_at AS "lastConnectedAt", s.last_verified_at AS "lastVerifiedAt", s.last_error AS "lastError",
+             s.waf_warning AS "wafWarning",
              s.created_at AS "createdAt", a.id AS "accountId", a.cf_account_id AS "cfAccountId", a.name AS "accountName", z.id AS "zoneId", z.name AS "zoneName",
              ${publicationsJson} AS publications,
              ${commandAgentJson} AS "commandAgent"
@@ -1610,6 +1686,7 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
   app.patch("/api/tunnels/:id/zone", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = z.object({ zoneId: z.string().uuid() }).parse(request.body);
+    const publicHostname = await cloudflareManPublicHostname();
     try {
       const result = await withTransaction(async (client) => {
         const tunnelResult = await client.query(
@@ -1649,6 +1726,9 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
             "UPDATE tunnel_publications SET hostname = $1, updated_at = now() WHERE id = $2",
             [publication.hostname, publication.id]
           );
+          if (isCloudflareManPublicHostname(publication.hostname, publicHostname)) {
+            await client.query("UPDATE tunnel_routes SET waf_enabled = false, updated_at = now() WHERE publication_id = $1", [publication.id]);
+          }
         }
         // Defensive: a fully deprovisioned tunnel should already have these
         // cleared, but a zone-scoped WAF ruleset reference from the old zone
@@ -1670,6 +1750,7 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
       if (result.kind === "missing") return reply.code(404).send({ error: "Tunnel not found" });
       if (result.kind === "blocked") return reply.code(409).send({ error: "The tunnel must have no active enrollment and be fully unenrolled before its account/zone can be changed" });
       if (result.kind === "same_zone") return reply.code(409).send({ error: "Tunnel is already assigned to this zone" });
+      await ensureCloudflareManRemoteAgentRoutes(publicHostname);
       return { success: true };
     } catch (error) {
       if ((error as { code?: string }).code === "23505") {
@@ -1682,6 +1763,7 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
   app.put("/api/tunnels/:id/connectivity", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = connectivitySchema.parse(request.body);
+    const publicHostname = await cloudflareManPublicHostname();
     const runUpdate = () => withTransaction(async (client) => {
       const tunnelResult = await client.query(
         `SELECT s.id, s.tunnel_code, s.cf_tunnel_id, z.name AS zone_name
@@ -1715,17 +1797,9 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
       );
       const prepared = preparePublications(tunnel.tunnel_code, tunnel.zone_name, body.publications);
       const desiredHostnames = new Set(prepared.map((publication) => publication.hostname));
-      const desiredRouteKeys = new Set(prepared.flatMap((publication) => publication.routes.map((route) => `${publication.hostname}${route.path}`)));
       const removedDnsRecordIds = [...new Set<string>(existingResult.rows
         .filter((publication) => publication.dns_record_id && !desiredHostnames.has(publication.hostname))
         .map((publication) => publication.dns_record_id as string))];
-      const removedWafRoutes = existingResult.rows
-        .filter((route) => route.path !== null && route.waf_rule_id && !desiredRouteKeys.has(`${route.hostname}${route.path}`))
-        .map((route) => ({
-          hostname: route.hostname as string,
-          path: route.path as string,
-          rulesetId: route.waf_ruleset_id as string | null
-        }));
 
       await client.query("DELETE FROM tunnel_publications WHERE tunnel_id = $1", [id]);
       for (const publication of prepared) {
@@ -1737,10 +1811,13 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
         );
         for (const [index, route] of publication.routes.entries()) {
           const waf = existingWafByRoute.get(`${publication.hostname}${route.path}`);
+          const wafEnabled = route.kind === "command_agent"
+            ? true
+            : isCloudflareManPublicHostname(publication.hostname, publicHostname) ? false : (waf?.enabled ?? true);
           await client.query(
             `INSERT INTO tunnel_routes(publication_id, path, service_url, route_kind, sort_order, waf_enabled, waf_allowed_ips, waf_ruleset_id, waf_rule_id)
-             VALUES ($1, $2, $3, $4, $5, COALESCE($6, true), COALESCE($7, ARRAY[]::text[]), $8, $9)`,
-            [inserted.rows[0].id, route.path, route.serviceUrl, route.kind, index, waf?.enabled ?? null, waf?.allowedIps ?? null, waf?.rulesetId ?? null, waf?.ruleId ?? null]
+             VALUES ($1, $2, $3, $4, $5, $6, COALESCE($7, ARRAY[]::text[]), $8, $9)`,
+            [inserted.rows[0].id, route.path, route.serviceUrl, route.kind, index, wafEnabled, waf?.allowedIps ?? null, waf?.rulesetId ?? null, waf?.ruleId ?? null]
           );
         }
       }
@@ -1760,11 +1837,10 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
         details: {
           hostnames: prepared.map((publication) => publication.hostname),
           routeCount: prepared.reduce((total, publication) => total + publication.routes.length, 0),
-          removedHostnameCount: new Set(existingResult.rows.filter((publication) => !desiredHostnames.has(publication.hostname)).map((publication) => publication.hostname)).size,
-          removedWafRouteCount: removedWafRoutes.length
+          removedHostnameCount: new Set(existingResult.rows.filter((publication) => !desiredHostnames.has(publication.hostname)).map((publication) => publication.hostname)).size
         }
       }, client);
-      return { cfTunnelId: tunnel.cf_tunnel_id as string | null, removedDnsRecordIds, removedWafRoutes };
+      return { cfTunnelId: tunnel.cf_tunnel_id as string | null, removedDnsRecordIds };
     });
     let update: Awaited<ReturnType<typeof runUpdate>>;
     try {
@@ -1776,9 +1852,11 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
       throw error;
     }
     if (!update) return reply.code(404).send({ error: "Tunnel not found" });
+    await ensureCloudflareManRemoteAgentRoutes(publicHostname);
 
     try {
-      const applied = update.cfTunnelId ? await reconfigureTunnel(id, update.removedDnsRecordIds, update.removedWafRoutes) : false;
+      const applied = update.cfTunnelId ? await reconfigureTunnel(id, update.removedDnsRecordIds) : false;
+      if (applied) await syncBrowserSsh(id).catch(() => undefined);
       return { success: true, applied };
     } catch (error) {
       const message = error instanceof Error ? error.message : "Connectivity update failed";
@@ -1959,6 +2037,18 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
     }
     const result = await provisionBrowserRdp(id);
     if (!result.ready) return reply.code(502).send({ error: result.error ?? "RDP provisioning failed" });
+    return result;
+  });
+
+  app.post("/api/tunnels/:id/ssh/retry", { preHandler: requireAuth }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const tunnel = await pool.query("SELECT id, ssh_target_ip FROM tunnels WHERE id = $1", [id]);
+    if (!tunnel.rowCount) return reply.code(404).send({ error: "Tunnel not found" });
+    if (!tunnel.rows[0].ssh_target_ip) {
+      return reply.code(409).send({ error: "The Linux installer has not reported an SSH target IP" });
+    }
+    const result = await provisionBrowserSsh(id);
+    if (!result.ready) return reply.code(502).send({ error: result.error ?? "SSH provisioning failed" });
     return result;
   });
 

@@ -243,7 +243,7 @@ test("validates an account-owned Cloudflare API token", async () => {
   }
 });
 
-test("updates only the selected route in the active Cloudflare WAF ruleset", async () => {
+test("merges every WAF-protected route in a zone into a single Cloudflare rule", async () => {
   const { CloudflareClient } = await import("../src/lib/cloudflare.js");
   const originalFetch = globalThis.fetch;
   const requests: Array<{ url: string; method: string; body?: Record<string, unknown> }> = [];
@@ -264,8 +264,7 @@ test("updates only the selected route in the active Cloudflare WAF ruleset", asy
           phase: "http_request_firewall_custom",
           rules: [
             { id: "manual-rule", action: "block", expression: "ip.src eq 192.0.2.1", description: "Manual rule" },
-            { id: "other-route", action: "block", expression: "true", description: "cfman route WAF: other.example.test/" },
-            { id: "old-route", action: "block", expression: "true", description: "cfman route WAF: tunnel.example.test/api" }
+            { id: "old-merged-rule", action: "block", expression: "(http.host eq \"stale.example.test\" and http.request.uri.path eq \"/\" and true)", description: "cfman managed WAF #1" }
           ]
         }
       });
@@ -287,24 +286,83 @@ test("updates only the selected route in the active Cloudflare WAF ruleset", asy
   };
   try {
     const client = new CloudflareClient("account-id", "api-token", "live");
-    const result = await client.configureRouteWaf({
+    const result = await client.configureZoneWaf({
       zoneId: "zone-id",
-      hostname: "tunnel.example.test",
-      path: "/api",
-      enabled: true,
-      allowedIps: ["203.0.113.10/32"]
+      routes: [
+        { hostname: "tunnel.example.test", path: "/api", allowedIps: ["203.0.113.10/32"] },
+        { hostname: "other.example.test", path: "/", allowedIps: [] }
+      ]
     });
     assert.equal(result.rulesetId, "entrypoint-id");
-    assert.ok(result.ruleId);
+    assert.deepEqual(result.ruleIds, ["created-1", "created-1"]);
     const update = requests.find((request) => request.method === "PUT");
     assert.ok(update?.body);
     const rules = update.body.rules as Array<{ description: string; expression: string }>;
-    assert.deepEqual(rules.map((rule) => rule.description), [
-      "Manual rule",
-      "cfman route WAF: other.example.test/",
-      "cfman route WAF: tunnel.example.test/api"
-    ]);
-    assert.match(rules[2]!.expression, /203\.0\.113\.10\/32/);
+    // The unrelated manual rule is preserved untouched; the stale merged rule
+    // is replaced (not duplicated alongside) by a single new rule covering
+    // every currently WAF-protected route in the zone.
+    assert.deepEqual(rules.map((rule) => rule.description), ["Manual rule", "cfman managed WAF #1"]);
+    assert.match(rules[1]!.expression, /tunnel\.example\.test/);
+    assert.match(rules[1]!.expression, /203\.0\.113\.10\/32/);
+    assert.match(rules[1]!.expression, /other\.example\.test/);
+    assert.match(rules[1]!.expression, / or /);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("packs routes into multiple pool rules when the merged expression would exceed Cloudflare's per-rule character limit", async () => {
+  const { CloudflareClient } = await import("../src/lib/cloudflare.js");
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; method: string; body?: Record<string, unknown> }> = [];
+  globalThis.fetch = async (input, init) => {
+    const url = String(input);
+    const method = init?.method ?? "GET";
+    requests.push({ url, method, ...(init?.body ? { body: JSON.parse(String(init.body)) } : {}) });
+    if (url.includes("/rulesets?") && method === "GET") {
+      return Response.json({ success: true, result: [{ id: "entrypoint-id", name: "zone", kind: "zone", phase: "http_request_firewall_custom" }] });
+    }
+    if (url.endsWith("/rulesets/entrypoint-id") && method === "GET") {
+      return Response.json({ success: true, result: { id: "entrypoint-id", name: "zone", kind: "zone", phase: "http_request_firewall_custom", rules: [] } });
+    }
+    if (url.endsWith("/rulesets/entrypoint-id") && method === "PUT") {
+      const body = JSON.parse(String(init?.body)) as { rules: Array<Record<string, unknown>> };
+      return Response.json({
+        success: true,
+        result: {
+          id: "entrypoint-id",
+          name: "zone",
+          kind: "zone",
+          phase: "http_request_firewall_custom",
+          rules: body.rules.map((rule, index) => ({ ...rule, id: String(rule.id ?? `created-${index}`) }))
+        }
+      });
+    }
+    throw new Error(`Unexpected Cloudflare request: ${method} ${url}`);
+  };
+  try {
+    const client = new CloudflareClient("account-id", "api-token", "live");
+    // Each condition alone comfortably fits under the 4096-character limit,
+    // but two of them together don't - CFMan must split across pool rules
+    // instead of building one oversized expression.
+    const bigAllowedIps = Array.from({ length: 210 }, (_, i) => `10.0.${i}.1/32`);
+    const result = await client.configureZoneWaf({
+      zoneId: "zone-id",
+      routes: [
+        { hostname: "big-one.example.test", path: "/", allowedIps: bigAllowedIps },
+        { hostname: "big-two.example.test", path: "/", allowedIps: bigAllowedIps },
+        { hostname: "small.example.test", path: "/", allowedIps: [] }
+      ]
+    });
+    const update = requests.find((request) => request.method === "PUT");
+    assert.ok(update?.body);
+    const rules = update.body.rules as Array<{ description: string; expression: string }>;
+    assert.ok(rules.length >= 2, `expected at least 2 pool rules, got ${rules.length}`);
+    for (const rule of rules) assert.ok(rule.expression.length <= 4096, `rule expression exceeded 4096 chars: ${rule.expression.length}`);
+    assert.deepEqual(rules.map((rule) => rule.description), rules.map((_, index) => `cfman managed WAF #${index + 1}`));
+    assert.equal(result.ruleIds.length, 3);
+    assert.notEqual(result.ruleIds[0], result.ruleIds[1]);
+    assert.equal(result.ruleIds[1], result.ruleIds[2], "the small route should be packed alongside whichever pool rule still has room");
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -435,7 +493,13 @@ test("allocates a tunnel and issues bootstrap URLs", async () => {
   assert.match(scriptResponse.body, /command-agent\.py/);
   assert.match(scriptResponse.body, /ThreadingHTTPServer/);
   assert.match(scriptResponse.body, /log_queue/);
-  assert.match(scriptResponse.body, /cloudflare-man-command-agent\.service/);
+  assert.match(scriptResponse.body, /USER_AGENT = "cfman-command-agent\/1\.0"/);
+  assert.match(scriptResponse.body, /"User-Agent": USER_AGENT/);
+  assert.match(scriptResponse.body, /Command agent callback failed/);
+  assert.match(scriptResponse.body, /cfman-command-agent\.service/);
+  assert.match(scriptResponse.body, /disable --now cloudflare-man-command-agent\.service/);
+  assert.match(scriptResponse.body, /Library\/LaunchDaemons\/cfman\.command-agent\.plist/);
+  assert.match(scriptResponse.body, /<string>cfman\.command-agent<\/string>/);
   assert.match(scriptResponse.body, /Restart=always/);
   assert.match(scriptResponse.body, /systemctl enable --now cloudflared\.service/);
   assert.match(scriptResponse.body, /osName/);
@@ -457,6 +521,7 @@ test("allocates a tunnel and issues bootstrap URLs", async () => {
   assert.match(windowsScript.body, /\$payload\.error/);
   assert.match(windowsScript.body, /Read-Host "Cleanup and override/);
   assert.match(windowsScript.body, /overrideExisting/);
+  assert.match(windowsScript.body, /CFManCommandAgent/);
   assert.match(windowsScript.body, /CloudflareManCommandAgent/);
   assert.match(windowsScript.body, /ReadLineAsync/);
   assert.match(windowsScript.body, /New-ScheduledTaskAction/);
@@ -604,6 +669,131 @@ test("manages a source-IP WAF policy for each ingress route", async () => {
     payload: { enabled: true, allowedIps: ["not-an-ip"] }
   });
   assert.equal(invalid.statusCode, 400, invalid.body);
+});
+
+test("keeps source-IP WAF disabled on the CFMan public hostname", async () => {
+  const zone = await pool.query("SELECT id, name FROM zones WHERE account_id = $1 ORDER BY created_at LIMIT 1", [accountId]);
+  const selfHostname = `cfman-self-test.${zone.rows[0].name}`;
+  let selfTunnelId = "";
+  try {
+    const setting = await app.inject({
+      method: "PUT",
+      url: "/api/settings",
+      headers: { cookie: sessionCookie },
+      payload: { publicBaseUrl: `https://${selfHostname}` }
+    });
+    assert.equal(setting.statusCode, 200, setting.body);
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/tunnels",
+      headers: { cookie: sessionCookie },
+      payload: {
+        tenantCode: "SELF",
+        tunnelCode: "CONTROL",
+        displayName: "CFMan self-hosted route",
+        zoneId: zone.rows[0].id,
+        publications: [{
+          suffix: "",
+          customLabel: "cfman-self-test",
+          routes: [{ path: "/", serviceUrl: "http://127.0.0.1:3000" }]
+        }]
+      }
+    });
+    assert.equal(created.statusCode, 201, created.body);
+    selfTunnelId = created.json().tunnel.id;
+    const route = created.json().tunnel.publications[0].routes[0];
+    assert.equal(route.wafEnabled, false);
+
+    // CFMan auto-creates its own remote-agent callback routes (enrollment/
+    // unenroll/diagnostic/script-execution log callbacks) on its own public
+    // hostname, defaulted off - but unlike every other path there, they can
+    // be switched on (with a warning) instead of being hard-blocked.
+    const remoteAgentRoute = await pool.query(
+      `SELECT r.id, r.waf_enabled FROM tunnel_routes r
+         JOIN tunnel_publications p ON p.id = r.publication_id
+        WHERE p.hostname = $1 AND r.path = '/api/public'`,
+      [selfHostname]
+    );
+    assert.equal(remoteAgentRoute.rowCount, 1);
+    assert.equal(remoteAgentRoute.rows[0].waf_enabled, false);
+    const remoteAgentWaf = await app.inject({
+      method: "GET",
+      url: `/api/tunnels/${selfTunnelId}/routes/${remoteAgentRoute.rows[0].id}/waf`,
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(remoteAgentWaf.statusCode, 200, remoteAgentWaf.body);
+    assert.equal(remoteAgentWaf.json().waf.remoteAgentPath, true);
+    assert.equal(remoteAgentWaf.json().waf.protectsCloudflareMan, false);
+    const enableRemoteAgent = await app.inject({
+      method: "PATCH",
+      url: `/api/tunnels/${selfTunnelId}/routes/${remoteAgentRoute.rows[0].id}/waf`,
+      headers: { cookie: sessionCookie },
+      payload: { enabled: true, allowedIps: ["127.0.0.1/32"] }
+    });
+    assert.equal(enableRemoteAgent.statusCode, 200, enableRemoteAgent.body);
+    assert.match(enableRemoteAgent.json().warning ?? "", /log callbacks/);
+
+    await pool.query(
+      "UPDATE tunnel_routes SET waf_enabled = true, waf_ruleset_id = 'stale-ruleset', waf_rule_id = 'stale-rule' WHERE id = $1",
+      [route.id]
+    );
+    const reconciled = await app.inject({
+      method: "PUT",
+      url: "/api/settings",
+      headers: { cookie: sessionCookie },
+      payload: { publicBaseUrl: `https://${selfHostname}` }
+    });
+    assert.equal(reconciled.statusCode, 200, reconciled.body);
+    const stored = await pool.query("SELECT waf_enabled, waf_rule_id FROM tunnel_routes WHERE id = $1", [route.id]);
+    assert.deepEqual(stored.rows[0], { waf_enabled: false, waf_rule_id: null });
+
+    const waf = await app.inject({
+      method: "GET",
+      url: `/api/tunnels/${selfTunnelId}/routes/${route.id}/waf`,
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(waf.statusCode, 200, waf.body);
+    assert.equal(waf.json().waf.protectsCloudflareMan, true);
+
+    const enable = await app.inject({
+      method: "PATCH",
+      url: `/api/tunnels/${selfTunnelId}/routes/${route.id}/waf`,
+      headers: { cookie: sessionCookie },
+      payload: { enabled: true, allowedIps: ["127.0.0.1/32"] }
+    });
+    assert.equal(enable.statusCode, 409, enable.body);
+    assert.match(enable.json().error, /CFMan public hostname/);
+
+    const reconcile = await app.inject({
+      method: "POST",
+      url: `/api/tunnels/${selfTunnelId}/reconcile-cfman-self`,
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(reconcile.statusCode, 200, reconcile.body);
+    assert.equal(reconcile.json().hostname, selfHostname);
+    assert.deepEqual(
+      reconcile.json().routes.map((entry: { path: string; created: boolean }) => entry.path).sort(),
+      ["/api/public", "/d", "/e"]
+    );
+    assert.ok(reconcile.json().routes.every((entry: { created: boolean }) => entry.created === false), "remote-agent routes already existed, so reconcile should report none newly created");
+
+    const notSelf = await app.inject({
+      method: "POST",
+      url: `/api/tunnels/${tunnelId}/reconcile-cfman-self`,
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(notSelf.statusCode, 409, notSelf.body);
+  } finally {
+    if (selfTunnelId) await pool.query("DELETE FROM tunnels WHERE id = $1", [selfTunnelId]);
+    const restored = await app.inject({
+      method: "PUT",
+      url: "/api/settings",
+      headers: { cookie: sessionCookie },
+      payload: { publicBaseUrl: "https://cfman.example.test" }
+    });
+    assert.equal(restored.statusCode, 200, restored.body);
+  }
 });
 
 test("tunnels structured installer logs", async () => {
@@ -805,11 +995,77 @@ test("updates all ingress routes on an existing tunnel", async () => {
   assert.deepEqual(agentRoute.rows[0], { route_kind: "command_agent", service_url: "http://127.0.0.1:47831" });
 });
 
+test("rejects a second ssh:// route for the same tunnel", async () => {
+  const response = await app.inject({
+    method: "PUT",
+    url: `/api/tunnels/${tunnelId}/connectivity`,
+    headers: { cookie: sessionCookie },
+    payload: {
+      publications: [
+        { suffix: "", routes: [{ path: "/", serviceUrl: "http://localhost:8080" }] },
+        { suffix: "ssh1", routes: [{ path: "/", serviceUrl: "ssh://127.0.0.1:22" }] },
+        { suffix: "ssh2", routes: [{ path: "/", serviceUrl: "ssh://127.0.0.1:2222" }] }
+      ]
+    }
+  });
+  assert.equal(response.statusCode, 400, response.body);
+  assert.match(response.body, /Only one ssh:\/\/ route can be configured per tunnel/);
+});
+
+test("command agent route WAF is mandatory and cannot be disabled", async () => {
+  const detail = await app.inject({ method: "GET", url: `/api/tunnels/${tunnelId}`, headers: { cookie: sessionCookie } });
+  assert.equal(detail.statusCode, 200, detail.body);
+  const agentRoute = detail.json().tunnel.publications
+    .flatMap((publication: { routes: Array<{ id: string; path: string; kind: string }> }) => publication.routes)
+    .find((route: { kind: string }) => route.kind === "command_agent");
+  assert.ok(agentRoute, "expected a command_agent route from the previous test");
+
+  const waf = await app.inject({ method: "GET", url: `/api/tunnels/${tunnelId}/routes/${agentRoute.id}/waf`, headers: { cookie: sessionCookie } });
+  assert.equal(waf.statusCode, 200, waf.body);
+  assert.equal(waf.json().waf.mandatory, true);
+  assert.equal(waf.json().waf.enabled, true);
+
+  const rejected = await app.inject({
+    method: "PATCH",
+    url: `/api/tunnels/${tunnelId}/routes/${agentRoute.id}/waf`,
+    headers: { cookie: sessionCookie },
+    payload: { enabled: false, allowedIps: [] }
+  });
+  assert.equal(rejected.statusCode, 409, rejected.body);
+
+  const accepted = await app.inject({
+    method: "PATCH",
+    url: `/api/tunnels/${tunnelId}/routes/${agentRoute.id}/waf`,
+    headers: { cookie: sessionCookie },
+    payload: { enabled: true, allowedIps: ["198.51.100.5/32"] }
+  });
+  assert.equal(accepted.statusCode, 200, accepted.body);
+  assert.equal(accepted.json().waf.enabled, true);
+  assert.equal(accepted.json().warning, null);
+  const stored = await pool.query("SELECT waf_enabled, waf_rule_id FROM tunnel_routes WHERE id = $1", [agentRoute.id]);
+  assert.equal(stored.rows[0].waf_enabled, true);
+  assert.ok(stored.rows[0].waf_rule_id);
+});
+
 test("keeps configured ingress paths as the source of truth", async () => {
   const { pathPrefixPattern } = await import("../src/lib/provisioning.js");
-  assert.equal(pathPrefixPattern("/exec"), "/exec");
-  assert.equal(pathPrefixPattern("/agent/v1"), "/agent/v1");
+  assert.equal(pathPrefixPattern("/exec"), "^/exec(?:$|/)");
+  assert.equal(pathPrefixPattern("/agent/v1"), "^/agent/v1(?:$|/)");
   assert.equal(pathPrefixPattern("/"), undefined);
+});
+
+test("ingress path patterns anchor instead of matching as a bare substring", async () => {
+  // Cloudflare Tunnel treats the ingress `path` field as an unanchored regex.
+  // A command_agent route at "/exec" must not also swallow unrelated API
+  // paths that merely contain "exec" as a substring, e.g. CFMan's own
+  // "/execution-variables/resolve" or "/commands/execute" endpoints on a
+  // hostname that also hosts that tunnel's command agent.
+  const { pathPrefixPattern } = await import("../src/lib/provisioning.js");
+  const pattern = new RegExp(pathPrefixPattern("/exec")!);
+  assert.ok(pattern.test("/exec"));
+  assert.ok(pattern.test("/exec/status"));
+  assert.ok(!pattern.test("/execution-variables/resolve"));
+  assert.ok(!pattern.test("/api/tunnels/abc/commands/execute"));
 });
 
 test("installer report activates a mock tunnel", async () => {
@@ -877,6 +1133,156 @@ test("installer report activates a mock tunnel", async () => {
   });
   assert.equal(retry.statusCode, 200, retry.body);
   assert.equal(retry.json().ready, true);
+});
+
+test("installer report enables SSH access for a Linux enrollment", async () => {
+  const created = await app.inject({
+    method: "POST",
+    url: "/api/tunnels",
+    headers: { cookie: sessionCookie },
+    payload: {
+      tenantCode: "HLC",
+      tunnelCode: "SSH1",
+      displayName: "Linux SSH Test Tunnel",
+      publications: [{ suffix: "", routes: [{ path: "/", serviceUrl: "http://localhost:9090" }] }]
+    }
+  });
+  assert.equal(created.statusCode, 201, created.body);
+  const sshTunnelId = created.json().tunnel.id;
+  try {
+    const enrollmentResponse = await app.inject({
+      method: "POST",
+      url: `/api/tunnels/${sshTunnelId}/enrollments`,
+      headers: { cookie: sessionCookie },
+      payload: { expiresInHours: 24 }
+    });
+    assert.equal(enrollmentResponse.statusCode, 201, enrollmentResponse.body);
+    const shellMatch = enrollmentResponse.json().urls.shell.match(/\/e\/([^/]+)\/install\.sh$/);
+    assert.ok(shellMatch);
+    const sshEnrollmentToken = shellMatch[1];
+
+    const script = await app.inject({ method: "GET", url: `/e/${sshEnrollmentToken}/install.sh` });
+    assert.equal(script.statusCode, 200, script.body);
+    assert.match(script.body, /sshEnabled/);
+
+    const claimResponse = await app.inject({
+      method: "POST",
+      url: "/api/public/enrollments/claim",
+      payload: { token: sshEnrollmentToken, platform: "unix", architecture: "amd64", installId: "ssh-installer" }
+    });
+    assert.equal(claimResponse.statusCode, 200, claimResponse.body);
+
+    const report = await app.inject({
+      method: "POST",
+      url: "/api/public/enrollments/report",
+      payload: {
+        token: sshEnrollmentToken,
+        platform: "unix",
+        status: "installed",
+        version: "cloudflared test",
+        sshEnabled: true,
+        sshTargetIp: "192.168.20.30",
+        sshPort: 22,
+        sshUsername: "ubuntu",
+        agentReady: true,
+        osName: "Ubuntu 24.04 LTS",
+        osVersion: "24.04",
+        osBuild: "24.04",
+        architecture: "amd64",
+        machineName: "LINUX-SSH-01"
+      }
+    });
+    assert.equal(report.statusCode, 200, report.body);
+    // cfman never creates the ssh:// route on the account's behalf - it
+    // only records what the installer detected and leaves browser SSH
+    // unprovisioned until the account publishes a route themselves.
+    assert.equal(report.json().ssh.ready, false);
+    assert.match(report.json().ssh.error, /ssh:\/\/ ingress route/);
+
+    const tunnelRow = await pool.query(
+      "SELECT ssh_status, ssh_target_ip::text AS ssh_target_ip, ssh_port, ssh_username, ssh_url, account_id FROM tunnels WHERE id = $1",
+      [sshTunnelId]
+    );
+    assert.equal(tunnelRow.rows[0].ssh_status, "failed");
+    assert.equal(tunnelRow.rows[0].ssh_target_ip, "192.168.20.30/32");
+    assert.equal(tunnelRow.rows[0].ssh_port, 22);
+    assert.equal(tunnelRow.rows[0].ssh_username, "ubuntu");
+    assert.equal(tunnelRow.rows[0].ssh_url, null);
+
+    const addSshRoute = await app.inject({
+      method: "PUT",
+      url: `/api/tunnels/${sshTunnelId}/connectivity`,
+      headers: { cookie: sessionCookie },
+      payload: {
+        publications: [
+          { suffix: "", routes: [{ path: "/", serviceUrl: "http://localhost:9090" }] },
+          { suffix: "ssh", routes: [{ path: "/", serviceUrl: "ssh://192.168.20.30:22" }] }
+        ]
+      }
+    });
+    assert.equal(addSshRoute.statusCode, 200, addSshRoute.body);
+
+    const sshRoute = await pool.query(
+      `SELECT p.hostname, r.service_url FROM tunnel_publications p
+         JOIN tunnel_routes r ON r.publication_id = p.id
+        WHERE p.tunnel_id = $1 AND r.service_url LIKE 'ssh://%'`,
+      [sshTunnelId]
+    );
+    assert.equal(sshRoute.rowCount, 1);
+    assert.equal(sshRoute.rows[0].hostname, "ssh1-ssh.tunnels-a.example");
+    assert.equal(sshRoute.rows[0].service_url, "ssh://192.168.20.30:22");
+
+    // Adding the route already auto-provisions the gateway (syncBrowserSsh,
+    // called after every connectivity save) - no manual retry needed.
+    const afterAdd = await pool.query("SELECT ssh_status, ssh_url FROM tunnels WHERE id = $1", [sshTunnelId]);
+    assert.equal(afterAdd.rows[0].ssh_status, "ready");
+    assert.equal(afterAdd.rows[0].ssh_url, "https://ssh1-ssh.tunnels-a.example");
+
+    const retry = await app.inject({
+      method: "POST",
+      url: `/api/tunnels/${sshTunnelId}/ssh/retry`,
+      headers: { cookie: sessionCookie }
+    });
+    assert.equal(retry.statusCode, 200, retry.body);
+    assert.equal(retry.json().ready, true);
+    assert.equal(retry.json().url, "https://ssh1-ssh.tunnels-a.example");
+
+    // Renaming the ssh:// route's subdomain must move the browser SSH
+    // gateway to follow it, not leave it pointed at the old hostname.
+    const renameSshRoute = await app.inject({
+      method: "PUT",
+      url: `/api/tunnels/${sshTunnelId}/connectivity`,
+      headers: { cookie: sessionCookie },
+      payload: {
+        publications: [
+          { suffix: "", routes: [{ path: "/", serviceUrl: "http://localhost:9090" }] },
+          { suffix: "ssh-renamed", routes: [{ path: "/", serviceUrl: "ssh://192.168.20.30:22" }] }
+        ]
+      }
+    });
+    assert.equal(renameSshRoute.statusCode, 200, renameSshRoute.body);
+    const afterRename = await pool.query("SELECT ssh_status, ssh_url FROM tunnels WHERE id = $1", [sshTunnelId]);
+    assert.equal(afterRename.rows[0].ssh_status, "ready");
+    assert.equal(afterRename.rows[0].ssh_url, "https://ssh1-ssh-renamed.tunnels-a.example");
+
+    // Removing the ssh:// route entirely must tear the gateway down instead
+    // of leaving a dead ssh_url pointing at nothing.
+    const removeSshRoute = await app.inject({
+      method: "PUT",
+      url: `/api/tunnels/${sshTunnelId}/connectivity`,
+      headers: { cookie: sessionCookie },
+      payload: {
+        publications: [{ suffix: "", routes: [{ path: "/", serviceUrl: "http://localhost:9090" }] }]
+      }
+    });
+    assert.equal(removeSshRoute.statusCode, 200, removeSshRoute.body);
+    const afterRemove = await pool.query("SELECT ssh_status, ssh_url, ssh_access_app_id FROM tunnels WHERE id = $1", [sshTunnelId]);
+    assert.equal(afterRemove.rows[0].ssh_status, "disabled");
+    assert.equal(afterRemove.rows[0].ssh_url, null);
+    assert.equal(afterRemove.rows[0].ssh_access_app_id, null);
+  } finally {
+    await pool.query("DELETE FROM tunnels WHERE id = $1", [sshTunnelId]);
+  }
 });
 
 test("executes a script through the configured tunnel command agent", async () => {
@@ -1269,7 +1675,7 @@ test("groups a bulk script execution and exposes per-tunnel detail", async () =>
     const detail = await app.inject({ method: "GET", url: `/api/scripts/${scriptId}/bulk-executions/${runId}?status=succeeded&page=1&pageSize=25`, headers: { cookie: sessionCookie } });
     assert.equal(detail.statusCode, 200, detail.body);
     assert.equal(detail.json().executions[0].tunnelId, tunnelId);
-    assert.equal(detail.json().executions[0].computerName, null);
+    assert.equal(detail.json().executions[0].computerName, "TUNNEL-WIN-01");
     assert.equal(detail.json().executions[0].environment, "windows");
     assert.deepEqual(detail.json().summary, { total: 1, running: 0, succeeded: 1, failed: 0, timedOut: 0, cancelled: 0, scheduled: 0 });
     for (const tunnelSearch of ["highlands", "hlc", "0001"]) {
@@ -1550,7 +1956,7 @@ test("tracks enrollment history and issues cleanup for a running tunnel", async 
     headers: { cookie: sessionCookie }
   });
   assert.equal(logs.statusCode, 200, logs.body);
-  assert.equal(logs.json().logs.length, 3);
+  assert.equal(logs.json().logs.length, 10);
 
   const hardDeleted = await app.inject({
     method: "DELETE",

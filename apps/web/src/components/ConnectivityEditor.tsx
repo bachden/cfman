@@ -52,6 +52,7 @@ export function validatePublications(publications: DraftPublication[]): string |
   if (publications.length === 0) return "Add at least one subdomain";
   const labelKeys = new Set<string>();
   let commandAgentRoutes = 0;
+  let sshRoutes = 0;
   for (const publication of publications) {
     const customLabel = publication.customLabel.trim().toLowerCase();
     const suffix = publication.suffix.trim().toLowerCase();
@@ -77,7 +78,8 @@ export function validatePublications(publications: DraftPublication[]): string |
       if (route.kind === "service") {
         try {
           const url = new URL(route.serviceUrl);
-          if (url.protocol !== "http:" && url.protocol !== "https:") return "Service URLs must use HTTP or HTTPS";
+          if (url.protocol !== "http:" && url.protocol !== "https:" && url.protocol !== "ssh:") return "Service URLs must use HTTP, HTTPS, or SSH";
+          if (url.protocol === "ssh:") sshRoutes += 1;
         } catch {
           return "Enter a valid service URL for every route";
         }
@@ -85,6 +87,7 @@ export function validatePublications(publications: DraftPublication[]): string |
     }
   }
   if (commandAgentRoutes > 1) return "Only one command agent route can be configured per tunnel";
+  if (sshRoutes > 1) return "Only one ssh:// route can be configured per tunnel";
   return null;
 }
 

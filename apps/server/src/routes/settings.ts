@@ -6,6 +6,7 @@ import { requireAuth, requireSessionAuth } from "../lib/auth.js";
 import { withTransaction } from "../lib/database.js";
 import { getMcpAccessSetting, rotateMcpToken, setMcpEnabled } from "../lib/mcp-access.js";
 import { executionVariablesSchema, getGlobalExecutionVariables } from "../lib/execution-variables.js";
+import { disableCloudflareManPublicHostnameWaf, ensureCloudflareManRemoteAgentRoutes } from "../lib/route-waf.js";
 
 const settingsSchema = z.object({
   publicBaseUrl: z.string().trim().min(1).max(500).transform((value, context) => {
@@ -56,6 +57,12 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       }, client);
       return value;
     });
+    const newHostname = new URL(publicBaseUrl).hostname;
+    await ensureCloudflareManRemoteAgentRoutes(newHostname);
+    const wafResult = await disableCloudflareManPublicHostnameWaf(newHostname);
+    if (wafResult.failures.length) {
+      request.log.error({ failures: wafResult.failures }, "Unable to reconcile WAF on the CFMan public hostname");
+    }
     return { settings: await settingsResponse() };
   });
 

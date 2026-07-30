@@ -127,11 +127,18 @@ export type Tunnel = {
   lastConnectedAt: string | null;
   lastVerifiedAt: string | null;
   lastError: string | null;
+  wafWarning: string | null;
   createdAt: string;
   rdpStatus: string;
   rdpTargetIp: string | null;
   rdpUrl: string | null;
   rdpLastError: string | null;
+  sshStatus: string;
+  sshTargetIp: string | null;
+  sshPort: number;
+  sshUsername: string | null;
+  sshUrl: string | null;
+  sshLastError: string | null;
   publications: TunnelPublication[];
   executionVariables: ExecutionVariables;
   enrollments?: TunnelEnrollment[];

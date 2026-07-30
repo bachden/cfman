@@ -5,7 +5,7 @@ import { pool, withTransaction } from "./database.js";
 import { decryptSecret } from "./security.js";
 import { slugifyLabel } from "./tunnels.js";
 import { COMMAND_AGENT_SERVICE_URL } from "./command-agent.js";
-import { resolveWafAllowedIps } from "./route-waf.js";
+import { reconcileZoneWaf } from "./route-waf.js";
 
 type PublicationRoute = {
   id: string;
@@ -28,6 +28,7 @@ type TunnelConnectivity = {
   provider_mode: "live" | "mock";
   cf_account_id: string | null;
   api_token_encrypted: string | null;
+  zone_id: string;
   cf_zone_id: string | null;
 };
 
@@ -54,9 +55,23 @@ type DeprovisionTunnel = TunnelConnectivity & {
   routes: DeprovisionRoute[];
 };
 
+// Cloudflare Tunnel's ingress `path` field is an unanchored regular
+// expression, not a literal prefix - per Cloudflare's own docs, "anchors are
+// not included" by default. Passing a raw path like "/exec" through
+// unescaped means it matches that substring ANYWHERE in the URL, so a
+// command_agent route at "/exec" was silently also swallowing requests like
+// "/api/tunnels/{id}/execution-variables/resolve" or ".../commands/execute"
+// on any hostname that also carries that route (in particular CFMan's own
+// self-hosted hostname, which is also its own command-agent target) -
+// routing them to the local command agent instead of the CFMan app, which
+// then rejected them with its own "Invalid command agent token" error.
+// Anchoring at the start and requiring either end-of-path or a "/" boundary
+// after the configured path keeps this a true prefix match, mirroring the
+// same "exact path or subpath" semantics the WAF expression already uses.
 export function pathPrefixPattern(path: string): string | undefined {
   if (path === "/") return undefined;
-  return path;
+  const escaped = path.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return `^${escaped}(?:$|/)`;
 }
 
 function ingressRules(publications: Publication[]): CloudflareIngressRule[] {
@@ -121,7 +136,7 @@ function cloudflareClient(tunnel: TunnelConnectivity): CloudflareClient {
 
 export async function tunnelHasActiveCfTunnel(tunnelId: string, expectedCfTunnelId: string): Promise<boolean> {
   const result = await pool.query(
-    `SELECT s.id, s.tenant_code, s.tunnel_code, s.cf_tunnel_id,
+    `SELECT s.id, s.tenant_code, s.tunnel_code, s.cf_tunnel_id, s.zone_id,
             a.id AS account_row_id, a.provider_mode, a.cf_account_id, a.api_token_encrypted,
             z.cf_zone_id
        FROM tunnels s
@@ -150,34 +165,13 @@ async function applyConnectivity(
   const primaryRoute = primary.routes.find((route) => route.path === "/") ?? primary.routes[0];
   if (!primaryRoute) throw new Error(`Published endpoint ${primary.hostname} has no routes`);
   await client.configureTunnel(cfTunnelId, ingressRules(publications));
-  let defaultAllowedIps: Promise<string[]> | undefined;
-  for (const publication of publications) {
-    for (const route of publication.routes) {
-      if (!route.wafEnabled && !route.wafRuleId) continue;
-      const allowedIps = route.wafEnabled
-        ? route.wafAllowedIps.length
-          ? await resolveWafAllowedIps(route.wafAllowedIps, tunnel.provider_mode)
-          : await (defaultAllowedIps ??= resolveWafAllowedIps([], tunnel.provider_mode))
-        : route.wafAllowedIps;
-      const applied = await client.configureRouteWaf({
-        zoneId: tunnel.cf_zone_id ?? "mock-zone",
-        hostname: publication.hostname,
-        path: route.path,
-        enabled: route.wafEnabled,
-        allowedIps,
-        rulesetId: route.wafRulesetId
-      });
-      route.wafAllowedIps = allowedIps;
-      route.wafRulesetId = applied.rulesetId;
-      route.wafRuleId = applied.ruleId;
-      await pool.query(
-        `UPDATE tunnel_routes
-            SET waf_allowed_ips = $1, waf_ruleset_id = $2, waf_rule_id = $3, updated_at = now()
-          WHERE id = $4`,
-        [allowedIps, applied.rulesetId, applied.ruleId, route.id]
-      );
-    }
-  }
+  // WAF for every route in this zone (across every tunnel, not just this
+  // one) is rebuilt as a single merged Cloudflare rule - see reconcileZoneWaf.
+  // A failure there (e.g. an allow-list IP couldn't be resolved) is recorded
+  // as a non-blocking warning on the affected tunnels instead of failing this
+  // provisioning attempt: the ingress/DNS below still make the tunnel
+  // reachable, just without WAF protection until the next successful reconcile.
+  await reconcileZoneWaf(client, tunnel.zone_id, tunnel.cf_zone_id, tunnel.provider_mode);
   for (const publication of publications) {
     // Always upsert instead of trusting a cached dns_record_id: Cloudflare is
     // the source of truth, and a record can disappear out-of-band (deleted
@@ -203,11 +197,10 @@ async function applyConnectivity(
 
 export async function reconfigureTunnel(
   tunnelId: string,
-  removedDnsRecordIds: string[] = [],
-  removedWafRoutes: Array<{ hostname: string; path: string; rulesetId: string | null }> = []
+  removedDnsRecordIds: string[] = []
 ): Promise<boolean> {
   const result = await pool.query(
-    `SELECT s.id, s.tenant_code, s.tunnel_code, s.cf_tunnel_id,
+    `SELECT s.id, s.tenant_code, s.tunnel_code, s.cf_tunnel_id, s.zone_id,
             a.id AS account_row_id, a.provider_mode, a.cf_account_id, a.api_token_encrypted,
             z.cf_zone_id
        FROM tunnels s
@@ -226,16 +219,9 @@ export async function reconfigureTunnel(
   if (publications.length === 0) throw new Error("Tunnel has no published endpoints");
   const client = cloudflareClient(tunnel);
   try {
-    for (const route of removedWafRoutes) {
-      await client.configureRouteWaf({
-        zoneId: tunnel.cf_zone_id ?? "mock-zone",
-        hostname: route.hostname,
-        path: route.path,
-        enabled: false,
-        allowedIps: [],
-        rulesetId: route.rulesetId
-      });
-    }
+    // Routes no longer present in tunnel_routes are already excluded from the
+    // next reconcileZoneWaf rebuild inside applyConnectivity - nothing extra
+    // to disable for them here.
     await applyConnectivity(tunnelId, tunnel, client, tunnel.cf_tunnel_id, publications);
     for (const recordId of removedDnsRecordIds) {
       await client.deleteDnsRecord(tunnel.cf_zone_id ?? "mock-zone", recordId);
@@ -281,7 +267,7 @@ export async function deprovisionTunnel(
     return withTunnelCloudflareLock(tunnelId, (client) => deprovisionTunnel(tunnelId, reason, client));
   }
   const result = await pool.query(
-    `SELECT s.id, s.tenant_code, s.tunnel_code, s.cf_tunnel_id,
+    `SELECT s.id, s.tenant_code, s.tunnel_code, s.cf_tunnel_id, s.zone_id,
             a.id AS account_row_id, a.provider_mode, a.cf_account_id, a.api_token_encrypted,
             z.cf_zone_id,
             s.rdp_route_id AS "rdpRouteId", s.rdp_target_id AS "rdpTargetId", s.rdp_vnet_id AS "rdpVnetId"
@@ -335,20 +321,17 @@ export async function deprovisionTunnel(
   };
 
   const zoneId = tunnel.cf_zone_id ?? "mock-zone";
-  for (const route of tunnel.routes) {
-    if (!route.wafRuleId) continue;
+  if (tunnel.routes.some((route) => route.wafRuleId)) {
     if (!tunnel.cf_zone_id && tunnel.provider_mode === "live") {
-      failures.push(`WAF ${route.hostname}${route.path}: Cloudflare zone ID is missing`);
-      continue;
+      failures.push("WAF: Cloudflare zone ID is missing");
+    } else {
+      // Excludes this tunnel's own routes so the merged zone rule is rebuilt
+      // without them, instead of disabling each one individually.
+      await attempt("WAF zone reconcile", async () => {
+        const { warning } = await reconcileZoneWaf(client, tunnel.zone_id, tunnel.cf_zone_id, tunnel.provider_mode, { excludeTunnelId: tunnelId });
+        if (warning) throw new Error(warning);
+      });
     }
-    await attempt(`WAF ${route.hostname}${route.path}`, () => client.configureRouteWaf({
-      zoneId,
-      hostname: route.hostname,
-      path: route.path,
-      enabled: false,
-      allowedIps: [],
-      rulesetId: route.wafRulesetId
-    }));
   }
 
   const deletedDnsRecords = new Set<string>();
@@ -395,7 +378,7 @@ export async function deprovisionTunnel(
               cf_tunnel_status = 'not_created', rdp_status = 'pending',
               rdp_target_ip = null, rdp_target_hostname = null,
               rdp_vnet_id = null, rdp_route_id = null, rdp_target_id = null,
-              rdp_url = null, rdp_last_error = null, last_error = null, updated_at = now()
+              rdp_url = null, rdp_last_error = null, last_error = null, waf_warning = null, updated_at = now()
         WHERE id = $1`,
       [tunnelId]
     );
@@ -422,7 +405,7 @@ export async function deprovisionTunnel(
 
 export async function provisionTunnel(tunnelId: string): Promise<ProvisioningResult> {
   const result = await pool.query(
-    `SELECT s.id, s.tenant_code, s.tunnel_code, s.origin_url, s.hostname, s.cf_tunnel_id, s.dns_record_id,
+    `SELECT s.id, s.tenant_code, s.tunnel_code, s.origin_url, s.hostname, s.cf_tunnel_id, s.dns_record_id, s.zone_id,
             a.id AS account_row_id, a.provider_mode, a.cf_account_id, a.api_token_encrypted,
             z.cf_zone_id
        FROM tunnels s

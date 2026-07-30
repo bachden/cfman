@@ -1,5 +1,5 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronLeft, ChevronRight, Plus, RefreshCw, Search, TerminalSquare } from "lucide-react";
+import { AlertTriangle, ChevronLeft, ChevronRight, Plus, RefreshCw, Search, TerminalSquare } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { toast } from "sonner";
@@ -7,8 +7,8 @@ import { api } from "../api";
 import { useDrawers, type TunnelDrawerTab } from "../components/DrawerContext";
 import { PageHeader } from "../components/PageHeader";
 import { SearchableSelect } from "../components/SearchableSelect";
-import { StatusBadge, tunnelNeedsFastPolling, tunnelOnlineStatus } from "../components/StatusBadge";
-import type { Tunnel } from "../types";
+import { StatusBadge, isCfmanSelfTunnel, tunnelNeedsFastPolling, tunnelOnlineStatus } from "../components/StatusBadge";
+import type { AppSettings, Tunnel } from "../types";
 
 export type { TunnelDrawerTab };
 
@@ -47,6 +47,7 @@ export function TunnelsPage() {
     queryKey: ["tenant-codes"],
     queryFn: () => api.get<{ tenantCodes: string[] }>("/api/tunnels/tenant-codes")
   });
+  const { data: settingsData } = useQuery({ queryKey: ["settings"], queryFn: () => api.get<{ settings: AppSettings }>("/api/settings") });
   const tenantCodeOptions = useMemo(() => [{ value: "", label: "Any tenant" }, ...(tenantCodesData?.tenantCodes ?? []).map((code) => ({ value: code, label: code }))], [tenantCodesData]);
   const refreshTunnels = async (tunnelIds: string[]) => {
     try {
@@ -90,7 +91,8 @@ export function TunnelsPage() {
         <div className="table-scroll"><table><thead><tr><th>Tunnel</th><th>Assignment</th><th>Connectivity</th><th>Enrollment</th><th>Commands</th></tr></thead><tbody>
           {isLoading ? <tr><td colSpan={5}><div className="quiet-empty">Loading tunnels...</div></td></tr> : data?.tunnels.length === 0 ? <tr><td colSpan={5}><div className="quiet-empty">No tunnels match this view</div></td></tr> : data?.tunnels.map((tunnel) => {
             const refreshing = refreshingIds.has(tunnel.id);
-            return <tr key={tunnel.id} className="data-row" onClick={() => openTunnelDrawer(tunnel.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openTunnelDrawer(tunnel.id); } }} tabIndex={0}><td><div className="primary-cell"><strong>{tunnel.displayName}</strong><span>{tunnel.tenantCode} · {tunnel.tunnelCode}</span></div></td><td><div className="primary-cell"><strong>{tunnel.accountName}</strong><span>{tunnel.zoneName}</span></div></td><td>{refreshing ? <StatusBadge status="refreshing" /> : <StatusBadge status={tunnelOnlineStatus(tunnel.cfTunnelStatus)} />}</td><td>{refreshing ? <StatusBadge status="refreshing" /> : <StatusBadge status={tunnel.onboardingStatus} />}</td><td>{tunnel.commandAgent && <button className="icon-button command-agent-table-action" type="button" title="Open Connect tab" aria-label={`Open Connect tab for ${tunnel.displayName}`} onClick={(event) => { event.stopPropagation(); openTunnelDrawer(tunnel.id, "connect"); }}><TerminalSquare size={17} /></button>}</td></tr>;
+            const isCfmanSelf = isCfmanSelfTunnel(tunnel, settingsData?.settings.publicBaseUrl);
+            return <tr key={tunnel.id} className="data-row" onClick={() => openTunnelDrawer(tunnel.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openTunnelDrawer(tunnel.id); } }} tabIndex={0}><td><div className="primary-cell"><strong>{tunnel.displayName}{isCfmanSelf && <span className="cfman-self-tag" title="This tunnel is CFMan's own self-hosted target">CFMAN SELF</span>}</strong><span>{tunnel.tenantCode} · {tunnel.tunnelCode}</span></div></td><td><div className="primary-cell"><strong>{tunnel.accountName}</strong><span>{tunnel.zoneName}</span></div></td><td>{refreshing ? <StatusBadge status="refreshing" /> : <div className="connectivity-cell"><StatusBadge status={tunnelOnlineStatus(tunnel.cfTunnelStatus)} />{tunnel.wafWarning && <span className="connectivity-warning-icon" title={tunnel.wafWarning}><AlertTriangle size={14} aria-label="WAF warning" /></span>}</div>}</td><td>{refreshing ? <StatusBadge status="refreshing" /> : <StatusBadge status={tunnel.onboardingStatus} />}</td><td>{tunnel.commandAgent && <button className="icon-button command-agent-table-action" type="button" title="Open Connect tab" aria-label={`Open Connect tab for ${tunnel.displayName}`} onClick={(event) => { event.stopPropagation(); openTunnelDrawer(tunnel.id, "connect"); }}><TerminalSquare size={17} /></button>}</td></tr>;
           })}
         </tbody></table></div>
         {pagination && pagination.total > 0 && <div className="table-pagination"><span>{firstResult}-{lastResult} of {pagination.total}</span><div><button className="icon-button" title="Previous page" aria-label="Previous page" disabled={pagination.page <= 1} onClick={() => setPage((current) => Math.max(1, current - 1))}><ChevronLeft size={17} /></button><span>Page {pagination.page} of {pagination.totalPages}</span><button className="icon-button" title="Next page" aria-label="Next page" disabled={pagination.page >= pagination.totalPages} onClick={() => setPage((current) => current + 1)}><ChevronRight size={17} /></button></div></div>}

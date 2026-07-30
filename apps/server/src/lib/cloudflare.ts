@@ -42,7 +42,7 @@ export type CloudflareVirtualNetwork = {
 export type CloudflareTunnelRoute = {
   id: string;
   network: string;
-  cf_tunnel_id: string;
+  tunnel_id: string;
   virtual_network_id?: string;
 };
 
@@ -245,19 +245,63 @@ export class CloudflareClient {
     });
   }
 
-  async configureRouteWaf(input: {
+  // All of cfman's WAF-protected routes in a zone are folded into as few
+  // Cloudflare custom rules as possible - a "rule pool" - instead of one rule
+  // per route. Two independent Cloudflare limits are in play on
+  // http_request_firewall_custom: a cap on the number of custom rules per
+  // zone (5 on Free, higher on paid plans) and a 4096-character cap on a
+  // single rule's expression. We control the second one precisely (we build
+  // the expression text), so routes are bin-packed into rules that each stay
+  // under that limit, maximizing how many routes share one rule slot. The
+  // first limit is plan-dependent and only discoverable by Cloudflare
+  // rejecting the request; when that happens the caller (reconcileZoneWaf)
+  // turns it into a "upgrade your Cloudflare plan" warning instead of an
+  // opaque failure - packing tighter only delays that ceiling, it can't
+  // remove it.
+  static readonly ZONE_WAF_DESCRIPTION = "cfman managed WAF";
+  static readonly MAX_RULE_EXPRESSION_LENGTH = 4096;
+
+  private poolRuleDescription(poolIndex: number): string {
+    return `${CloudflareClient.ZONE_WAF_DESCRIPTION} #${poolIndex + 1}`;
+  }
+
+  private isPoolRuleDescription(description: string | undefined): boolean {
+    return description?.startsWith(CloudflareClient.ZONE_WAF_DESCRIPTION) ?? false;
+  }
+
+  // Greedily bin-packs each route's condition into the current pool rule
+  // until adding one more would push that rule's expression past the
+  // character cap, then starts a new rule. Returns groups of route indices,
+  // one group per pool rule, in the order rules should be created.
+  private packRouteConditions(conditions: string[]): number[][] {
+    const groups: number[][] = [];
+    let currentGroup: number[] = [];
+    let currentLength = 0;
+    const separatorLength = " or ".length;
+    conditions.forEach((condition, index) => {
+      const additionalLength = currentGroup.length ? condition.length + separatorLength : condition.length;
+      if (currentGroup.length && currentLength + additionalLength > CloudflareClient.MAX_RULE_EXPRESSION_LENGTH) {
+        groups.push(currentGroup);
+        currentGroup = [index];
+        currentLength = condition.length;
+      } else {
+        currentGroup.push(index);
+        currentLength += additionalLength;
+      }
+    });
+    if (currentGroup.length) groups.push(currentGroup);
+    return groups;
+  }
+
+  async configureZoneWaf(input: {
     zoneId: string;
-    hostname: string;
-    path: string;
-    enabled: boolean;
-    allowedIps: string[];
+    routes: Array<{ hostname: string; path: string; allowedIps: string[] }>;
     rulesetId?: string | null;
-  }): Promise<{ rulesetId: string | null; ruleId: string | null }> {
-    const description = `cfman route WAF: ${input.hostname}${input.path}`;
+  }): Promise<{ rulesetId: string | null; ruleIds: Array<string | null> }> {
+    const enabled = input.routes.length > 0;
     if (this.mode === "mock") {
-      return input.enabled
-        ? { rulesetId: input.rulesetId ?? randomUUID(), ruleId: randomUUID() }
-        : { rulesetId: input.rulesetId ?? null, ruleId: null };
+      if (!enabled) return { rulesetId: input.rulesetId ?? null, ruleIds: [] };
+      return { rulesetId: input.rulesetId ?? randomUUID(), ruleIds: input.routes.map(() => randomUUID()) };
     }
 
     let ruleset: CloudflareRuleset | undefined;
@@ -266,8 +310,8 @@ export class CloudflareClient {
         const candidate = await this.request<CloudflareRuleset>(`/zones/${input.zoneId}/rulesets/${input.rulesetId}`);
         if (candidate.kind === "zone" && candidate.phase === "http_request_firewall_custom") ruleset = candidate;
       } catch (error) {
-        if (!input.enabled && (error as Error & { status?: number }).status === 404) {
-          return { rulesetId: null, ruleId: null };
+        if (!enabled && (error as Error & { status?: number }).status === 404) {
+          return { rulesetId: null, ruleIds: [] };
         }
         throw error;
       }
@@ -281,22 +325,29 @@ export class CloudflareClient {
         ruleset = await this.request<CloudflareRuleset>(`/zones/${input.zoneId}/rulesets/${entrypoint.id}`);
       }
     }
-    const existingRules = (ruleset?.rules ?? []).filter((rule) => rule.description !== description);
-    if (input.enabled) {
-      const escapedHostname = input.hostname.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
-      const escapedPath = input.path.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
-      const pathExpression = input.path === "/"
-        ? `http.request.uri.path eq "${escapedPath}"`
-        : `(http.request.uri.path eq "${escapedPath}" or starts_with(http.request.uri.path, "${escapedPath}/"))`;
-      const sourceExpression = input.allowedIps.length ? `not ip.src in { ${input.allowedIps.join(" ")} }` : "true";
-      existingRules.push({
-        action: "block",
-        expression: `(http.host eq "${escapedHostname}" and ${pathExpression} and ${sourceExpression})`,
-        description,
-        enabled: true
+    const existingRules = (ruleset?.rules ?? []).filter((rule) => !this.isPoolRuleDescription(rule.description));
+    let groups: number[][] = [];
+    if (enabled) {
+      const conditions = input.routes.map((route) => {
+        const escapedHostname = route.hostname.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+        const escapedPath = route.path.replaceAll("\\", "\\\\").replaceAll('"', '\\"');
+        const pathExpression = route.path === "/"
+          ? `http.request.uri.path eq "${escapedPath}"`
+          : `(http.request.uri.path eq "${escapedPath}" or starts_with(http.request.uri.path, "${escapedPath}/"))`;
+        const sourceExpression = route.allowedIps.length ? `not ip.src in { ${route.allowedIps.join(" ")} }` : "true";
+        return `(http.host eq "${escapedHostname}" and ${pathExpression} and ${sourceExpression})`;
+      });
+      groups = this.packRouteConditions(conditions);
+      groups.forEach((group, poolIndex) => {
+        existingRules.push({
+          action: "block",
+          expression: group.map((index) => conditions[index]).join(" or "),
+          description: this.poolRuleDescription(poolIndex),
+          enabled: true
+        });
       });
     }
-    if (!ruleset && !input.enabled) return { rulesetId: null, ruleId: null };
+    if (!ruleset && !enabled) return { rulesetId: null, ruleIds: [] };
     if (!ruleset) {
       ruleset = await this.request<CloudflareRuleset>(`/zones/${input.zoneId}/rulesets`, {
         method: "POST",
@@ -317,8 +368,13 @@ export class CloudflareClient {
         })
       });
     }
-    const managedRule = (ruleset.rules ?? []).find((rule) => rule.description === description);
-    return { rulesetId: ruleset.id, ruleId: managedRule?.id ?? null };
+    const ruleIdByDescription = new Map((ruleset.rules ?? []).map((rule) => [rule.description, rule.id]));
+    const ruleIds = new Array<string | null>(input.routes.length).fill(null);
+    groups.forEach((group, poolIndex) => {
+      const ruleId = ruleIdByDescription.get(this.poolRuleDescription(poolIndex)) ?? null;
+      for (const routeIndex of group) ruleIds[routeIndex] = ruleId;
+    });
+    return { rulesetId: ruleset.id, ruleIds };
   }
 
   async createDnsRecord(zoneId: string, hostname: string, cfTunnelId: string): Promise<{ id: string }> {
@@ -348,6 +404,10 @@ export class CloudflareClient {
 
   async deleteVirtualNetwork(networkId: string): Promise<void> {
     await this.deleteResource(`/accounts/${this.accountId}/teamnet/virtual_networks/${networkId}`);
+  }
+
+  async deleteAccessApplication(applicationId: string): Promise<void> {
+    await this.deleteResource(`/accounts/${this.accountId}/access/apps/${applicationId}`);
   }
 
   async ensureBrowserRdpDnsRecord(zoneId: string, hostname: string): Promise<{ id: string }> {
@@ -416,7 +476,7 @@ export class CloudflareClient {
 
   async ensureTunnelRoute(cfTunnelId: string, virtualNetworkId: string, targetIp: string): Promise<CloudflareTunnelRoute> {
     if (this.mode === "mock") {
-      return { id: randomUUID(), network: `${targetIp}/32`, cf_tunnel_id: cfTunnelId, virtual_network_id: virtualNetworkId };
+      return { id: randomUUID(), network: `${targetIp}/32`, tunnel_id: cfTunnelId, virtual_network_id: virtualNetworkId };
     }
     const network = `${targetIp}/32`;
     const query = new URLSearchParams({
@@ -431,14 +491,19 @@ export class CloudflareClient {
     );
     const existing = routes.find((route) => route.network === network && route.virtual_network_id === virtualNetworkId);
     if (existing) {
-      if (existing.cf_tunnel_id !== cfTunnelId) throw new Error(`RDP route ${network} is assigned to another tunnel`);
+      if (existing.tunnel_id !== cfTunnelId) throw new Error(`RDP route ${network} is assigned to another tunnel`);
       return existing;
     }
+    // Cloudflare's Tunnel Routes API (POST /accounts/{account}/teamnet/routes)
+    // requires the field named `tunnel_id` - not `cf_tunnel_id`, which is only
+    // this codebase's own column/variable naming convention for a Cloudflare
+    // tunnel id. Sending the wrong key here previously produced a 400 from
+    // Cloudflare: "Json deserialize error: missing field `tunnel_id`".
     return this.request<CloudflareTunnelRoute>(`/accounts/${this.accountId}/teamnet/routes`, {
       method: "POST",
       body: JSON.stringify({
         network,
-        cf_tunnel_id: cfTunnelId,
+        tunnel_id: cfTunnelId,
         virtual_network_id: virtualNetworkId,
         comment: "Managed by cfman"
       })
@@ -543,6 +608,88 @@ export class CloudflareClient {
         `/accounts/${this.accountId}/access/apps?${query.toString()}`
       );
       applicationId = applications.find((application) => application.type === "rdp" && application.domain === input.domain)?.id ?? null;
+    }
+    if (applicationId) {
+      return this.request<CloudflareAccessApplication>(`/accounts/${this.accountId}/access/apps/${applicationId}`, {
+        method: "PUT",
+        body: JSON.stringify(body)
+      });
+    }
+    return this.request<CloudflareAccessApplication>(`/accounts/${this.accountId}/access/apps`, {
+      method: "POST",
+      body: JSON.stringify(body)
+    });
+  }
+
+  async ensureSshAccessPolicy(existingId: string | null, allowedEmails: string[], usernames: string[]): Promise<CloudflareAccessPolicy> {
+    if (this.mode === "mock") return { id: existingId ?? randomUUID(), name: "cfman SSH operators" };
+    const name = "cfman SSH operators";
+    const body = {
+      name,
+      decision: "allow",
+      include: allowedEmails.map((email) => ({ email: { email } })),
+      session_duration: "8h",
+      connection_rules: {
+        ssh: {
+          usernames,
+          allow_email_alias: true
+        }
+      }
+    };
+    let policyId = existingId;
+    if (!policyId) {
+      const policies = await this.listPages<CloudflareAccessPolicy>(
+        `/accounts/${this.accountId}/access/policies`,
+        new URLSearchParams({ per_page: "100" })
+      );
+      policyId = policies.find((policy) => policy.name === name)?.id ?? null;
+    }
+    if (policyId) {
+      return this.request<CloudflareAccessPolicy>(`/accounts/${this.accountId}/access/policies/${policyId}`, {
+        method: "PUT",
+        body: JSON.stringify(body)
+      });
+    }
+    return this.request<CloudflareAccessPolicy>(`/accounts/${this.accountId}/access/policies`, {
+      method: "POST",
+      body: JSON.stringify(body)
+    });
+  }
+
+  async ensureBrowserSshApplication(input: {
+    existingId: string | null;
+    name: string;
+    domain: string;
+    policyId: string;
+  }): Promise<CloudflareAccessApplication> {
+    if (this.mode === "mock") {
+      return { id: input.existingId ?? randomUUID(), name: input.name, domain: input.domain, type: "ssh" };
+    }
+    // Unlike "rdp" applications, "ssh" applications reject any target-binding
+    // field at all - both `target_criteria` ("target contexts are not
+    // available for ssh applications") and a private `destinations` entry
+    // ("private destinations are not supported for ssh apps"), confirmed
+    // live against a real account. The only way Cloudflare can tell which
+    // backend to proxy to is for `domain` to already be a real hostname with
+    // a working tunnel ingress behind it - so this must be the tunnel's own
+    // ssh:// ingress hostname (see ensureSshIngressRoute), never a shared
+    // zone-wide placeholder domain the way the RDP flow uses one.
+    const body = {
+      name: input.name,
+      type: "ssh",
+      domain: input.domain,
+      destinations: [{ type: "public", uri: input.domain }],
+      policies: [{ id: input.policyId, precedence: 1 }],
+      session_duration: "8h",
+      app_launcher_visible: true
+    };
+    let applicationId = input.existingId;
+    if (!applicationId) {
+      const query = new URLSearchParams({ domain: input.domain, exact: "true", per_page: "50" });
+      const applications = await this.request<CloudflareAccessApplication[]>(
+        `/accounts/${this.accountId}/access/apps?${query.toString()}`
+      );
+      applicationId = applications.find((application) => application.type === "ssh" && application.domain === input.domain)?.id ?? null;
     }
     if (applicationId) {
       return this.request<CloudflareAccessApplication>(`/accounts/${this.accountId}/access/apps/${applicationId}`, {

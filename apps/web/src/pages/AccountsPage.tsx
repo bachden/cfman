@@ -4,6 +4,7 @@ import { useEffect, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 import { ApiError, api } from "../api";
 import { CapacityBar } from "../components/CapacityBar";
+import { CopyButton } from "../components/CopyButton";
 import { FieldHelp } from "../components/FieldHelp";
 import { AddVariableButton, ExecutionVariablesEditor } from "../components/ExecutionVariablesEditor";
 import { Modal } from "../components/Modal";

@@ -141,7 +141,7 @@ td { height: 59px; padding: 9px 16px; color: #435047; border-bottom: 1px solid #
 tbody tr:last-child td { border-bottom: 0; }
 tbody tr:hover td { background: #fbfcfb; }
 .primary-cell { display: flex; flex-direction: column; gap: 4px; min-width: 110px; }
-.primary-cell strong { color: var(--ink); font-size: 11px; font-weight: 700; }
+.primary-cell strong { display: inline-flex; align-items: center; gap: 6px; color: var(--ink); font-size: 11px; font-weight: 700; }
 .primary-cell span { color: var(--muted); font-size: 9px; }
 .mono { font-size: 10px; }
 .subdued { color: var(--muted); }
@@ -157,6 +157,8 @@ tbody tr:hover td { background: #fbfcfb; }
 .status-warning { color: #8b550f; background: #fff4e2; border-color: #f1d8ac; }
 .status-danger { color: #9c392d; background: #fcecea; border-color: #efc9c4; }
 .status-neutral { color: #5e6962; background: #f0f3f1; border-color: #dce2de; }
+.connectivity-cell { display: inline-flex; align-items: center; gap: 6px; }
+.connectivity-warning-icon { display: inline-flex; color: #8b550f; cursor: help; flex: 0 0 auto; }
 
 .summary-strip { min-height: 68px; display: flex; background: white; border: 1px solid var(--line); border-radius: 6px; margin-bottom: 18px; }
 .summary-strip > div { min-width: 170px; padding: 14px 20px; display: flex; flex-direction: column; justify-content: center; gap: 3px; border-right: 1px solid var(--line); }
@@ -176,7 +178,19 @@ tbody tr:hover td { background: #fbfcfb; }
 .account-actions { display: flex; justify-content: flex-end; gap: 7px; }
 .account-delete { color: var(--red); }
 .account-delete:hover { color: var(--red); background: var(--red-soft); }
-.inline-alert { margin: 10px 18px; padding: 10px 12px; color: #8d4234; background: var(--red-soft); border: 1px solid #efc9c4; border-radius: 4px; font-size: 11px; }
+.inline-alert { margin: 10px 18px; padding: 10px 12px; display: flex; align-items: flex-start; gap: 7px; color: #8d4234; background: var(--red-soft); border: 1px solid #efc9c4; border-radius: 4px; font-size: 11px; }
+.inline-alert svg { flex: 0 0 auto; margin-top: 1px; }
+/* Same shape as .inline-alert, but for a plain FYI - "this value was
+   auto-filled" - not a warning. Reusing the red alert styling there read as
+   critical when nothing is actually wrong. */
+.inline-note { margin: 10px 18px; padding: 10px 12px; display: flex; align-items: flex-start; gap: 7px; color: var(--green-dark); background: var(--green-soft); border: 1px solid #bfe4d3; border-radius: 4px; font-size: 11px; line-height: 1.5; }
+.inline-note svg { flex: 0 0 auto; margin-top: 1px; }
+.inline-note code { white-space: normal; word-break: break-word; }
+.inline-note > span { min-width: 0; }
+.inline-note-code-row { min-width: 0; margin-top: 7px; display: flex; align-items: center; gap: 8px; }
+.inline-note-code-row code { min-width: 0; flex: 1; padding: 8px 10px; overflow-x: auto; color: var(--ink); background: rgba(255, 255, 255, .65); border: 1px solid #bfe4d3; border-radius: 4px; font-size: 10px; white-space: pre; }
+.inline-note-code-row .copy-icon { flex: 0 0 auto; }
+.inline-note-action { margin-top: 8px; }
 .status-mismatch-hint { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0; }
 .status-mismatch-hint > span { display: flex; align-items: flex-start; gap: 7px; flex: 1; }
 .status-mismatch-hint .button { flex: 0 0 auto; }
@@ -293,8 +307,6 @@ tbody tr:hover td { background: #fbfcfb; }
 .delete-check-row p { margin: 4px 0 5px; color: #536058; font-size: 10px; line-height: 1.45; }
 .delete-check-row small { display: block; color: var(--muted); font-size: 9px; line-height: 1.45; }
 .delete-force-panel { display: flex; flex-direction: column; gap: 13px; }
-.delete-force-panel .inline-alert { display: flex; align-items: flex-start; gap: 7px; }
-.delete-force-panel .inline-alert svg { flex: 0 0 auto; margin-top: 1px; }
 .segmented { width: fit-content; height: 36px; padding: 3px; display: flex; background: #edf1ee; border-radius: 5px; }
 .segmented button { min-width: 100px; height: 30px; padding: 0 10px; display: flex; align-items: center; justify-content: center; gap: 6px; color: #69756d; background: transparent; border-radius: 4px; cursor: pointer; font-size: 10px; font-weight: 700; }
 .segmented button.active { color: #1f382d; background: white; box-shadow: 0 1px 3px rgba(20, 30, 24, .12); }
@@ -470,6 +482,7 @@ tbody tr:hover td { background: #fbfcfb; }
 .execution-stats-compact .execution-stat { min-width: 21px; display: grid; grid-template-columns: 12px auto; align-items: center; gap: 3px; padding: 0; background: transparent; border: 0; }
 .execution-stats-compact .execution-stat-zero { color: #98a19c; }
 .command-execution-source-tag { padding: 3px 6px; color: #496158; background: #e7eee9; border: 1px solid #d0dbd3; border-radius: 3px; font-size: 8px; font-weight: 800; line-height: 1; text-transform: uppercase; }
+.cfman-self-tag { padding: 3px 6px; color: #3d4f9c; background: #e8ebfb; border: 1px solid #c7cef2; border-radius: 3px; font-size: 8px; font-weight: 800; line-height: 1; text-transform: uppercase; white-space: nowrap; }
 .scope-badge { display: inline-block; margin: 0 2px; padding: 3px 7px; color: #496158; background: #e7eee9; border: 1px solid #d0dbd3; border-radius: 3px; font-family: var(--code-font-family); font-size: 10px; font-weight: 700; line-height: 1; text-transform: uppercase; letter-spacing: .02em; vertical-align: middle; }
 .command-execution-body { display: flex; flex-direction: column; gap: 8px; padding: 0 10px 10px; }
 .command-execution-body .script-editor { min-height: 200px; }
@@ -646,15 +659,11 @@ tbody tr:hover td { background: #fbfcfb; }
 .stream-line { display: block; }
 .stream-line small { display: inline-block; width: 44px; color: #8aa797; font-size: 7px; text-transform: uppercase; user-select: none; -webkit-user-select: none; }
 .stream-line-stderr { color: #ffd0ca; }
-.publication-summary { display: flex; flex-direction: column; border-top: 1px solid var(--line); }
+.publication-summary { display: flex; flex-direction: column; gap: 10px; border-top: 1px solid var(--line); }
 .publication-summary > header { min-height: 42px; display: flex; align-items: center; justify-content: space-between; }
 .publication-summary > header h3 { font-size: 11px; }
 .publication-summary > header span { color: var(--muted); font-size: 9px; }
-.publication-summary-item { padding: 11px 12px; display: flex; flex-direction: column; gap: 7px; border: 1px solid var(--line); border-bottom: 0; }
-.publication-summary-item:last-child { border-bottom: 1px solid var(--line); }
-.publication-summary-item:first-of-type { border-radius: 5px 5px 0 0; }
-.publication-summary-item:last-child { border-radius: 0 0 5px 5px; }
-.publication-summary-item:only-of-type { border-radius: 5px; }
+.publication-summary-item { padding: 11px 12px; display: flex; flex-direction: column; gap: 7px; border: 1px solid var(--line); border-radius: 5px; }
 .publication-summary-head { min-height: 24px; display: flex; align-items: center; gap: 8px; }
 .publication-summary-head code { color: var(--ink); font-size: 10px; font-weight: 700; overflow-wrap: anywhere; }
 .publication-summary-head .status { margin-left: auto; }
@@ -666,6 +675,7 @@ tbody tr:hover td { background: #fbfcfb; }
 .connectivity-inline-editor { display: flex; flex-direction: column; gap: 18px; }
 .detail-link { color: var(--green); text-decoration: none; }
 .detail-link:hover { text-decoration: underline; }
+.route-waf-rule-link { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; }
 .connectivity-scope { display: grid; grid-template-columns: 1fr 1fr 1.3fr; border: 1px solid var(--line); border-radius: 5px; }
 .connectivity-scope > div { min-width: 0; padding: 10px 12px; display: flex; flex-direction: column; gap: 4px; border-right: 1px solid var(--line); }
 .connectivity-scope > div:last-child { border-right: 0; }
