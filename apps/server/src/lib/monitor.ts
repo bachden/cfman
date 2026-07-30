@@ -1,3 +1,8 @@
+import { lookup as systemLookup, type LookupAddress, type LookupOptions } from "node:dns";
+import { Resolver } from "node:dns/promises";
+import type { LookupFunction } from "node:net";
+import { Agent, setGlobalDispatcher } from "undici";
+
 export type EndpointCheck = {
   reachable: boolean;
   statusCode: number | null;
@@ -16,6 +21,34 @@ type CheckOptions = {
 function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
+
+// The OS resolver on this network has repeatedly served a stale "doesn't
+// exist" answer for several minutes after cfman creates a brand-new
+// Cloudflare DNS record - confirmed twice by a freshly provisioned browser
+// SSH/RDP gateway failing with a bare "fetch failed" even though the record
+// already resolved correctly everywhere else (dig against 1.1.1.1 directly).
+// Public resolvers don't share whatever cache is doing that, so these
+// health checks resolve the hostname there first and only fall back to the
+// system resolver if that fails - never making a working check worse.
+const publicDnsLookup: LookupFunction = (hostname, options, callback) => {
+  const wantsAll = typeof options === "object" && options !== null && (options as LookupOptions).all === true;
+  const resolver = new Resolver();
+  resolver.setServers(["1.1.1.1", "8.8.8.8"]);
+  resolver.resolve4(hostname)
+    .then((addresses) => {
+      if (!addresses.length) throw new Error("No A records from public DNS");
+      if (wantsAll) callback(null, addresses.map((address): LookupAddress => ({ address, family: 4 })));
+      else callback(null, addresses[0]!, 4);
+    })
+    .catch(() => systemLookup(hostname, options, callback));
+};
+
+// Node's global fetch() dispatches through undici's global dispatcher by
+// default, so swapping that dispatcher for one with a custom DNS lookup is
+// enough to fix every fetch() call in the process (not just these three) -
+// no call site needs to change, and tests that monkey-patch globalThis.fetch
+// still work exactly as before since this only affects real network calls.
+setGlobalDispatcher(new Agent({ connect: { lookup: publicDnsLookup } }));
 
 export async function checkTunnelEndpoint(hostname: string, options: CheckOptions = {}): Promise<EndpointCheck> {
   const startedAt = Date.now();

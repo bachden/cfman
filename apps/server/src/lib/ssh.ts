@@ -42,7 +42,7 @@ export type SshProvisioningResult = {
 // Access Application down if the route was removed entirely.
 export async function syncBrowserSsh(tunnelId: string): Promise<void> {
   const result = await pool.query(
-    `SELECT s.ssh_target_ip, s.ssh_access_app_id,
+    `SELECT s.ssh_access_app_id,
             a.provider_mode, a.cf_account_id, a.api_token_encrypted, a.id AS account_row_id
        FROM tunnels s
        JOIN cloudflare_accounts a ON a.id = s.account_id
@@ -52,7 +52,7 @@ export async function syncBrowserSsh(tunnelId: string): Promise<void> {
   const tunnel = result.rows[0];
   if (!tunnel) return;
   const sshHostname = await findSshRouteHostname(tunnelId);
-  if (sshHostname && tunnel.ssh_target_ip) {
+  if (sshHostname) {
     await provisionBrowserSsh(tunnelId);
     return;
   }
@@ -97,7 +97,7 @@ export async function provisionBrowserSsh(tunnelId: string): Promise<SshProvisio
     lockKey = `cfman:ssh-account:${identity.rows[0].account_id}`;
     await db.query("SELECT pg_advisory_lock(hashtextextended($1, 0))", [lockKey]);
     const result = await db.query(
-      `SELECT s.id, s.tenant_code, s.tunnel_code, s.cf_tunnel_id, s.ssh_target_ip, s.ssh_port,
+      `SELECT s.id, s.tenant_code, s.tunnel_code, s.cf_tunnel_id,
               s.ssh_access_app_id,
               a.id AS account_row_id, a.provider_mode, a.cf_account_id, a.api_token_encrypted,
               a.rdp_allowed_emails, a.ssh_access_policy_id,
@@ -110,7 +110,7 @@ export async function provisionBrowserSsh(tunnelId: string): Promise<SshProvisio
     );
     const tunnel = result.rows[0];
     if (!tunnel) throw new Error("Tunnel not found");
-    if (!tunnel.cf_tunnel_id || !tunnel.ssh_target_ip) throw new Error("Tunnel and SSH target IP are required");
+    if (!tunnel.cf_tunnel_id) throw new Error("Tunnel must be installed and connected before enabling SSH");
     if (tunnel.provider_mode === "live" && (!tunnel.cf_account_id || !tunnel.api_token_encrypted || !tunnel.cf_zone_id)) {
       throw new Error("Cloudflare account or zone is not fully configured for SSH");
     }
@@ -180,7 +180,7 @@ export async function provisionBrowserSsh(tunnelId: string): Promise<SshProvisio
       action: "tunnel.ssh_provisioned",
       entityType: "tunnel",
       entityId: tunnelId,
-      details: { sshHostname, targetIp: String(tunnel.ssh_target_ip) }
+      details: { sshHostname }
     }, db);
     return { ready: true, url: sshUrl };
   } catch (error) {

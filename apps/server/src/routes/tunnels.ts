@@ -11,7 +11,7 @@ import { appendNameFilter, nameFilterFields, validateNameFilter } from "../lib/n
 import { decryptSecret, encryptSecret } from "../lib/security.js";
 import { reconfigureTunnel } from "../lib/provisioning.js";
 import { CFMAN_REMOTE_AGENT_WAF_WARNING, cloudflareManPublicHostname, defaultWafAllowedIps, ensureCloudflareManRemoteAgentRoutes, isCfmanRemoteAgentPath, isCloudflareManPublicHostname, isValidIpOrCidr, reconcileZoneWaf, resolveWafAllowedIps } from "../lib/route-waf.js";
-import { provisionBrowserRdp } from "../lib/rdp.js";
+import { completeRdpEnableExecution, provisionBrowserRdp, rdpEnableScript, RDP_ENABLE_SCRIPT_MARKER } from "../lib/rdp.js";
 import { provisionBrowserSsh, syncBrowserSsh } from "../lib/ssh.js";
 import { verifyTunnelEndpoints } from "../lib/tunnel-verification.js";
 import { synchronizeAccount } from "./accounts.js";
@@ -2033,20 +2033,72 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
     const tunnel = await pool.query("SELECT id, rdp_target_ip FROM tunnels WHERE id = $1", [id]);
     if (!tunnel.rowCount) return reply.code(404).send({ error: "Tunnel not found" });
     if (!tunnel.rows[0].rdp_target_ip) {
-      return reply.code(409).send({ error: "The Windows installer has not reported an RDP target IP" });
+      return reply.code(409).send({ error: "Remote Desktop has not been enabled on this machine yet - use Enable RDS" });
     }
     const result = await provisionBrowserRdp(id);
     if (!result.ready) return reply.code(502).send({ error: result.error ?? "RDP provisioning failed" });
     return result;
   });
 
+  // Runs the registry/firewall/service logic that used to be baked into the
+  // Windows install script, but now on demand: sends it as a remote command
+  // through the machine's already-installed command agent, then (once the
+  // agent answers, whether immediately or via the async report callback -
+  // see completeRdpEnableExecution) provisions the browser-RDP gateway with
+  // whatever target IP it discovers.
+  app.post("/api/tunnels/:id/rdp/enable", { preHandler: requireAuth }, async (request, reply) => {
+    const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
+    const enrollmentResult = await pool.query(
+      `SELECT id, platform
+         FROM enrollments
+        WHERE tunnel_id = $1
+          AND status IN ('ready', 'installed')
+          AND unenrolled_at IS NULL
+          AND deleted_at IS NULL
+        ORDER BY COALESCE(installed_at, claimed_at, created_at) DESC
+        LIMIT 1`,
+      [id]
+    );
+    const enrollment = enrollmentResult.rows[0];
+    if (!enrollment) return reply.code(409).send({ error: "This tunnel has no active enrollment" });
+    if (enrollment.platform !== "windows") return reply.code(409).send({ error: "Remote Desktop only applies to Windows enrollments" });
+    const agent = await getCommandAgentConfig(id);
+    if (!agent) return reply.code(409).send({ error: "No command agent route is configured for this tunnel" });
+    await pool.query(
+      "UPDATE tunnels SET rdp_status = 'provisioning', rdp_last_error = null, updated_at = now() WHERE id = $1",
+      [id]
+    );
+    const script = rdpEnableScript();
+    const executionHandle = await createCommandExecution({
+      tunnelId: id,
+      enrollmentId: enrollment.id,
+      scriptVersionId: null,
+      requestedBy: request.authUser!.id,
+      script,
+      timeoutMs: 30_000,
+      scriptType: "inline",
+      scriptName: RDP_ENABLE_SCRIPT_MARKER,
+      scriptPlatform: "windows",
+      scriptLanguage: "powershell",
+      scriptVersion: null
+    });
+    try {
+      const dispatch = await executeTunnelScript(id, script, 30_000, executionHandle);
+      if (!dispatch) return reply.code(409).send({ error: "No command agent route is configured for this tunnel" });
+      if (dispatch.scheduled) return reply.code(202).send({ scheduled: true, executionId: executionHandle.executionId });
+      const result = await completeRdpEnableExecution(id, dispatch.result?.stdout ?? "");
+      if (!result.ready) return reply.code(502).send({ error: result.error ?? "RDP provisioning failed" });
+      return result;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Command agent execution failed";
+      return reply.code(502).send({ error: message, executionId: executionHandle.executionId });
+    }
+  });
+
   app.post("/api/tunnels/:id/ssh/retry", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
-    const tunnel = await pool.query("SELECT id, ssh_target_ip FROM tunnels WHERE id = $1", [id]);
+    const tunnel = await pool.query("SELECT id FROM tunnels WHERE id = $1", [id]);
     if (!tunnel.rowCount) return reply.code(404).send({ error: "Tunnel not found" });
-    if (!tunnel.rows[0].ssh_target_ip) {
-      return reply.code(409).send({ error: "The Linux installer has not reported an SSH target IP" });
-    }
     const result = await provisionBrowserSsh(id);
     if (!result.ready) return reply.code(502).send({ error: result.error ?? "SSH provisioning failed" });
     return result;

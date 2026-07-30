@@ -11,6 +11,84 @@ export type RdpProvisioningResult = {
   error?: string;
 };
 
+// Identifies a tunnel_command_executions row as the one dispatched by
+// "Enable RDS" (as opposed to an ordinary saved/inline script an operator
+// ran), so the async command-execution report callback (enrollment.ts)
+// knows to run completeRdpEnableExecution once the agent reports back.
+export const RDP_ENABLE_SCRIPT_MARKER = "__cfman_rdp_enable__";
+
+// The registry/firewall/service logic that used to run unconditionally at
+// install time, now dispatched on demand through the same command-agent
+// channel used for ordinary script execution (see
+// POST /api/tunnels/:id/rdp/enable). Emits a single JSON line so the
+// server can parse the result regardless of whether the agent returns it
+// synchronously or via the scheduled/report callback path.
+export function rdpEnableScript(): string {
+  return `$ErrorActionPreference = "Stop"
+$result = @{ rdpEnabled = $false; rdpTargetIp = $null; rdpPort = 3389; error = $null }
+try {
+  $terminalServer = "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server"
+  $rdpTcp = Join-Path $terminalServer "WinStations\\RDP-Tcp"
+  Set-ItemProperty -Path $terminalServer -Name "fDenyTSConnections" -Value 0
+  Set-ItemProperty -Path $rdpTcp -Name "SecurityLayer" -Value 1
+  Set-ItemProperty -Path $rdpTcp -Name "UserAuthentication" -Value 1
+  Get-NetFirewallRule -Name "RemoteDesktop*" -ErrorAction Stop | Enable-NetFirewallRule
+  Set-Service -Name "TermService" -StartupType Automatic
+  Start-Service -Name "TermService"
+  $targetIp = Get-NetIPConfiguration |
+    Where-Object { $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq "Up" } |
+    ForEach-Object { $_.IPv4Address.IPAddress } |
+    Where-Object { $_ -and -not $_.StartsWith("169.254.") } |
+    Select-Object -First 1
+  if (-not $targetIp) { throw "Unable to determine the tunnel LAN IPv4 address." }
+  $listenerReady = $false
+  for ($attempt = 0; $attempt -lt 10; $attempt++) {
+    if (Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue) { $listenerReady = $true; break }
+    Start-Sleep -Seconds 1
+  }
+  if (-not $listenerReady) { throw "Windows Remote Desktop did not start listening on port 3389." }
+  $result.rdpEnabled = $true
+  $result.rdpTargetIp = $targetIp
+} catch {
+  $result.error = $_.Exception.Message
+}
+$result | ConvertTo-Json -Compress
+`;
+}
+
+// Parses the JSON line rdpEnableScript() prints, persists the discovered
+// target IP, and - on success - kicks off the same Cloudflare-side
+// provisioning as a manual "Retry RDP". Called both from the synchronous
+// path in POST /api/tunnels/:id/rdp/enable and from the async
+// command-execution report callback in enrollment.ts, since a command
+// agent may answer either immediately or via a later report.
+export async function completeRdpEnableExecution(tunnelId: string, stdout: string): Promise<RdpProvisioningResult> {
+  let parsed: { rdpEnabled?: boolean; rdpTargetIp?: string; rdpPort?: number; error?: string };
+  try {
+    parsed = JSON.parse(stdout.trim());
+  } catch {
+    const message = "Unexpected output from the RDP-enable command";
+    await pool.query(
+      "UPDATE tunnels SET rdp_status = 'failed', rdp_last_error = $1, updated_at = now() WHERE id = $2",
+      [message, tunnelId]
+    );
+    return { ready: false, error: message };
+  }
+  if (!parsed.rdpEnabled || !parsed.rdpTargetIp) {
+    const message = parsed.error || "Windows Remote Desktop could not be enabled";
+    await pool.query(
+      "UPDATE tunnels SET rdp_status = 'failed', rdp_last_error = $1, updated_at = now() WHERE id = $2",
+      [message, tunnelId]
+    );
+    return { ready: false, error: message };
+  }
+  await pool.query(
+    "UPDATE tunnels SET rdp_target_ip = $1, rdp_port = $2, updated_at = now() WHERE id = $3",
+    [parsed.rdpTargetIp, parsed.rdpPort ?? 3389, tunnelId]
+  );
+  return provisionBrowserRdp(tunnelId);
+}
+
 export async function provisionBrowserRdp(tunnelId: string): Promise<RdpProvisioningResult> {
   const db = await pool.connect();
   let lockKey = `cfman:rdp:${tunnelId}`;

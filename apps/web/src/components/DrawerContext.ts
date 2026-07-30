@@ -3,7 +3,7 @@ import { createContext, useContext } from "react";
 export type TunnelDrawerTab = "overall" | "ingress" | "connect";
 
 export type DrawerApi = {
-  openTunnelDrawer: (tunnelId: string, tab?: TunnelDrawerTab) => void;
+  openTunnelDrawer: (tunnelId: string, tab?: TunnelDrawerTab, enrollmentId?: string) => void;
   openScriptDrawer: (scriptId: string, version?: number | null, options?: { bulkRunId?: string | undefined }) => void;
 };
 

@@ -14,13 +14,13 @@ const DRAWER_Z_TOP = 91;
 
 export function DrawerProvider({ children }: { children: ReactNode }) {
   const lastOpened = useRef<"tunnel" | "script" | null>(null);
-  const [tunnelDrawer, setTunnelDrawer] = useState<{ id: string; tab: TunnelDrawerTab } | null>(null);
+  const [tunnelDrawer, setTunnelDrawer] = useState<{ id: string; tab: TunnelDrawerTab; enrollmentId?: string | undefined } | null>(null);
   const [scriptDrawer, setScriptDrawer] = useState<{ id: string; version: number | null; bulkRunId: string | null } | null>(null);
 
   const api = useMemo(() => ({
-    openTunnelDrawer: (tunnelId: string, tab: TunnelDrawerTab = "overall") => {
+    openTunnelDrawer: (tunnelId: string, tab: TunnelDrawerTab = "overall", enrollmentId?: string) => {
       lastOpened.current = "tunnel";
-      setTunnelDrawer({ id: tunnelId, tab });
+      setTunnelDrawer({ id: tunnelId, tab, enrollmentId });
     },
     openScriptDrawer: (scriptId: string, version: number | null = null, options?: { bulkRunId?: string | undefined }) => {
       lastOpened.current = "script";
@@ -36,6 +36,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
       <TunnelDrawer
         tunnelId={tunnelDrawer?.id ?? null}
         tab={tunnelDrawer?.tab ?? "overall"}
+        initialExpandEnrollmentId={tunnelDrawer?.enrollmentId ?? null}
         onTabChange={(tab) => setTunnelDrawer((current) => (current ? { ...current, tab } : current))}
         onClose={() => setTunnelDrawer(null)}
         zIndex={tunnelZIndex}

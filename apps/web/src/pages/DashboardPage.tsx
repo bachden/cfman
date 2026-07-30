@@ -1,8 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { AlertTriangle, ArrowRight, Cable, CheckCircle2, CloudCog, Plus, Radio } from "lucide-react";
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../api";
 import { CapacityBar } from "../components/CapacityBar";
+import { OnboardTunnelDialog } from "../components/OnboardTunnelDialog";
 import { PageHeader } from "../components/PageHeader";
 import { StatusBadge } from "../components/StatusBadge";
 
@@ -21,6 +23,7 @@ type DashboardData = {
 };
 
 export function DashboardPage() {
+  const [onboardOpen, setOnboardOpen] = useState(false);
   const { data, isLoading } = useQuery({ queryKey: ["dashboard"], queryFn: () => api.get<DashboardData>("/api/dashboard"), refetchInterval: 30_000 });
   if (isLoading || !data) return <PageLoading />;
   const stats = [
@@ -31,7 +34,8 @@ export function DashboardPage() {
   ];
   return (
     <div className="page">
-      <PageHeader title="Operations overview" eyebrow="Fleet status" actions={<Link className="button button-primary" to="/onboarding"><Plus size={16} />Onboard tunnel</Link>} />
+      <PageHeader title="Operations overview" eyebrow="Fleet status" actions={<button className="button button-primary" type="button" onClick={() => setOnboardOpen(true)}><Plus size={16} />Onboard tunnel</button>} />
+      <OnboardTunnelDialog open={onboardOpen} onClose={() => setOnboardOpen(false)} />
       <section className="stat-band">
         {stats.map(({ label, value, icon: Icon, tone }) => <div className="stat-item" key={label}><span className={`stat-icon stat-${tone}`}><Icon size={18} /></span><div><strong>{value.toLocaleString()}</strong><span>{label}</span></div></div>)}
       </section>

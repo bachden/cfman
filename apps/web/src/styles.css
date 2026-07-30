@@ -285,7 +285,6 @@ tbody tr:hover td { background: #fbfcfb; }
 .token-field-validating .input-status-control > svg, .token-field-validating .token-validation-message { color: var(--muted); }
 .token-validation-message { min-height: 14px; font-size: 9px; font-weight: 650; line-height: 1.45; overflow-wrap: anywhere; }
 .spin-icon { animation: spin .8s linear infinite; }
-.field-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; }
 .form-actions { display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 8px; padding-top: 5px; }
 .form-actions > span:first-child { margin-right: auto; color: var(--muted); font-size: 10px; }
 .form-actions > span { color: var(--muted); font-size: 10px; }
@@ -707,20 +706,6 @@ tbody tr:hover td { background: #fbfcfb; }
 .command-note { min-height: 34px; padding: 8px 12px; display: flex; align-items: center; gap: 7px; color: #724614; background: var(--amber-soft); border-top: 1px solid #edcf9c; font-size: 10px; font-weight: 700; }
 .expiry-line { padding: 8px 12px; background: #f8faf8; color: var(--muted); border-top: 1px solid var(--line); font-size: 9px; }
 
-.onboarding-page { max-width: 940px; }
-.stepper { height: 54px; display: flex; align-items: center; justify-content: center; margin: -6px 0 22px; }
-.stepper > i { width: 80px; height: 1px; background: var(--line-strong); }
-.step { display: flex; align-items: center; gap: 7px; color: #89938c; }
-.step span { width: 24px; height: 24px; display: grid; place-items: center; border-radius: 50%; border: 1px solid var(--line-strong); background: white; font-size: 9px; font-weight: 800; }
-.step strong { font-size: 10px; }
-.step.active { color: var(--green); }
-.step.active span { border-color: var(--green); background: var(--green); color: white; }
-.onboarding-form { background: white; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
-.onboarding-form > .form-error, .onboarding-form > .inline-alert { margin: 18px 22px 0; }
-.form-section { padding: 22px; border-bottom: 1px solid var(--line); display: flex; flex-direction: column; gap: 16px; }
-.form-section header { display: flex; align-items: center; gap: 10px; margin-bottom: 2px; }
-.form-section header > span { width: 32px; height: 32px; display: grid; place-items: center; color: var(--green); background: var(--green-soft); border-radius: 5px; }
-.form-section h2 { font-size: 13px; }
 .connectivity-editor { display: flex; flex-direction: column; gap: 12px; padding-top: 2px; }
 .connectivity-editor-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .connectivity-editor-heading > div { display: flex; flex-direction: column; gap: 3px; }
@@ -744,24 +729,6 @@ tbody tr:hover td { background: #fbfcfb; }
 .route-drag-handle { width: 24px; height: 38px; display: grid; place-items: center; color: #829087; background: transparent; border-radius: 4px; cursor: grab; touch-action: none; }
 .route-drag-handle:hover, .route-drag-handle:focus-visible { color: var(--green); background: var(--green-soft); outline: none; }
 .route-drag-handle:active { cursor: grabbing; }
-.onboarding-actions { padding: 16px 22px; display: flex; justify-content: flex-end; background: #f8faf8; }
-.success-banner { min-height: 83px; margin-bottom: 18px; padding: 17px 20px; display: flex; align-items: center; gap: 13px; background: #e9f6ef; border: 1px solid #bfe3d1; border-radius: 6px; }
-.success-banner > span { width: 39px; height: 39px; display: grid; place-items: center; color: white; background: var(--green); border-radius: 50%; }
-.success-banner > div { display: flex; flex-direction: column; gap: 5px; }
-.success-banner strong { font-size: 13px; }
-.success-banner code { color: #3d6652; font-size: 10px; }
-.install-surface { background: white; border: 1px solid var(--line); border-radius: 6px; padding: 20px; }
-.install-surface > header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 14px; }
-.install-surface h2 { font-size: 13px; }
-.install-surface header span { color: var(--muted); font-size: 10px; }
-.connection-track { display: grid; grid-template-columns: repeat(4, 1fr); margin-top: 18px; padding: 14px; background: white; border: 1px solid var(--line); border-radius: 6px; }
-.connection-track > div { position: relative; display: flex; flex-direction: column; align-items: center; gap: 7px; color: #8a948d; font-size: 9px; }
-.connection-track > div:not(:last-child)::after { content: ""; position: absolute; top: 12px; left: calc(50% + 16px); right: calc(-50% + 16px); height: 1px; background: var(--line-strong); }
-.connection-track i { position: relative; z-index: 1; width: 25px; height: 25px; display: grid; place-items: center; border-radius: 50%; background: #f1f4f2; border: 1px solid var(--line-strong); font-style: normal; font-weight: 800; }
-.connection-track .done, .connection-track .current { color: var(--green); }
-.connection-track .done i { background: var(--green); border-color: var(--green); color: white; }
-.connection-track .current i { background: white; border: 2px solid var(--green); }
-
 .settings-page { max-width: 920px; margin-left: 0; }
 .settings-section { min-height: 88px; padding: 20px; margin-bottom: 14px; background: white; border: 1px solid var(--line); border-radius: 6px; }
 .settings-section > header { display: flex; align-items: center; gap: 11px; padding-bottom: 16px; border-bottom: 1px solid var(--line); }
@@ -906,7 +873,6 @@ tbody tr:hover td { background: #fbfcfb; }
   .search-box { width: 100%; }
   .result-count { margin-left: 0; align-self: center; }
   .table-pagination { padding-left: 12px; }
-  .field-grid { grid-template-columns: 1fr; }
   .connectivity-editor-heading { align-items: flex-start; }
   .route-editor-row { grid-template-columns: 24px 1fr 34px; }
   .route-editor-row .field:nth-of-type(1) { grid-column: 2 / -1; }
@@ -951,10 +917,6 @@ tbody tr:hover td { background: #fbfcfb; }
   .tunnel-drawer-tabs button { flex: 0 0 auto; }
   .publication-route { grid-template-columns: 55px 12px minmax(0, 1fr); }
   .publication-route-actions { grid-column: 1 / -1; justify-content: flex-start; }
-  .stepper > i { width: 28px; }
-  .step strong { display: none; }
-  .connection-track { padding: 12px 5px; }
-  .connection-track span { text-align: center; line-height: 1.35; }
   .mcp-settings-section > header { align-items: flex-start; flex-wrap: wrap; }
   .mcp-settings-section .switch-control { margin-left: 45px; }
   .mcp-metadata { grid-template-columns: 1fr 1fr; }

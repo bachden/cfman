@@ -349,10 +349,13 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
   registerApiTool(server, app, token, "cfman_refresh_tunnels", "Refresh endpoint statuses for up to 100 tunnels.", {
     tunnelIds: z.array(z.string().uuid()).min(1).max(100)
   }, (args) => callApi(app, token, "POST", "/api/tunnels/refresh", args));
-  registerApiTool(server, app, token, "cfman_retry_rdp", "Retry browser RDP provisioning for a tunnel with a reported Windows target.", {
+  registerApiTool(server, app, token, "cfman_retry_rdp", "Re-provision the browser RDP gateway for a tunnel that already had Remote Desktop enabled (use cfman_enable_rdp first if it never has been).", {
     tunnelId: z.string().uuid()
   }, (args) => callApi(app, token, "POST", `/api/tunnels/${args.tunnelId}/rdp/retry`));
-  registerApiTool(server, app, token, "cfman_retry_ssh", "Retry browser SSH provisioning for a tunnel with a reported Linux target.", {
+  registerApiTool(server, app, token, "cfman_enable_rdp", "Enable Windows Remote Desktop on a tunnel's active enrollment via a remote command through its command agent, then provision the browser RDP gateway. Returns { scheduled: true, executionId } if the agent will report back asynchronously, or the provisioning result directly.", {
+    tunnelId: z.string().uuid()
+  }, (args) => callApi(app, token, "POST", `/api/tunnels/${args.tunnelId}/rdp/enable`));
+  registerApiTool(server, app, token, "cfman_retry_ssh", "Retry browser SSH provisioning for a tunnel that already has an ssh:// ingress route (add one via cfman_update_tunnel_connectivity first if it doesn't).", {
     tunnelId: z.string().uuid()
   }, (args) => callApi(app, token, "POST", `/api/tunnels/${args.tunnelId}/ssh/retry`));
   registerApiTool(server, app, token, "cfman_execute_script", "Schedule a saved script version on the tunnel's command agent. Returns a stable execution/task identifier and scheduled status; poll execution history or logs for running and terminal results.", {

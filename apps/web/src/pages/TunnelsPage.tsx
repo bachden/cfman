@@ -1,10 +1,10 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, ChevronLeft, ChevronRight, Plus, RefreshCw, Search, TerminalSquare } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
 import { toast } from "sonner";
 import { api } from "../api";
 import { useDrawers, type TunnelDrawerTab } from "../components/DrawerContext";
+import { OnboardTunnelDialog } from "../components/OnboardTunnelDialog";
 import { PageHeader } from "../components/PageHeader";
 import { SearchableSelect } from "../components/SearchableSelect";
 import { StatusBadge, isCfmanSelfTunnel, tunnelNeedsFastPolling, tunnelOnlineStatus } from "../components/StatusBadge";
@@ -26,6 +26,7 @@ type TunnelRefreshResponse = {
 export function TunnelsPage() {
   const queryClient = useQueryClient();
   const { openTunnelDrawer } = useDrawers();
+  const [onboardOpen, setOnboardOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [tenantCode, setTenantCode] = useState("");
   const [cfTunnelStatus, setCfTunnelStatus] = useState("");
@@ -79,7 +80,8 @@ export function TunnelsPage() {
   const lastResult = pagination ? Math.min(pagination.page * pagination.pageSize, pagination.total) : 0;
   return (
     <div className="page">
-      <PageHeader title="Tunnels" eyebrow="Tunnel inventory" actions={<><button className="button button-secondary" onClick={refreshAll} disabled={refreshingIds.size > 0 || !data?.tunnels.length}><RefreshCw size={15} className={refreshingIds.size > 0 ? "spin-icon" : undefined} />{refreshingIds.size > 0 ? "Refreshing..." : "Refresh"}</button><Link className="button button-primary" to="/onboarding"><Plus size={16} />Onboard tunnel</Link></>} />
+      <PageHeader title="Tunnels" eyebrow="Tunnel inventory" actions={<><button className="button button-secondary" onClick={refreshAll} disabled={refreshingIds.size > 0 || !data?.tunnels.length}><RefreshCw size={15} className={refreshingIds.size > 0 ? "spin-icon" : undefined} />{refreshingIds.size > 0 ? "Refreshing..." : "Refresh"}</button><button className="button button-primary" type="button" onClick={() => setOnboardOpen(true)}><Plus size={16} />Onboard tunnel</button></>} />
+      <OnboardTunnelDialog open={onboardOpen} onClose={() => setOnboardOpen(false)} />
       <div className="toolbar">
         <label className="search-box"><Search size={16} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search tunnels or hostnames" /></label>
         <div className="toolbar-tenant-filter"><SearchableSelect name="tenantCodeFilter" options={tenantCodeOptions} value={tenantCode} ariaLabel="Filter by tenant code" emptyMessage="No matching tenant" onValueChange={setTenantCode} /></div>

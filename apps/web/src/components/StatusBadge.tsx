@@ -71,8 +71,10 @@ export function isCfmanSelfTunnel(tunnel: Pick<Tunnel, "publications">, publicBa
 // Single source of truth for "should this tunnel keep polling for updates" -
 // shared by the tunnel list and the drawer so both refresh on the same signal
 // instead of two conditions silently drifting apart.
-export function tunnelNeedsFastPolling(tunnel: { onboardingStatus: string; latestEnrollmentStatus?: string | null; hasPendingActivity?: boolean }): boolean {
+export function tunnelNeedsFastPolling(tunnel: { onboardingStatus: string; latestEnrollmentStatus?: string | null; hasPendingActivity?: boolean; rdpStatus?: string; sshStatus?: string }): boolean {
   return isPendingOnboardingStatus(tunnel.onboardingStatus)
     || Boolean(tunnel.latestEnrollmentStatus && isPendingEnrollmentStatus(tunnel.latestEnrollmentStatus))
-    || Boolean(tunnel.hasPendingActivity);
+    || Boolean(tunnel.hasPendingActivity)
+    || tunnel.rdpStatus === "provisioning"
+    || tunnel.sshStatus === "provisioning";
 }

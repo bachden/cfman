@@ -510,11 +510,6 @@ test("allocates a tunnel and issues bootstrap URLs", async () => {
 
   const windowsScript = await app.inject({ method: "GET", url: `/e/${enrollmentToken}/install.ps1` });
   assert.equal(windowsScript.statusCode, 200);
-  assert.match(windowsScript.body, /fDenyTSConnections/);
-  assert.match(windowsScript.body, /RemoteDesktop\*/);
-  assert.match(windowsScript.body, /rdpTargetIp/);
-  assert.match(windowsScript.body, /HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server/);
-  assert.match(windowsScript.body, /WinStations\\RDP-Tcp/);
   assert.match(windowsScript.body, /https:\/\/cfman\.example\.test\/api\/public\/enrollments\/report/);
   assert.match(windowsScript.body, /Send-InstallLog/);
   assert.match(windowsScript.body, /Get-HttpErrorMessage/);
@@ -1077,9 +1072,6 @@ test("installer report activates a mock tunnel", async () => {
       platform: "windows",
       status: "installed",
       version: "cloudflared test",
-      rdpEnabled: true,
-      rdpTargetIp: "192.168.10.25",
-      rdpPort: 3389,
       agentReady: true,
       osName: "Microsoft Windows 11 Pro",
       osVersion: "10.0.26100",
@@ -1089,7 +1081,44 @@ test("installer report activates a mock tunnel", async () => {
     }
   });
   assert.equal(report.statusCode, 200, report.body);
-  assert.equal(report.json().rdp.ready, true);
+  // The general install script never enables Remote Desktop itself anymore -
+  // that only happens on demand via "Enable RDS", so the report leaves rdp
+  // untouched (still its pre-existing default) rather than auto-provisioning.
+  assert.equal(report.json().rdp, undefined);
+  const preEnable = await pool.query("SELECT onboarding_status, cf_tunnel_status, rdp_status, rdp_target_ip::text, rdp_url FROM tunnels WHERE id = $1", [tunnelId]);
+  assert.equal(preEnable.rows[0].onboarding_status, "active");
+  assert.equal(preEnable.rows[0].cf_tunnel_status, "healthy");
+  assert.equal(preEnable.rows[0].rdp_status, "pending");
+  assert.equal(preEnable.rows[0].rdp_target_ip, null);
+  assert.equal(preEnable.rows[0].rdp_url, null);
+
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input, init) => {
+    assert.equal(String(input), "https://0001-ops.tunnels-a.example/agent");
+    const headers = new Headers(init?.headers);
+    assert.match(headers.get("X-Cloudflare-Man-Agent-Token") ?? "", /^[A-Za-z0-9_-]{40,}$/);
+    const requestBody = JSON.parse(String(init?.body));
+    assert.match(requestBody.script, /rdpEnabled/);
+    return new Response(JSON.stringify({
+      success: true,
+      exitCode: 0,
+      stdout: JSON.stringify({ rdpEnabled: true, rdpTargetIp: "192.168.10.25", rdpPort: 3389 }),
+      stderr: "",
+      durationMs: 500
+    }), { status: 200, headers: { "Content-Type": "application/json" } });
+  };
+  let enable: Awaited<ReturnType<typeof app.inject>>;
+  try {
+    enable = await app.inject({
+      method: "POST",
+      url: `/api/tunnels/${tunnelId}/rdp/enable`,
+      headers: { cookie: sessionCookie }
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+  assert.equal(enable.statusCode, 200, enable.body);
+  assert.equal(enable.json().ready, true);
   const result = await pool.query("SELECT onboarding_status, cf_tunnel_status, rdp_status, rdp_target_ip::text, rdp_url FROM tunnels WHERE id = $1", [tunnelId]);
   assert.equal(result.rows[0].onboarding_status, "active");
   assert.equal(result.rows[0].cf_tunnel_status, "healthy");
@@ -1163,7 +1192,6 @@ test("installer report enables SSH access for a Linux enrollment", async () => {
 
     const script = await app.inject({ method: "GET", url: `/e/${sshEnrollmentToken}/install.sh` });
     assert.equal(script.statusCode, 200, script.body);
-    assert.match(script.body, /sshEnabled/);
 
     const claimResponse = await app.inject({
       method: "POST",
@@ -1180,10 +1208,6 @@ test("installer report enables SSH access for a Linux enrollment", async () => {
         platform: "unix",
         status: "installed",
         version: "cloudflared test",
-        sshEnabled: true,
-        sshTargetIp: "192.168.20.30",
-        sshPort: 22,
-        sshUsername: "ubuntu",
         agentReady: true,
         osName: "Ubuntu 24.04 LTS",
         osVersion: "24.04",
@@ -1193,20 +1217,18 @@ test("installer report enables SSH access for a Linux enrollment", async () => {
       }
     });
     assert.equal(report.statusCode, 200, report.body);
-    // cfman never creates the ssh:// route on the account's behalf - it
-    // only records what the installer detected and leaves browser SSH
-    // unprovisioned until the account publishes a route themselves.
-    assert.equal(report.json().ssh.ready, false);
-    assert.match(report.json().ssh.error, /ssh:\/\/ ingress route/);
+    // The general install script never enables SSH itself anymore - that
+    // only happens on demand once the account publishes an ssh:// route
+    // (see "Enable SSH"), so the report leaves ssh untouched.
+    assert.equal(report.json().ssh, undefined);
 
     const tunnelRow = await pool.query(
       "SELECT ssh_status, ssh_target_ip::text AS ssh_target_ip, ssh_port, ssh_username, ssh_url, account_id FROM tunnels WHERE id = $1",
       [sshTunnelId]
     );
-    assert.equal(tunnelRow.rows[0].ssh_status, "failed");
-    assert.equal(tunnelRow.rows[0].ssh_target_ip, "192.168.20.30/32");
-    assert.equal(tunnelRow.rows[0].ssh_port, 22);
-    assert.equal(tunnelRow.rows[0].ssh_username, "ubuntu");
+    assert.equal(tunnelRow.rows[0].ssh_status, "pending");
+    assert.equal(tunnelRow.rows[0].ssh_target_ip, null);
+    assert.equal(tunnelRow.rows[0].ssh_username, null);
     assert.equal(tunnelRow.rows[0].ssh_url, null);
 
     const addSshRoute = await app.inject({
@@ -1282,6 +1304,118 @@ test("installer report enables SSH access for a Linux enrollment", async () => {
     assert.equal(afterRemove.rows[0].ssh_access_app_id, null);
   } finally {
     await pool.query("DELETE FROM tunnels WHERE id = $1", [sshTunnelId]);
+  }
+});
+
+test("Enable RDS provisions via the async report callback when the agent schedules the command", async () => {
+  const created = await app.inject({
+    method: "POST",
+    url: "/api/tunnels",
+    headers: { cookie: sessionCookie },
+    payload: {
+      tenantCode: "HLC",
+      tunnelCode: "RDP1",
+      displayName: "Windows RDP Async Test Tunnel",
+      publications: [{ suffix: "", routes: [{ kind: "command_agent", path: "/agent" }] }]
+    }
+  });
+  assert.equal(created.statusCode, 201, created.body);
+  const rdpTunnelId = created.json().tunnel.id;
+  try {
+    const enrollmentResponse = await app.inject({
+      method: "POST",
+      url: `/api/tunnels/${rdpTunnelId}/enrollments`,
+      headers: { cookie: sessionCookie },
+      payload: { expiresInHours: 24 }
+    });
+    assert.equal(enrollmentResponse.statusCode, 201, enrollmentResponse.body);
+    const shellMatch = enrollmentResponse.json().urls.shell.match(/\/e\/([^/]+)\/install\.sh$/);
+    assert.ok(shellMatch);
+    const rdpEnrollmentToken = shellMatch[1];
+
+    const claimResponse = await app.inject({
+      method: "POST",
+      url: "/api/public/enrollments/claim",
+      payload: { token: rdpEnrollmentToken, platform: "windows", architecture: "amd64", installId: "rdp-async-installer" }
+    });
+    assert.equal(claimResponse.statusCode, 200, claimResponse.body);
+
+    const report = await app.inject({
+      method: "POST",
+      url: "/api/public/enrollments/report",
+      payload: {
+        token: rdpEnrollmentToken,
+        platform: "windows",
+        status: "installed",
+        version: "cloudflared test",
+        agentReady: true,
+        osName: "Microsoft Windows 11 Pro",
+        osVersion: "10.0.26100",
+        osBuild: "26100",
+        architecture: "amd64",
+        machineName: "TUNNEL-WIN-RDP1"
+      }
+    });
+    assert.equal(report.statusCode, 200, report.body);
+
+    const originalFetch = globalThis.fetch;
+    let capturedExecutionId = "";
+    let capturedReportUrl = "";
+    let capturedReportToken = "";
+    globalThis.fetch = async (input, init) => {
+      assert.equal(String(input), "https://rdp1.tunnels-a.example/agent");
+      const requestBody = JSON.parse(String(init?.body));
+      assert.match(requestBody.script, /rdpEnabled/);
+      capturedExecutionId = requestBody.executionId;
+      capturedReportUrl = requestBody.reportUrl;
+      capturedReportToken = requestBody.reportToken;
+      return new Response(JSON.stringify({ scheduled: true, taskId: "agent-task-1" }), {
+        status: 202,
+        headers: { "Content-Type": "application/json" }
+      });
+    };
+    let enable: Awaited<ReturnType<typeof app.inject>>;
+    try {
+      enable = await app.inject({
+        method: "POST",
+        url: `/api/tunnels/${rdpTunnelId}/rdp/enable`,
+        headers: { cookie: sessionCookie }
+      });
+    } finally {
+      globalThis.fetch = originalFetch;
+    }
+    assert.equal(enable.statusCode, 202, enable.body);
+    assert.equal(enable.json().scheduled, true);
+    assert.equal(enable.json().executionId, capturedExecutionId);
+
+    const beforeReport = await pool.query("SELECT rdp_status, rdp_target_ip::text, rdp_url FROM tunnels WHERE id = $1", [rdpTunnelId]);
+    assert.equal(beforeReport.rows[0].rdp_status, "provisioning");
+    assert.equal(beforeReport.rows[0].rdp_target_ip, null);
+
+    // The agent answers later, out of band, via the report callback - this
+    // is what actually has to finish the job for a scheduled execution,
+    // independent of anything the original POST /rdp/enable request saw.
+    const callback = await app.inject({
+      method: "POST",
+      url: `/api/public/command-executions/${capturedExecutionId}/report`,
+      payload: {
+        token: capturedReportToken,
+        success: true,
+        exitCode: 0,
+        stdout: JSON.stringify({ rdpEnabled: true, rdpTargetIp: "192.168.30.40", rdpPort: 3389 }),
+        stderr: "",
+        durationMs: 4200
+      }
+    });
+    assert.equal(callback.statusCode, 202, callback.body);
+    assert.match(capturedReportUrl, new RegExp(`/api/public/command-executions/${capturedExecutionId}/report$`));
+
+    const afterReport = await pool.query("SELECT rdp_status, rdp_target_ip::text, rdp_url FROM tunnels WHERE id = $1", [rdpTunnelId]);
+    assert.equal(afterReport.rows[0].rdp_status, "ready");
+    assert.equal(afterReport.rows[0].rdp_target_ip, "192.168.30.40/32");
+    assert.match(afterReport.rows[0].rdp_url, /^https:\/\/rdp\.tunnels-a\.example\/rdp\//);
+  } finally {
+    await pool.query("DELETE FROM tunnels WHERE id = $1", [rdpTunnelId]);
   }
 });
 
@@ -1466,7 +1600,7 @@ test("executes a script through the configured tunnel command agent", async () =
   const audit = await pool.query("SELECT details FROM audit_logs WHERE action = 'tunnel.command_executed' AND entity_id = $1", [tunnelId]);
   assert.equal(audit.rowCount, 3);
   assert.equal(audit.rows[0].details.success, true);
-  const executions = await pool.query("SELECT enrollment_id, script_version_id, saved_script_id, saved_script_version_id, saved_at, script_type, script_name, script_platform, script_language, script_version_number, status, elapsed_ms, stdout, stderr FROM tunnel_command_executions WHERE tunnel_id = $1 ORDER BY created_at", [tunnelId]);
+  const executions = await pool.query("SELECT enrollment_id, script_version_id, saved_script_id, saved_script_version_id, saved_at, script_type, script_name, script_platform, script_language, script_version_number, status, elapsed_ms, stdout, stderr FROM tunnel_command_executions WHERE tunnel_id = $1 AND script_name <> '__cfman_rdp_enable__' ORDER BY created_at", [tunnelId]);
   assert.equal(executions.rows.length, 3);
   assert.deepEqual({ status: executions.rows[0].status, stdout: executions.rows[0].stdout, stderr: executions.rows[0].stderr }, { status: "succeeded", stdout: "ready\n", stderr: "" });
   assert.equal(typeof executions.rows[0].elapsed_ms, "number");
@@ -1519,10 +1653,13 @@ test("executes a script through the configured tunnel command agent", async () =
 
   const paginatedHistory = await app.inject({ method: "GET", url: `/api/tunnels/${tunnelId}/command-executions?page=1&pageSize=5`, headers: { cookie: sessionCookie } });
   assert.equal(paginatedHistory.statusCode, 200, paginatedHistory.body);
-  assert.equal(paginatedHistory.json().pagination.total, 3);
-  assert.deepEqual(paginatedHistory.json().summary, { total: 3, succeeded: 2, failed: 1, timedOut: 0, cancelled: 0, scheduled: 0, running: 0 });
+  // Includes the "installer report activates a mock tunnel" test's Enable
+  // RDS execution too - it runs through this same generic execution/history
+  // system, so it's expected to show up here alongside ordinary scripts.
+  assert.equal(paginatedHistory.json().pagination.total, 4);
+  assert.deepEqual(paginatedHistory.json().summary, { total: 4, succeeded: 3, failed: 1, timedOut: 0, cancelled: 0, scheduled: 0, running: 0 });
   assert.equal(paginatedHistory.json().pagination.pageSize, 5);
-  assert.equal(paginatedHistory.json().executions.length, 3);
+  assert.equal(paginatedHistory.json().executions.length, 4);
   assert.equal(paginatedHistory.json().executions[0].id, latestExecution.id);
   const scriptListWithStats = await app.inject({ method: "GET", url: "/api/scripts", headers: { cookie: sessionCookie } });
   assert.equal(scriptListWithStats.statusCode, 200, scriptListWithStats.body);

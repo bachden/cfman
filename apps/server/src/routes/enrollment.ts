@@ -1,5 +1,4 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
-import { isIP } from "node:net";
 import type { PoolClient } from "pg";
 import { z } from "zod";
 import { config } from "../config.js";
@@ -7,8 +6,7 @@ import { getPublicBaseUrl } from "../lib/app-settings.js";
 import { writeAudit } from "../lib/audit.js";
 import { pool, withTransaction } from "../lib/database.js";
 import { deprovisionTunnel, tunnelHasActiveCfTunnel, provisionTunnel, withTunnelCloudflareLock } from "../lib/provisioning.js";
-import { provisionBrowserRdp } from "../lib/rdp.js";
-import { provisionBrowserSsh } from "../lib/ssh.js";
+import { completeRdpEnableExecution, RDP_ENABLE_SCRIPT_MARKER } from "../lib/rdp.js";
 import { ensureCommandAgentWafAllowsCloudflareMan } from "../lib/route-waf.js";
 import { decryptSecret, hashToken } from "../lib/security.js";
 import { scheduleTunnelVerification, verifyTunnelEndpoints } from "../lib/tunnel-verification.js";
@@ -38,15 +36,6 @@ const reportSchema = z.object({
   status: z.enum(["installed", "failed"]),
   version: z.string().max(80).optional(),
   error: z.string().max(2000).optional(),
-  rdpEnabled: z.boolean().optional(),
-  rdpTargetIp: z.string().refine((value) => isIP(value) === 4, "RDP target must be an IPv4 address").optional(),
-  rdpPort: z.number().int().min(1).max(65535).optional(),
-  rdpError: z.string().max(2000).optional(),
-  sshEnabled: z.boolean().optional(),
-  sshTargetIp: z.string().refine((value) => isIP(value) === 4, "SSH target must be an IPv4 address").optional(),
-  sshPort: z.number().int().min(1).max(65535).optional(),
-  sshUsername: z.string().max(100).optional(),
-  sshError: z.string().max(2000).optional(),
   agentReady: z.boolean().optional(),
   agentError: z.string().max(2000).optional(),
   osName: z.string().max(200).optional(),
@@ -1156,46 +1145,8 @@ if [ "$AGENT_READY" != true ]; then
 fi
 log_message "info" "command-agent" "Local command agent is ready"
 
-SSH_ENABLED=false
-SSH_TARGET_IP=""
-SSH_USERNAME=""
-SSH_ERROR=""
-if [ "$OS_NAME" = "linux" ]; then
-  log_message "info" "ssh" "Checking SSH access"
-  SSH_USERNAME="\${SUDO_USER:-root}"
-  if command -v sshd >/dev/null 2>&1 || [ -x /usr/sbin/sshd ]; then
-    SSH_TARGET_IP="$(ip route get 1.1.1.1 2>/dev/null | sed -n 's/.* src \\([0-9.]*\\).*/\\1/p' | head -n 1)"
-    if [ -z "$SSH_TARGET_IP" ]; then SSH_TARGET_IP="$(hostname -I 2>/dev/null | awk '{print $1}')"; fi
-    if [ -z "$SSH_TARGET_IP" ]; then
-      SSH_ERROR="Unable to determine the tunnel LAN IPv4 address."
-    else
-      SSH_LISTENER_READY=false
-      for attempt in 1 2 3 4 5; do
-        if { command -v ss >/dev/null 2>&1 && ss -ltn 2>/dev/null | grep -q ':22[[:space:]]'; } \\
-          || { command -v netstat >/dev/null 2>&1 && netstat -ltn 2>/dev/null | grep -q ':22[[:space:]]'; }; then
-          SSH_LISTENER_READY=true
-          break
-        fi
-        sleep 1
-      done
-      if [ "$SSH_LISTENER_READY" != true ]; then
-        SSH_ERROR="sshd is not listening on port 22"
-      else
-        SSH_ENABLED=true
-        log_message "info" "ssh" "SSH is listening on $SSH_TARGET_IP:22 for user $SSH_USERNAME"
-      fi
-    fi
-  else
-    SSH_ERROR="sshd is not installed on this machine"
-  fi
-  if [ -n "$SSH_ERROR" ]; then log_message "warn" "ssh" "$SSH_ERROR"; fi
-fi
-
 log_message "info" "report" "Reporting successful installation"
-REPORT_FIELDS="\\"token\\":\\"$ENROLLMENT_TOKEN\\",\\"scriptId\\":\\"$SCRIPT_ID\\",\\"status\\":\\"installed\\",\\"platform\\":\\"unix\\",\\"version\\":\\"$VERSION\\",\\"agentReady\\":$AGENT_READY,\\"osName\\":\\"$OS_DISPLAY_NAME\\",\\"osVersion\\":\\"$OS_VERSION\\",\\"osBuild\\":\\"$OS_BUILD\\",\\"architecture\\":\\"$MACHINE_ARCH\\",\\"machineName\\":\\"$MACHINE_NAME\\",\\"sshEnabled\\":$SSH_ENABLED,\\"sshPort\\":22"
-if [ -n "$SSH_TARGET_IP" ]; then REPORT_FIELDS="$REPORT_FIELDS,\\"sshTargetIp\\":\\"$SSH_TARGET_IP\\""; fi
-if [ -n "$SSH_USERNAME" ]; then REPORT_FIELDS="$REPORT_FIELDS,\\"sshUsername\\":\\"$SSH_USERNAME\\""; fi
-if [ -n "$SSH_ERROR" ]; then REPORT_FIELDS="$REPORT_FIELDS,\\"sshError\\":\\"$SSH_ERROR\\""; fi
+REPORT_FIELDS="\\"token\\":\\"$ENROLLMENT_TOKEN\\",\\"scriptId\\":\\"$SCRIPT_ID\\",\\"status\\":\\"installed\\",\\"platform\\":\\"unix\\",\\"version\\":\\"$VERSION\\",\\"agentReady\\":$AGENT_READY,\\"osName\\":\\"$OS_DISPLAY_NAME\\",\\"osVersion\\":\\"$OS_VERSION\\",\\"osBuild\\":\\"$OS_BUILD\\",\\"architecture\\":\\"$MACHINE_ARCH\\",\\"machineName\\":\\"$MACHINE_NAME\\""
 curl --silent --show-error --fail --retry 3 --retry-all-errors -X POST "$REPORT_URL" -H 'Content-Type: application/json' --data "{$REPORT_FIELDS}" >/dev/null
 REPORT_SENT=1
 printf '%s' "$ASSIGNED_HOSTNAME" > "$HOSTNAME_FILE"
@@ -1410,38 +1361,6 @@ Set-Service -Name "cloudflared" -StartupType Automatic
 & sc.exe failure cloudflared reset= 86400 actions= restart/5000/restart/10000/restart/60000 | Out-Null
 Start-Service -Name "cloudflared" -ErrorAction SilentlyContinue
 
-$rdpEnabled = $false
-$rdpTargetIp = $null
-$rdpError = $null
-try {
-  Send-InstallLog -Level "info" -Step "rdp" -Message "Enabling Windows Remote Desktop"
-  $terminalServer = "HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Terminal Server"
-  $rdpTcp = Join-Path $terminalServer "WinStations\\RDP-Tcp"
-  Set-ItemProperty -Path $terminalServer -Name "fDenyTSConnections" -Value 0
-  Set-ItemProperty -Path $rdpTcp -Name "SecurityLayer" -Value 1
-  Set-ItemProperty -Path $rdpTcp -Name "UserAuthentication" -Value 1
-  Get-NetFirewallRule -Name "RemoteDesktop*" -ErrorAction Stop | Enable-NetFirewallRule
-  Set-Service -Name "TermService" -StartupType Automatic
-  Start-Service -Name "TermService"
-  $rdpTargetIp = Get-NetIPConfiguration |
-    Where-Object { $_.IPv4DefaultGateway -and $_.NetAdapter.Status -eq "Up" } |
-    ForEach-Object { $_.IPv4Address.IPAddress } |
-    Where-Object { $_ -and -not $_.StartsWith("169.254.") } |
-    Select-Object -First 1
-  if (-not $rdpTargetIp) { throw "Unable to determine the tunnel LAN IPv4 address." }
-  $listenerReady = $false
-  for ($attempt = 0; $attempt -lt 10; $attempt++) {
-    if (Get-NetTCPConnection -LocalPort 3389 -State Listen -ErrorAction SilentlyContinue) { $listenerReady = $true; break }
-    Start-Sleep -Seconds 1
-  }
-  if (-not $listenerReady) { throw "Windows Remote Desktop did not start listening on port 3389." }
-  $rdpEnabled = $true
-  Send-InstallLog -Level "info" -Step "rdp" -Message ("Windows Remote Desktop is listening on {0}:3389" -f $rdpTargetIp)
-} catch {
-  $rdpError = $_.Exception.Message
-  Send-InstallLog -Level "warn" -Step "rdp" -Message $rdpError
-}
-
 $agentReady = $false
 $agentError = $null
 try {
@@ -1479,8 +1398,6 @@ $reportPayload = @{
   platform = "windows"
   status = "installed"
   version = (& $binary --version | Select-Object -First 1)
-  rdpEnabled = $rdpEnabled
-  rdpPort = 3389
   agentReady = $agentReady
   osName = $osName
   osVersion = $osVersion
@@ -1488,17 +1405,11 @@ $reportPayload = @{
   architecture = $architecture
   machineName = $machineName
 }
-if ($rdpTargetIp) { $reportPayload.rdpTargetIp = $rdpTargetIp }
-if ($rdpError) { $reportPayload.rdpError = $rdpError }
 if ($agentError) { $reportPayload.agentError = $agentError }
 $reportBody = $reportPayload | ConvertTo-Json
 Send-InstallLog -Level "info" -Step "report" -Message "Reporting successful installation"
-$report = Invoke-RestMethod -Method Post -Uri $ReportUrl -ContentType "application/json" -Body $reportBody
+Invoke-RestMethod -Method Post -Uri $ReportUrl -ContentType "application/json" -Body $reportBody | Out-Null
 $ReportSent = $true
-if ($report.rdp -and -not $report.rdp.ready) {
-  Send-InstallLog -Level "warn" -Step "rdp" -Message "Browser RDP provisioning failed: $($report.rdp.error)"
-  Write-Warning "Browser RDP provisioning failed: $($report.rdp.error)"
-}
 Set-Content -Path $hostnameFile -Value $AssignedHostname -NoNewline
 Set-Content -Path $tunnelIdFile -Value ([string]$claim.cfTunnelId) -NoNewline
 Send-InstallLog -Level "info" -Step "complete" -Message "Tunnel tunnel installed successfully for $AssignedHostname"
@@ -1838,6 +1749,17 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
       ...(body.status !== undefined ? { status: body.status } : {})
     });
     if (!recorded) return reply.code(404).send({ error: "Command execution not found" });
+    // "Enable RDS" dispatches its enabling script through this same generic
+    // execution channel; when the agent answers asynchronously (rather than
+    // in POST /rdp/enable's own synchronous path) this is the only place
+    // that ever sees the result, so it has to finish the job here.
+    const execution = await pool.query(
+      "SELECT tunnel_id, script_name, stdout FROM tunnel_command_executions WHERE id = $1",
+      [executionId]
+    );
+    if (execution.rows[0]?.script_name === RDP_ENABLE_SCRIPT_MARKER) {
+      await completeRdpEnableExecution(execution.rows[0].tunnel_id, execution.rows[0].stdout ?? "").catch(() => undefined);
+    }
     return reply.code(202).send({ accepted: true, executionId });
   });
   app.post("/api/public/command-executions/:executionId/log", {
@@ -2264,28 +2186,21 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
       const isMock = provider.rows[0]?.provider_mode === "mock";
       accountId = provider.rows[0]?.account_id;
       scheduleVerification = success && !isMock;
+      // The install script never enables Remote Desktop or SSH itself -
+      // that only happens later, on demand, via the Connect tab's "Enable
+      // RDS"/"Enable SSH" actions (rdp.ts's completeRdpEnableExecution and
+      // the connectivity-update -> syncBrowserSsh path). All the report
+      // does here is mark rdp/ssh as not applicable when the enrolled
+      // platform rules it out, leaving whatever status already exists
+      // otherwise (e.g. from a previous Enable action).
       await client.query(
         `UPDATE tunnels SET onboarding_status = $1, cf_tunnel_status = CASE WHEN $2 THEN 'healthy' ELSE cf_tunnel_status END,
          cloudflared_version = $3, last_connected_at = CASE WHEN $2 THEN now() ELSE last_connected_at END,
          last_verified_at = CASE WHEN $2 THEN now() ELSE last_verified_at END, last_error = $4,
-         rdp_status = CASE
-           WHEN NOT $5 THEN rdp_status
-           WHEN $6 <> 'windows' THEN 'disabled'
-           WHEN $7 THEN 'enabled'
-           ELSE 'failed'
-         END,
-         rdp_target_ip = COALESCE($8::inet, rdp_target_ip), rdp_port = COALESCE($9, rdp_port),
-         rdp_last_error = $10,
-         ssh_status = CASE
-           WHEN NOT $5 THEN ssh_status
-           WHEN $6 <> 'unix' THEN 'disabled'
-           WHEN $12 THEN 'enabled'
-           ELSE 'failed'
-         END,
-         ssh_target_ip = COALESCE($13::inet, ssh_target_ip), ssh_port = COALESCE($14, ssh_port),
-         ssh_username = COALESCE($15, ssh_username), ssh_last_error = $16,
+         rdp_status = CASE WHEN $5 AND $6 <> 'windows' THEN 'disabled' ELSE rdp_status END,
+         ssh_status = CASE WHEN $5 AND $6 <> 'unix' THEN 'disabled' ELSE ssh_status END,
          updated_at = now()
-         WHERE id = $11`,
+         WHERE id = $7`,
         [
           success ? (isMock ? "active" : "connector_online") : retryablePreflightFailure ? "url_issued" : "failed",
           success && isMock,
@@ -2293,39 +2208,16 @@ export async function enrollmentRoutes(app: FastifyInstance): Promise<void> {
           body.error ?? null,
           success,
           enrollment.platform ?? "unknown",
-          body.rdpEnabled ?? false,
-          body.rdpTargetIp ?? null,
-          body.rdpPort ?? null,
-          body.rdpError ?? null,
-          enrollment.tunnel_id,
-          body.sshEnabled ?? false,
-          body.sshTargetIp ?? null,
-          body.sshPort ?? null,
-          body.sshUsername ?? null,
-          body.sshError ?? null
+          enrollment.tunnel_id
         ]
       );
     });
-    let rdp: Awaited<ReturnType<typeof provisionBrowserRdp>> | undefined;
-    if (success && enrollment.platform === "windows") {
-      rdp = body.rdpEnabled && body.rdpTargetIp
-        ? await provisionBrowserRdp(enrollment.tunnel_id)
-        : { ready: false, error: body.rdpError ?? "Windows Remote Desktop was not enabled" };
-    }
-    let ssh: Awaited<ReturnType<typeof provisionBrowserSsh>> | undefined;
-    if (success && enrollment.platform === "unix") {
-      if (body.sshEnabled && body.sshTargetIp) {
-        ssh = await provisionBrowserSsh(enrollment.tunnel_id);
-      } else {
-        ssh = { ready: false, error: body.sshError ?? "SSH was not detected as enabled on this machine" };
-      }
-    }
     if (scheduleVerification) {
       scheduleTunnelVerification(enrollment.tunnel_id);
       if (accountId) void synchronizeAccount(accountId).catch(() => undefined);
       void ensureCommandAgentWafAllowsCloudflareMan(enrollment.tunnel_id).catch(() => undefined);
     }
-    return { success: true, stateApplied: true, ...(rdp ? { rdp } : {}), ...(ssh ? { ssh } : {}) };
+    return { success: true, stateApplied: true };
   });
 
   const diagnoseReportSchema = z.object({

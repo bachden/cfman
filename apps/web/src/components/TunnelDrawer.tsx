@@ -21,10 +21,17 @@ import { StatusBadge, activeEnrollmentPlatform, cfmanSelfPublication, isCfmanSel
 
 export type { TunnelDrawerTab };
 
-export function TunnelDrawer({ tunnelId, tab, onTabChange, onClose, zIndex }: { tunnelId: string | null; tab: TunnelDrawerTab; onTabChange: (tab: TunnelDrawerTab) => void; onClose: () => void; zIndex?: number | undefined }) {
+export function TunnelDrawer({ tunnelId, tab, initialExpandEnrollmentId, onTabChange, onClose, zIndex }: { tunnelId: string | null; tab: TunnelDrawerTab; initialExpandEnrollmentId?: string | null | undefined; onTabChange: (tab: TunnelDrawerTab) => void; onClose: () => void; zIndex?: number | undefined }) {
   const queryClient = useQueryClient();
   const [enrollmentPage, setEnrollmentPage] = useState(1);
   const [autoExpandEnrollmentId, setAutoExpandEnrollmentId] = useState<string | null>(null);
+  // Opening the drawer straight to a specific enrollment (e.g. right after
+  // onboarding a new tunnel) reuses the same auto-expand state the drawer's
+  // own "issue enrollment" mutation already drives - just seeded from the
+  // caller instead of from an internal mutation result.
+  useEffect(() => {
+    if (initialExpandEnrollmentId) setAutoExpandEnrollmentId(initialExpandEnrollmentId);
+  }, [initialExpandEnrollmentId, tunnelId]);
   const [unenrollTarget, setUnenrollTarget] = useState<TunnelEnrollment | null>(null);
   const [automaticUnenroll, setAutomaticUnenroll] = useState(true);
   const [deleteEnrollmentTarget, setDeleteEnrollmentTarget] = useState<TunnelEnrollment | null>(null);
@@ -34,6 +41,7 @@ export function TunnelDrawer({ tunnelId, tab, onTabChange, onClose, zIndex }: { 
   const [editingConnectivity, setEditingConnectivity] = useState(false);
   const [reassigningZone, setReassigningZone] = useState(false);
   const [wafRoute, setWafRoute] = useState<TunnelRoute | null>(null);
+  const [enableSshOpen, setEnableSshOpen] = useState(false);
   const [troubleshootOpen, setTroubleshootOpen] = useState(false);
   const [tunnelVariablesOpen, setTunnelVariablesOpen] = useState(false);
   const { data: detailData } = useQuery({
@@ -51,6 +59,7 @@ export function TunnelDrawer({ tunnelId, tab, onTabChange, onClose, zIndex }: { 
   const isCfmanSelf = currentTunnel ? isCfmanSelfTunnel(currentTunnel, publicBaseUrl) : false;
   const drawerHostPlatform = currentTunnel ? activeEnrollmentPlatform(currentTunnel) : null;
   const sshRoutePublication = currentTunnel?.publications.find((publication) => publication.routes.some((route) => route.serviceUrl.startsWith("ssh://")));
+  const sshRoute = sshRoutePublication?.routes.find((route) => route.serviceUrl.startsWith("ssh://"));
   const sshDirectRouteCommand = sshRoutePublication ? `ssh -o ProxyCommand="cloudflared access ssh --hostname ${sshRoutePublication.hostname}" ${currentTunnel?.sshUsername ?? "root"}@${sshRoutePublication.hostname}` : "";
   const enrollmentPageSize = 5;
   const { data: enrollmentData } = useQuery({
@@ -141,6 +150,17 @@ export function TunnelDrawer({ tunnelId, tab, onTabChange, onClose, zIndex }: { 
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "RDP provisioning failed")
   });
+  const enableRds = useMutation({
+    mutationFn: () => api.post<{ scheduled?: boolean }>(`/api/tunnels/${tunnelId}/rdp/enable`),
+    onSuccess: async (result) => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["tunnels"] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnelId] })
+      ]);
+      toast.success(result.scheduled ? "Enabling Remote Desktop - this can take up to a minute" : "Remote Desktop enabled and browser RDP provisioned");
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to enable Remote Desktop")
+  });
   const retrySsh = useMutation({
     mutationFn: () => api.post(`/api/tunnels/${tunnelId}/ssh/retry`),
     onSuccess: async () => {
@@ -187,7 +207,7 @@ export function TunnelDrawer({ tunnelId, tab, onTabChange, onClose, zIndex }: { 
     setAutomaticUnenroll(Boolean(currentTunnel?.commandAgent?.status === "ready" && target.platform));
     setUnenrollTarget(target);
   };
-  const close = () => { setAutoExpandEnrollmentId(null); setUnenrollTarget(null); setDeleteEnrollmentTarget(null); setDeleteOpen(false); setDeletePreflight(null); setDeleteName(""); setEditingConnectivity(false); setWafRoute(null); setTroubleshootOpen(false); onClose(); };
+  const close = () => { setAutoExpandEnrollmentId(null); setUnenrollTarget(null); setDeleteEnrollmentTarget(null); setDeleteOpen(false); setDeletePreflight(null); setDeleteName(""); setEditingConnectivity(false); setWafRoute(null); setEnableSshOpen(false); setTroubleshootOpen(false); onClose(); };
   return (
     <>
     <SideDrawer open={Boolean(tunnelId)} zIndex={zIndex} title={<div className="drawer-heading"><strong>{currentTunnel?.displayName ?? "Tunnel details"}</strong>{isCfmanSelf && <span className="cfman-self-tag" title="This tunnel is CFMan's own self-hosted target">CFMAN SELF</span>}{currentTunnel && <StatusBadge status={tunnelOnlineStatus(currentTunnel.cfTunnelStatus)} />}</div>} onClose={close}>
@@ -241,20 +261,19 @@ export function TunnelDrawer({ tunnelId, tab, onTabChange, onClose, zIndex }: { 
           {drawerHostPlatform === "windows" && <section className="tunnel-drawer-section rdp-section">
             <header className="tunnel-section-heading"><div><h3>Remote desktop</h3><span>{currentTunnel.rdpUrl ? new URL(currentTunnel.rdpUrl).hostname : "Browser RDP gateway"}</span></div><StatusBadge status={currentTunnel.rdpStatus} /></header>
             <div className="rdp-connection-row">
-              <div className="rdp-connection-item"><span className="rdp-connection-label">Target</span><code className="rdp-connection-value" title={currentTunnel.rdpTargetIp ? `${currentTunnel.rdpTargetIp}:3389` : "Awaiting Windows installer"}>{currentTunnel.rdpTargetIp ? `${currentTunnel.rdpTargetIp}:3389` : "Awaiting Windows installer"}</code></div>
+              <div className="rdp-connection-item"><span className="rdp-connection-label">Target</span><code className="rdp-connection-value" title={currentTunnel.rdpTargetIp ? `${currentTunnel.rdpTargetIp}:3389` : "Not enabled yet"}>{currentTunnel.rdpTargetIp ? `${currentTunnel.rdpTargetIp}:3389` : "Not enabled yet"}</code></div>
               <div className="rdp-connection-item"><span className="rdp-connection-label">Gateway</span><code className="rdp-connection-value" title={currentTunnel.rdpUrl ?? "Not provisioned"}>{currentTunnel.rdpUrl ?? "Not provisioned"}</code></div>
-              <div className="rdp-connection-action">{currentTunnel.rdpStatus === "ready" && currentTunnel.rdpUrl && <a className="button button-primary" href={currentTunnel.rdpUrl} target="_blank" rel="noreferrer"><MonitorUp size={16} />Remote desktop</a>}{currentTunnel.rdpTargetIp && currentTunnel.rdpStatus !== "ready" && <button className="button button-secondary" onClick={() => retryRdp.mutate()} disabled={retryRdp.isPending}><RefreshCw size={15} />{retryRdp.isPending ? "Retrying..." : "Retry RDP"}</button>}</div>
+              <div className="rdp-connection-action">{currentTunnel.rdpStatus === "ready" && currentTunnel.rdpUrl && <a className="button button-primary" href={currentTunnel.rdpUrl} target="_blank" rel="noreferrer"><MonitorUp size={16} />Remote desktop</a>}{currentTunnel.rdpTargetIp && currentTunnel.rdpStatus !== "ready" && <button className="button button-secondary" onClick={() => retryRdp.mutate()} disabled={retryRdp.isPending}><RefreshCw size={15} />{retryRdp.isPending ? "Retrying..." : "Retry RDP"}</button>}{!currentTunnel.rdpTargetIp && <button className="button button-secondary" onClick={() => enableRds.mutate()} disabled={enableRds.isPending}><MonitorUp size={15} />{enableRds.isPending ? "Enabling..." : "Enable RDS"}</button>}</div>
             </div>
             {currentTunnel.rdpLastError && <div className="inline-alert">{currentTunnel.rdpLastError}</div>}
           </section>}
           {drawerHostPlatform === "unix" && <section className="tunnel-drawer-section rdp-section ssh-section">
             <header className="tunnel-section-heading"><div><h3>SSH</h3><span>{currentTunnel.sshUrl ? new URL(currentTunnel.sshUrl).hostname : "Browser SSH gateway"}</span></div><StatusBadge status={currentTunnel.sshStatus} /></header>
             <div className="rdp-connection-row">
-              <div className="rdp-connection-item"><span className="rdp-connection-label">Target</span><code className="rdp-connection-value" title={currentTunnel.sshTargetIp ? `${currentTunnel.sshUsername ?? "root"}@${currentTunnel.sshTargetIp}:${currentTunnel.sshPort}` : "Awaiting Linux installer"}>{currentTunnel.sshTargetIp ? `${currentTunnel.sshUsername ?? "root"}@${currentTunnel.sshTargetIp}:${currentTunnel.sshPort}` : "Awaiting Linux installer"}</code></div>
+              <div className="rdp-connection-item"><span className="rdp-connection-label">Target</span><code className="rdp-connection-value" title={sshRoute ? `${currentTunnel.sshUsername ?? "root"}@${sshRoute.serviceUrl.replace("ssh://", "")}` : "Not enabled yet"}>{sshRoute ? `${currentTunnel.sshUsername ?? "root"}@${sshRoute.serviceUrl.replace("ssh://", "")}` : "Not enabled yet"}</code></div>
               <div className="rdp-connection-item"><span className="rdp-connection-label">Gateway</span><code className="rdp-connection-value" title={currentTunnel.sshUrl ?? "Not provisioned"}>{currentTunnel.sshUrl ?? "Not provisioned"}</code></div>
-              <div className="rdp-connection-action">{currentTunnel.sshStatus === "ready" && currentTunnel.sshUrl && <a className="button button-primary" href={currentTunnel.sshUrl} target="_blank" rel="noreferrer"><TerminalSquare size={16} />Browser SSH</a>}{currentTunnel.sshTargetIp && sshRoutePublication && currentTunnel.sshStatus !== "ready" && <button className="button button-secondary" onClick={() => retrySsh.mutate()} disabled={retrySsh.isPending}><RefreshCw size={15} />{retrySsh.isPending ? "Retrying..." : "Retry SSH"}</button>}</div>
+              <div className="rdp-connection-action">{currentTunnel.sshStatus === "ready" && currentTunnel.sshUrl && <a className="button button-primary" href={currentTunnel.sshUrl} target="_blank" rel="noreferrer"><TerminalSquare size={16} />Browser SSH</a>}{sshRoutePublication && currentTunnel.sshStatus !== "ready" && <button className="button button-secondary" onClick={() => retrySsh.mutate()} disabled={retrySsh.isPending}><RefreshCw size={15} />{retrySsh.isPending ? "Retrying..." : "Retry SSH"}</button>}{!sshRoutePublication && <button className="button button-secondary" onClick={() => setEnableSshOpen(true)}><TerminalSquare size={15} />Enable SSH</button>}</div>
             </div>
-            {currentTunnel.sshTargetIp && !sshRoutePublication && <div className="inline-note"><TerminalSquare size={14} /><span>SSH was detected on this machine ({currentTunnel.sshUsername ?? "root"}@{currentTunnel.sshTargetIp}:{currentTunnel.sshPort}) but no ssh:// ingress route exists yet. Add a subdomain with an <code>ssh://{currentTunnel.sshTargetIp}:{currentTunnel.sshPort}</code> route to enable direct and browser SSH access.<div className="inline-note-action"><button className="button button-secondary button-small" type="button" onClick={() => setEditingConnectivity(true)}><Settings2 size={15} />Edit connectivity</button></div></span></div>}
             {sshRoutePublication && <div className="inline-note"><TerminalSquare size={14} /><span>Direct route, using whatever SSH key or password is already authorized on the target machine:<div className="inline-note-code-row"><code>{sshDirectRouteCommand}</code><CopyButton value={sshDirectRouteCommand} label="Copy SSH command" iconOnly /></div></span></div>}
             {currentTunnel.sshLastError && <div className="inline-alert">{currentTunnel.sshLastError}</div>}
           </section>}
@@ -267,6 +286,7 @@ export function TunnelDrawer({ tunnelId, tab, onTabChange, onClose, zIndex }: { 
     <EnrollmentDeleteDialog enrollment={deleteEnrollmentTarget} onClose={() => setDeleteEnrollmentTarget(null)} onConfirm={() => deleteEnrollmentTarget && deleteEnrollment.mutate(deleteEnrollmentTarget.id)} deleting={deleteEnrollment.isPending} />
     <TunnelDeleteDialog open={deleteOpen} preflight={deletePreflight} loading={deletePreflightMutation.isPending} confirmationName={deleteName} onConfirmationNameChange={setDeleteName} onClose={() => { setDeleteOpen(false); setDeletePreflight(null); setDeleteName(""); }} onConfirm={() => deleteTunnel.mutate()} deleting={deleteTunnel.isPending} />
     <RouteWafDialog tunnel={currentTunnel ?? null} route={wafRoute} onClose={() => setWafRoute(null)} />
+    {currentTunnel && <EnableSshDialog tunnel={currentTunnel} open={enableSshOpen} onClose={() => setEnableSshOpen(false)} />}
     {currentTunnel && <TroubleshootDialog tunnel={currentTunnel} open={troubleshootOpen} onClose={() => setTroubleshootOpen(false)} onManageWaf={(route) => { setTroubleshootOpen(false); setWafRoute(route); }} />}
     <ReassignZoneDialog open={reassigningZone} currentZoneId={currentTunnel?.zoneId ?? null} onClose={() => setReassigningZone(false)} onConfirm={(zoneId) => reassignZone.mutate(zoneId)} submitting={reassignZone.isPending} />
     <TunnelVariablesModal tunnel={currentTunnel ?? null} open={tunnelVariablesOpen} onClose={() => setTunnelVariablesOpen(false)} />
@@ -868,6 +888,64 @@ function EditConnectivityPanel({ tunnel, onClose }: { tunnel: Tunnel; onClose: (
     <div className="form-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button><button className="button button-primary" type="button" onClick={save} disabled={mutation.isPending}>{mutation.isPending ? "Updating..." : "Save connectivity"}</button></div>
     {error && <div className="form-error">{error}</div>}
   </section>;
+}
+
+// The guided, one-field version of adding an ssh:// route: unlike RDP,
+// SSH's ingress route is just an ordinary publication (see ssh.ts), so this
+// reuses the same connectivity-update endpoint EditConnectivityPanel does -
+// it only needs a subdomain, since the route itself always targets
+// ssh://127.0.0.1:22 (cloudflared and sshd run on the same host). Anyone
+// who wants a different port/IP can still use Edit Connectivity directly.
+function EnableSshDialog({ tunnel, open, onClose }: { tunnel: Tunnel; open: boolean; onClose: () => void }) {
+  const queryClient = useQueryClient();
+  const [subdomain, setSubdomain] = useState("");
+  const [error, setError] = useState("");
+  useEffect(() => {
+    if (open) { setSubdomain(""); setError(""); }
+  }, [open]);
+  const mutation = useMutation({
+    mutationFn: (publications: DraftPublication[]) => api.put<{ success: boolean; applied: boolean }>(`/api/tunnels/${tunnel.id}/connectivity`, { publications: connectivityPayload(publications) }),
+    onSuccess: async () => {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["tunnels"] }),
+        queryClient.invalidateQueries({ queryKey: ["tunnel-detail", tunnel.id] })
+      ]);
+      toast.success("SSH route added - browser SSH is provisioning");
+      onClose();
+    },
+    onError: (requestError) => setError(requestError instanceof Error ? requestError.message : "Unable to add the SSH route")
+  });
+  const submit = () => {
+    const trimmed = subdomain.trim().toLowerCase();
+    if (!trimmed) { setError("Enter a subdomain"); return; }
+    const draftPublications: DraftPublication[] = [
+      ...tunnel.publications.map((publication) => ({
+        key: publication.id,
+        suffix: publication.suffix,
+        useCustomLabel: Boolean(publication.customLabel),
+        customLabel: publication.customLabel ?? "",
+        routes: publication.routes.map((route) => ({ key: route.id, path: route.path, serviceUrl: route.serviceUrl, kind: route.kind ?? "service" }))
+      })),
+      {
+        key: "new-ssh",
+        suffix: "",
+        useCustomLabel: true,
+        customLabel: trimmed,
+        routes: [{ key: "new-ssh-route", path: "/", serviceUrl: "ssh://127.0.0.1:22", kind: "service" }]
+      }
+    ];
+    const validationError = validatePublications(draftPublications);
+    if (validationError) { setError(validationError); return; }
+    setError("");
+    mutation.mutate(draftPublications);
+  };
+  return <Modal open={open} title="Enable SSH" onClose={onClose}>
+    <div className="form-stack">
+      <label className="field"><span className="field-label">Subdomain <FieldHelp text="The full subdomain to publish, e.g. ssh-my-machine - resolves to <subdomain>.<zone>. Routes to ssh://127.0.0.1:22 on this machine; use Edit Connectivity afterward for a different port or target." /></span><input value={subdomain} onChange={(event) => setSubdomain(event.target.value)} placeholder="ssh-my-machine" maxLength={63} autoFocus /></label>
+      {error && <div className="form-error">{error}</div>}
+      <div className="form-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button><button className="button button-primary" type="button" onClick={submit} disabled={mutation.isPending}>{mutation.isPending ? "Enabling..." : "Enable SSH"}</button></div>
+    </div>
+  </Modal>;
 }
 
 function RouteWafDialog({ tunnel, route, onClose }: { tunnel: Tunnel | null; route: TunnelRoute | null; onClose: () => void }) {
