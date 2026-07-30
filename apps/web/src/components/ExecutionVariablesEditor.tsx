@@ -160,7 +160,7 @@ export function ExecutionVariablesEditor({
 // pencil, matching how variables are edited. Removing an argument is only
 // reachable from that opened row, so a definition the current version's runs
 // depend on cannot be dropped with a single stray click.
-export function ScriptArgumentsEditor({ argumentsList, onChange }: { argumentsList: ScriptArgument[]; onChange: (argumentsList: ScriptArgument[]) => void }) {
+export function ScriptArgumentsEditor({ argumentsList, onChange, description }: { argumentsList: ScriptArgument[]; onChange: (argumentsList: ScriptArgument[]) => void; description?: string }) {
   const [editingIndexes, setEditingIndexes] = useState<Set<number>>(new Set());
   // The definition a row held when it was opened. A row added this session has
   // no earlier state, so it is snapshotted as null and cancelling drops it.
@@ -214,7 +214,7 @@ export function ScriptArgumentsEditor({ argumentsList, onChange }: { argumentsLi
     shiftAfterRemoval(index);
   };
   return <section className="script-arguments-editor">
-    <header><div><h3>Script arguments</h3><span>Defined per version: saving a change to this list creates a new script version. The default value is used unless an operator maps the argument to a resolved variable or a custom value when preparing a run. Avoid naming an argument after a built-in ({TUNNEL_BUILT_IN_VARIABLES.join(", ")}) - the argument replaces it inside the script. <FieldHelp text="The server injects the tunnel identity built-ins into every execution. If a script declares an argument under one of those names, that argument's mapped value wins and the script no longer sees the tunnel identity value under that name. Pick a different argument name when the script needs both." /></span></div><button className="button button-secondary button-small" type="button" onClick={add}><Plus size={14} />Argument</button></header>
+    <header><div><h3>Script arguments</h3><span>{description ?? "Defined per version: saving a change to this list creates a new script version."} The default value is used unless an operator maps the argument to a resolved variable or a custom value when preparing a run. Avoid naming an argument after a built-in ({TUNNEL_BUILT_IN_VARIABLES.join(", ")}) - the argument replaces it inside the script. <FieldHelp text="The server injects the tunnel identity built-ins into every execution. If a script declares an argument under one of those names, that argument's mapped value wins and the script no longer sees the tunnel identity value under that name. Pick a different argument name when the script needs both." /></span></div><button className="button button-secondary button-small" type="button" onClick={add}><Plus size={14} />Argument</button></header>
     {argumentsList.length ? <div className="script-argument-list">{argumentsList.map((argument, index) => {
       const shadowsBuiltIn = TUNNEL_BUILT_IN_VARIABLES.includes(argument.name.toUpperCase());
       if (!editingIndexes.has(index)) return <div className="script-argument-row script-argument-row-display" key={index}>
@@ -239,6 +239,35 @@ export function ScriptArgumentsEditor({ argumentsList, onChange }: { argumentsLi
   </section>;
 }
 
+function effectiveArgumentValue(argument: ScriptArgument, bindings: ArgumentBindings, availableVariables: ExecutionVariables): string {
+  const binding = bindings[argument.name] ?? { type: "custom" as const, value: argument.defaultValue };
+  return binding.type === "variable" ? availableVariables[binding.variable] ?? "" : expandPreview(binding.value, availableVariables);
+}
+
+function argumentVariesPerTunnel(argument: ScriptArgument, bindings: ArgumentBindings, variesPerTunnelNames: string[]): boolean {
+  const binding = bindings[argument.name] ?? { type: "custom" as const, value: argument.defaultValue };
+  return binding.type === "variable"
+    ? variesPerTunnelNames.includes(binding.variable)
+    : referencedVariableNames(binding.value).some((name) => variesPerTunnelNames.includes(name));
+}
+
+// Required arguments whose value is known, right now, to be empty. An
+// argument whose binding varies per tunnel is left out: its value on any
+// particular tunnel can't be previewed here, so it isn't safe to call it
+// "missing" - only a definite, guaranteed-empty value blocks the run.
+export function missingRequiredArgumentNames(
+  argumentsList: ScriptArgument[],
+  bindings: ArgumentBindings,
+  availableVariables: ExecutionVariables,
+  variesPerTunnelNames: string[] = []
+): string[] {
+  return argumentsList
+    .filter((argument) => argument.required)
+    .filter((argument) => !argumentVariesPerTunnel(argument, bindings, variesPerTunnelNames))
+    .filter((argument) => !effectiveArgumentValue(argument, bindings, availableVariables))
+    .map((argument) => argument.name);
+}
+
 // Lets an operator decide, per declared argument, how it gets its value for
 // one run: a literal custom value, or a mapping to one of the tunnel's
 // resolved environment variables. Script arguments and environment variables
@@ -260,25 +289,32 @@ export function ArgumentBindingsEditor({
 }) {
   const variableNames = Object.keys(availableVariables).sort();
   if (!argumentsList.length) return <div className="quiet-empty">This script has no declared arguments.</div>;
+  const requiredNames = argumentsList.filter((argument) => argument.required).map((argument) => argument.name);
+  const missingNames = missingRequiredArgumentNames(argumentsList, bindings, availableVariables, variesPerTunnelNames);
   return <section className="argument-bindings-editor">
     <header>
       <h3>Script arguments</h3>
       <span>
         Fill each argument with a custom value, or map it to one of the tunnel's resolved environment variables.
         A custom value may embed variables as <code>$NAME</code> or <code>{"${NAME}"}</code> - for example <code>hello from $TUNNEL_NAME</code>.
-        {" "}<FieldHelp text="Variables are resolved per tunnel at execution time, so one bulk run gives each tunnel its own value. Variables may reference other variables; a reference cycle is rejected and the run fails instead of executing. An unknown name is left as literal text rather than becoming empty. Write $$ for a literal dollar sign. Values are always passed as inert text: a value can never turn into executable script." />
+        {" "}<FieldHelp text="Variables are resolved per tunnel at execution time, so one bulk run gives each tunnel its own value. Variables may reference other variables; a reference cycle is rejected and the run fails instead of executing. An unknown name is left as literal text rather than becoming empty. Write $$ for a literal dollar sign. Values are always passed as inert text: a value can never turn into executable script. Arguments cannot reference other arguments this way - if two arguments need to be combined, do that inside the script itself, which receives every resolved argument." />
       </span>
     </header>
+    <div className="argument-binding-requirements">
+      {requiredNames.length
+        ? <span className={`argument-binding-requirements-summary${missingNames.length ? " argument-binding-requirements-missing" : ""}`}>
+            {missingNames.length
+              ? `Missing required argument${missingNames.length === 1 ? "" : "s"}: ${missingNames.join(", ")}`
+              : `All required arguments have a value (${requiredNames.join(", ")})`}
+          </span>
+        : <span className="argument-binding-requirements-summary">No required arguments</span>}
+    </div>
     <div className="argument-binding-list">{argumentsList.map((argument) => {
       const binding = bindings[argument.name] ?? { type: "custom" as const, value: argument.defaultValue };
-      const variesPerTunnel = binding.type === "variable"
-        ? variesPerTunnelNames.includes(binding.variable)
-        : referencedVariableNames(binding.value).some((name) => variesPerTunnelNames.includes(name));
-      const effectiveValue = binding.type === "variable"
-        ? availableVariables[binding.variable] ?? ""
-        : expandPreview(binding.value, availableVariables);
+      const variesPerTunnel = argumentVariesPerTunnel(argument, bindings, variesPerTunnelNames);
+      const effectiveValue = effectiveArgumentValue(argument, bindings, availableVariables);
       return <div className="argument-binding-row" key={argument.name}>
-        <span className="field-label argument-binding-label">{argument.name}{argument.required && <small> · required</small>}</span>
+        <span className="field-label argument-binding-label">{argument.name}{argument.required && <small className="argument-binding-required-flag"> · required</small>}</span>
         <div className="argument-binding-type" role="radiogroup" aria-label={`Value source for ${argument.name}`}>
           <label><input type="radio" name={`argument-binding-type-${argument.name}`} checked={binding.type === "custom"} onChange={() => onChange({ ...bindings, [argument.name]: { type: "custom", value: argument.defaultValue } })} />Custom</label>
           <label><input type="radio" name={`argument-binding-type-${argument.name}`} checked={binding.type === "variable"} disabled={!variableNames.length} onChange={() => onChange({ ...bindings, [argument.name]: { type: "variable", variable: variableNames[0] ?? "" } })} />Variable</label>

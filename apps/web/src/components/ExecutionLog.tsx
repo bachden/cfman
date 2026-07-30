@@ -68,7 +68,15 @@ export function ExecutionLog({ tunnelId, execution }: { tunnelId: string; execut
       ? [current.stdout && `[stdout]\n${current.stdout}`, current.stderr && `[stderr]\n${current.stderr}`].filter(Boolean).join("\n")
       : (streamFilter === "stdout" ? current.stdout : current.stderr) ?? "";
   const noOutputMessage = streamFilter === "all" ? "The script produced no output." : `The script produced no ${streamFilter} output.`;
-  const appliedVariables = Object.entries(execution.environmentVariables ?? {}).sort(([left], [right]) => left.localeCompare(right));
+  // Only the arguments actually declared for this run - managed from the
+  // script version, inline ad hoc from what the operator typed in when
+  // preparing the run - not every name in environmentVariables, which also
+  // carries the tunnel identity built-ins every execution receives whether or
+  // not any argument was declared for them.
+  const declaredArgumentNames = new Set((execution.scriptArguments ?? []).map((argument) => argument.name.toUpperCase()));
+  const appliedVariables = Object.entries(execution.environmentVariables ?? {})
+    .filter(([name]) => declaredArgumentNames.has(name))
+    .sort(([left], [right]) => left.localeCompare(right));
 
   return <>
     {appliedVariables.length > 0 && <details className="execution-applied-variables"><summary>Applied arguments ({appliedVariables.length})</summary>

@@ -5,7 +5,7 @@ import { requireAuth } from "../lib/auth.js";
 import { createCommandExecution, executeTunnelScript, getCommandAgentConfig } from "../lib/command-agent.js";
 import { pool, withTransaction } from "../lib/database.js";
 import { appendNameFilter, nameFilterFields, validateNameFilter } from "../lib/name-filter.js";
-import { argumentBindingsSchema, applyScriptArguments, describeArgumentValueSources, resolveArgumentValues, resolveAvailableVariablesForTunnels, scriptArgumentsSchema } from "../lib/execution-variables.js";
+import { argumentBindingsSchema, applyScriptArguments, assertNoArgumentNesting, describeArgumentValueSources, resolveArgumentValues, resolveAvailableVariablesForTunnels, scriptArgumentsSchema } from "../lib/execution-variables.js";
 import { latestEnrollmentJoin, onboardingStatusExpression } from "./tunnels.js";
 
 const platformSchema = z.enum(["windows", "unix"]);
@@ -253,7 +253,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                 COALESCE(executed_version.version, saved_version.version) AS "scriptVersion",
                 COALESCE(ce.script_name, 'Inline script') AS "scriptName",
                 ce.script_platform AS platform, ce.script_language AS language,
-                ce.script, ce.environment_variables AS "environmentVariables", ce.argument_sources AS "argumentSources", ce.timeout_ms AS "timeoutMs", ce.status, ce.task_id AS "taskId", ce.process_id AS "processId",
+                ce.script, ce.environment_variables AS "environmentVariables", ce.argument_sources AS "argumentSources", COALESCE(executed_version.arguments, ce.inline_arguments) AS "scriptArguments", ce.timeout_ms AS "timeoutMs", ce.status, ce.task_id AS "taskId", ce.process_id AS "processId",
                 ce.created_at AS "createdAt", ce.started_at AS "startedAt", ce.finished_at AS "finishedAt",
                 ce.elapsed_ms AS "elapsedMs", ce.exit_code AS "exitCode",
                 ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy"
@@ -369,6 +369,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                  'script', ce.script,
                  'environmentVariables', ce.environment_variables,
                  'argumentSources', ce.argument_sources,
+                 'scriptArguments', COALESCE(executed_version.arguments, ce.inline_arguments),
                  'timeoutMs', ce.timeout_ms,
                  'status', ce.status,
                  'taskId', ce.task_id,
@@ -540,7 +541,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                 ce.script_version_id AS "scriptVersionId", ce.saved_script_id AS "savedScriptId",
                 ce.saved_script_version_id AS "savedScriptVersionId", ce.script_name AS "scriptName",
                 ce.script_version_number AS "scriptVersion", ce.script_platform AS platform,
-                ce.script_language AS language, ce.script, ce.environment_variables AS "environmentVariables", ce.argument_sources AS "argumentSources", ce.timeout_ms AS "timeoutMs", ce.status,
+                ce.script_language AS language, ce.script, ce.environment_variables AS "environmentVariables", ce.argument_sources AS "argumentSources", COALESCE(sv.arguments, ce.inline_arguments) AS "scriptArguments", ce.timeout_ms AS "timeoutMs", ce.status,
                 ce.task_id AS "taskId", ce.process_id AS "processId",
                 ce.created_at AS "createdAt", ce.started_at AS "startedAt", ce.finished_at AS "finishedAt", ce.elapsed_ms AS "elapsedMs",
                 ce.exit_code AS "exitCode", ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy"
@@ -548,6 +549,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
            JOIN tunnels st ON st.id = ce.tunnel_id
            LEFT JOIN enrollments e ON e.id = ce.enrollment_id
            LEFT JOIN users u ON u.id = ce.requested_by
+           LEFT JOIN managed_script_versions sv ON sv.id = ce.script_version_id
           WHERE ${where}
           ORDER BY ce.created_at ASC, ce.id ASC
           LIMIT $${limitParameter} OFFSET $${offsetParameter}`,
@@ -620,6 +622,15 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     if (!targetResult.rowCount) return reply.code(409).send({ error: "No tunnels matched the selected filters" });
     const timeoutMs = body.timeoutMs ?? version.defaultTimeoutMs;
     const scriptArguments = scriptArgumentsSchema.parse(version.arguments);
+    // A binding that nests one argument inside another is a static
+    // misconfiguration - identical for every tunnel in the run - so it's
+    // rejected once here, before any tunnel is targeted, instead of
+    // failing every single per-tunnel execution the same way.
+    try {
+      assertNoArgumentNesting(scriptArguments, body.argumentBindings);
+    } catch (error) {
+      return reply.code(400).send({ error: error instanceof Error ? error.message : "Invalid argument bindings" });
+    }
     let availableByTunnel: Awaited<ReturnType<typeof resolveAvailableVariablesForTunnels>>;
     try {
       availableByTunnel = await resolveAvailableVariablesForTunnels(targetResult.rows.map((target) => target.id));

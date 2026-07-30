@@ -1442,6 +1442,9 @@ test("executes a script through the configured tunnel command agent", async () =
     assert.match(requestBody.script, /\$TUNNEL_NAME = 'Highlands Test Tunnel'/);
     assert.match(requestBody.script, /\$TENANT_CODE = 'HLC'/);
     assert.ok(requestBody.script.endsWith(executionCall <= 2 ? "Write-Output 'ready v2'" : "Write-Output 'inline'"));
+    // The 3rd call is the inline execution with its ad hoc GREETING argument -
+    // it must actually reach the dispatched script as a shell-scoped variable.
+    if (executionCall === 3) assert.match(requestBody.script, /\$GREETING = 'hello ad hoc'/);
     assert.match(requestBody.executionId, /^[0-9a-f-]{36}$/);
     assert.match(requestBody.reportToken, /^[A-Za-z0-9_-]{40,}$/);
     assert.equal(requestBody.startUrl, `https://cfman.example.test/api/public/command-executions/${requestBody.executionId}/started`);
@@ -1493,6 +1496,13 @@ test("executes a script through the configured tunnel command agent", async () =
     assert.equal(response.json().scriptVersionId, scriptVersionId);
     assert.equal(response.json().scriptName, "Tunnel readiness check");
     assert.equal(response.json().version, 2);
+    // "Tunnel readiness check" v2 declares no arguments, so its executions
+    // should list none - not the TENANT_CODE/TUNNEL_CODE/TUNNEL_NAME built-ins
+    // every execution's environmentVariables also carries.
+    const firstHistory = await app.inject({ method: "GET", url: `/api/tunnels/${tunnelId}/command-executions?page=1&pageSize=5`, headers: { cookie: sessionCookie } });
+    assert.equal(firstHistory.statusCode, 200, firstHistory.body);
+    const firstHistoryEntry = firstHistory.json().executions.find((execution: { id: string }) => execution.id === response.json().executionId);
+    assert.deepEqual(firstHistoryEntry.scriptArguments, []);
     const failed = await app.inject({
       method: "POST",
       url: `/api/tunnels/${tunnelId}/commands/execute`,
@@ -1521,7 +1531,11 @@ test("executes a script through the configured tunnel command agent", async () =
         method: "tools/call",
         params: {
           name: "cfman_execute_inline_script",
-          arguments: { tunnelId, name: "MCP quick check", inlineScript: "Write-Output 'inline'", language: "powershell", timeoutMs: 15000 }
+          arguments: {
+            tunnelId, name: "MCP quick check", inlineScript: "Write-Output 'inline'", language: "powershell", timeoutMs: 15000,
+            arguments: [{ name: "GREETING", defaultValue: "hi", description: "", required: false }],
+            argumentBindings: { GREETING: { type: "custom", value: "hello ad hoc" } }
+          }
         }
       }
     });
@@ -1534,6 +1548,14 @@ test("executes a script through the configured tunnel command agent", async () =
     assert.equal(inlineResult.scriptName, "MCP quick check");
     assert.equal(inlineResult.version, null);
     assert.equal(inlineResult.enrollmentId, enrollmentId);
+    // An inline script has no version to declare arguments on, so this
+    // execution declared one ad hoc, for this run only - and it must actually
+    // be applied, not silently dropped the way it used to be.
+    const inlineHistory = await app.inject({ method: "GET", url: `/api/tunnels/${tunnelId}/command-executions?page=1&pageSize=5`, headers: { cookie: sessionCookie } });
+    assert.equal(inlineHistory.statusCode, 200, inlineHistory.body);
+    const inlineHistoryEntry = inlineHistory.json().executions.find((execution: { id: string }) => execution.id === inlineResult.executionId);
+    assert.deepEqual(inlineHistoryEntry.scriptArguments, [{ name: "GREETING", defaultValue: "hi", description: "", required: false }]);
+    assert.equal(inlineHistoryEntry.environmentVariables.GREETING, "hello ad hoc");
     assert.match(inlineResult.executionId, /^[0-9a-f-]{36}$/);
     assert.ok(inline.json().result.structuredContent.references.some((reference: { path: string; value: string }) => reference.path === "response.executionId" && reference.value === inlineResult.executionId));
     const savedInline = await app.inject({
@@ -1562,6 +1584,11 @@ test("executes a script through the configured tunnel command agent", async () =
     assert.equal(savedInlineResult.version, 1);
     assert.equal(savedInlineResult.alreadySaved, false);
     assert.ok(savedInline.json().result.structuredContent.references.some((reference: { path: string; value: string }) => reference.path === "response.scriptId" && reference.value === savedInlineResult.scriptId));
+    // The ad hoc GREETING argument declared for that run must carry into
+    // version 1 of the saved script, not just its content.
+    const savedScript = await app.inject({ method: "GET", url: `/api/scripts/${savedInlineResult.scriptId}`, headers: { cookie: sessionCookie } });
+    assert.equal(savedScript.statusCode, 200, savedScript.body);
+    assert.deepEqual(savedScript.json().script.versions[0].arguments, [{ name: "GREETING", defaultValue: "hi", description: "", required: false }]);
     const scriptHistory = await app.inject({
       method: "POST",
       url: "/mcp",
@@ -1597,7 +1624,7 @@ test("executes a script through the configured tunnel command agent", async () =
   } finally {
     globalThis.fetch = originalFetch;
   }
-  const audit = await pool.query("SELECT details FROM audit_logs WHERE action = 'tunnel.command_executed' AND entity_id = $1", [tunnelId]);
+  const audit = await pool.query("SELECT details FROM audit_logs WHERE action = 'tunnel.command_executed' AND entity_id = $1 ORDER BY id", [tunnelId]);
   assert.equal(audit.rowCount, 3);
   assert.equal(audit.rows[0].details.success, true);
   const executions = await pool.query("SELECT enrollment_id, script_version_id, saved_script_id, saved_script_version_id, saved_at, script_type, script_name, script_platform, script_language, script_version_number, status, elapsed_ms, stdout, stderr FROM tunnel_command_executions WHERE tunnel_id = $1 AND script_name <> '__cfman_rdp_enable__' ORDER BY created_at", [tunnelId]);

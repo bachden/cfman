@@ -5,7 +5,7 @@ import { toast } from "sonner";
 import { api } from "../api";
 import { emptyExecutionStats, type AppSettings, type ArgumentBindings, type BulkScriptRun, type ExecutionStats, type ExecutionVariables, type ManagedScript, type ScriptArgument, type ScriptCommandExecution, type Tunnel } from "../types";
 import { useDrawers } from "./DrawerContext";
-import { ArgumentBindingsEditor, ScriptArgumentsEditor } from "./ExecutionVariablesEditor";
+import { ArgumentBindingsEditor, missingRequiredArgumentNames, ScriptArgumentsEditor } from "./ExecutionVariablesEditor";
 import { ExecutionLog } from "./ExecutionLog";
 import { ExecutionStatsSummary } from "./ExecutionStatsSummary";
 import { FieldHelp } from "./FieldHelp";
@@ -430,7 +430,7 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
           </section>
         </div>
         <ArgumentBindingsEditor argumentsList={argumentsList} bindings={bulkArgumentBindings} availableVariables={bulkAvailableVariables} variesPerTunnelNames={bulkVariesPerTunnelNames} onChange={setBulkArgumentBindings} />
-        <div className="form-actions"><button className="button button-secondary bulk-cancel-button" type="button" onClick={() => setBulkOpen(false)}>Cancel</button><span>{bulkSelectAll ? `${bulkSelectAllCount} selected` : `${bulkSelectedList.length} selected`}</span><label className="field bulk-timeout-field"><span className="field-label">Timeout (s) <FieldHelp text="The maximum time the command agent may let each per-tunnel execution run before terminating it. Allowed range: 1 to 300 seconds." /></span><input type="number" min={1} max={300} value={bulkTimeoutSeconds} onChange={(event) => setBulkTimeoutSeconds(Math.min(300, Math.max(1, Number(event.target.value) || 1)))} /></label><button className="button button-primary" type="button" disabled={!bulkName.trim() || !selectedVersionData || bulkExecute.isPending || (bulkSelectAll ? !bulkSelectAllCount : !bulkSelectedList.length)} onClick={() => bulkExecute.mutate()}><Play size={15} />{bulkExecute.isPending ? "Starting..." : "Execute selected"}</button></div>
+        <div className="form-actions"><button className="button button-secondary bulk-cancel-button" type="button" onClick={() => setBulkOpen(false)}>Cancel</button><span>{bulkSelectAll ? `${bulkSelectAllCount} selected` : `${bulkSelectedList.length} selected`}</span><label className="field bulk-timeout-field"><span className="field-label">Timeout (s) <FieldHelp text="The maximum time the command agent may let each per-tunnel execution run before terminating it. Allowed range: 1 to 300 seconds." /></span><input type="number" min={1} max={300} value={bulkTimeoutSeconds} onChange={(event) => setBulkTimeoutSeconds(Math.min(300, Math.max(1, Number(event.target.value) || 1)))} /></label><button className="button button-primary" type="button" disabled={!bulkName.trim() || !selectedVersionData || bulkExecute.isPending || (bulkSelectAll ? !bulkSelectAllCount : !bulkSelectedList.length) || Boolean(missingRequiredArgumentNames(argumentsList, bulkArgumentBindings, bulkAvailableVariables, bulkVariesPerTunnelNames).length)} onClick={() => bulkExecute.mutate()}><Play size={15} />{bulkExecute.isPending ? "Starting..." : "Execute selected"}</button></div>
       </div>
     </Modal>
     <SideDrawer open={Boolean(bulkDetailRun)} zIndex={(zIndex ?? 100) + 2} title={<div className="drawer-heading"><Layers3 size={18} /><strong>{bulkDetailRun?.name ?? "Bulk execution"}</strong></div>} onClose={() => setBulkDetailRun(null)}>

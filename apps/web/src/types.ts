@@ -238,6 +238,12 @@ export type TunnelCommandExecution = {
   bulkExecutionId?: string | null;
   environmentVariables: ExecutionVariables;
   argumentSources: Record<string, ArgumentValueSource>;
+  // The arguments actually declared for this run - from the script version
+  // for a managed script, or the ad hoc list an operator typed in when
+  // preparing an inline run - independent of environmentVariables/
+  // argumentSources, which also carry the tunnel identity built-ins every
+  // execution receives whether or not any argument was declared for them.
+  scriptArguments: ScriptArgument[] | null;
 };
 
 export type ScriptCommandExecution = TunnelCommandExecution & {

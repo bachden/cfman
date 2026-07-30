@@ -7,10 +7,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   applyScriptArguments,
+  assertNoArgumentNesting,
   describeArgumentValueSources,
   expandArgumentValue,
   expandVariableReferences,
   resolveArgumentValues,
+  scriptArgumentsSchema,
   VariableResolutionError,
   type ExecutionVariables,
   type ScriptArgument,
@@ -196,5 +198,56 @@ test("a required argument that expands to nothing is still rejected", () => {
   assert.throws(
     () => resolveArgumentValues([argument("ARG", { required: true })], available, { ARG: { type: "custom", value: "$EMPTY" } }),
     /Required argument missing a value: ARG/
+  );
+});
+
+test("a script argument's default value cannot reference another argument", () => {
+  const result = scriptArgumentsSchema.safeParse([argument("ARG_A"), argument("ARG_B", { defaultValue: "computed from $ARG_A" })]);
+  assert.equal(result.success, false);
+  assert.match(result.error!.issues[0].message, /Default value cannot reference argument ARG_A/);
+});
+
+test("a script argument's default value referencing itself is rejected the same way", () => {
+  const result = scriptArgumentsSchema.safeParse([argument("LOOP", { defaultValue: "x $LOOP" })]);
+  assert.equal(result.success, false);
+  assert.match(result.error!.issues[0].message, /Default value cannot reference argument LOOP/);
+});
+
+test("a default value may still reference an environment variable", () => {
+  const result = scriptArgumentsSchema.safeParse([argument("GREETING", { defaultValue: "hi $TUNNEL_NAME" })]);
+  assert.equal(result.success, true);
+});
+
+test("a variable binding cannot point at another declared argument", () => {
+  const argumentsList = [argument("ARG_A"), argument("ARG_B")];
+  assert.throws(
+    () => assertNoArgumentNesting(argumentsList, { ARG_B: { type: "variable", variable: "ARG_A" } }),
+    /Argument ARG_B cannot bind to argument ARG_A - arguments cannot reference each other/
+  );
+});
+
+test("a custom binding cannot reference another declared argument via \\$NAME", () => {
+  const argumentsList = [argument("ARG_A"), argument("ARG_B")];
+  assert.throws(
+    () => assertNoArgumentNesting(argumentsList, { ARG_B: { type: "custom", value: "prefix-$ARG_A" } }),
+    /Argument ARG_B cannot reference argument ARG_A - arguments cannot reference each other/
+  );
+});
+
+test("bindings referencing real environment variables are unaffected by the nesting guard", () => {
+  const argumentsList = [argument("ARG_A"), argument("ARG_B")];
+  assert.doesNotThrow(() => assertNoArgumentNesting(argumentsList, {
+    ARG_A: { type: "variable", variable: "TUNNEL_NAME" },
+    ARG_B: { type: "custom", value: "hello $TUNNEL_NAME" }
+  }));
+});
+
+test("resolveArgumentValues rejects argument nesting before resolving anything", () => {
+  const scope = tunnelScope();
+  const available = expandVariableReferences(scope.raw, scope.sources);
+  const argumentsList = [argument("ARG_A"), argument("ARG_B")];
+  assert.throws(
+    () => resolveArgumentValues(argumentsList, available, { ARG_B: { type: "variable", variable: "ARG_A" } }),
+    VariableResolutionError
   );
 });

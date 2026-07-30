@@ -10,7 +10,7 @@ import { CopyButton } from "./CopyButton";
 import { useDrawers, type TunnelDrawerTab } from "./DrawerContext";
 import { ExecutionLog } from "./ExecutionLog";
 import { ExecutionStatsSummary } from "./ExecutionStatsSummary";
-import { AddVariableButton, ArgumentBindingsEditor, ExecutionVariablesEditor, ScriptArgumentsEditor } from "./ExecutionVariablesEditor";
+import { AddVariableButton, ArgumentBindingsEditor, ExecutionVariablesEditor, missingRequiredArgumentNames, ScriptArgumentsEditor } from "./ExecutionVariablesEditor";
 import { FieldHelp } from "./FieldHelp";
 import { HostPlatformIcon } from "./HostPlatformIcon";
 import { Modal } from "./Modal";
@@ -600,12 +600,13 @@ function deriveInlineScriptName(content: string): string {
   return `${lastSpace > 20 ? truncated.slice(0, lastSpace) : truncated}…`;
 }
 
-function ArgumentSummary({ data, loading, error }: { data: { arguments: ScriptArgument[]; availableVariables: ExecutionVariables } | undefined; loading: boolean; error: unknown }) {
+function ArgumentSummary({ argumentsList, data, loading, error }: { argumentsList: ScriptArgument[]; data: { availableVariables: ExecutionVariables } | undefined; loading: boolean; error: unknown }) {
   if (loading) return <div className="quiet-empty">Resolving available variables...</div>;
   if (error) return <div className="inline-alert">{error instanceof Error ? error.message : "Unable to resolve available variables"}</div>;
   if (!data) return null;
   const variableCount = Object.keys(data.availableVariables).length;
-  return <div className="argument-summary-hint">{data.arguments.length} argument{data.arguments.length === 1 ? "" : "s"} declared · {variableCount} variable{variableCount === 1 ? "" : "s"} available to map · configure on Execute</div>;
+  const requiredNames = argumentsList.filter((argument) => argument.required).map((argument) => argument.name);
+  return <div className="argument-summary-hint">{argumentsList.length} argument{argumentsList.length === 1 ? "" : "s"} declared{requiredNames.length ? ` (required: ${requiredNames.join(", ")})` : ""} · {variableCount} variable{variableCount === 1 ? "" : "s"} available to map · configure on Execute</div>;
 }
 
 function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
@@ -620,6 +621,7 @@ function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
   const [inlineNameTouched, setInlineNameTouched] = useState(false);
   const [inlineContent, setInlineContent] = useState(quickScriptDefaults.windows);
   const [inlineLanguage, setInlineLanguage] = useState<"powershell" | "bash" | "sh">("powershell");
+  const [inlineArguments, setInlineArguments] = useState<import("../types").ScriptArgument[]>([]);
   const [historyPage, setHistoryPage] = useState(1);
   const [historySearch, setHistorySearch] = useState("");
   const [historyFrom, setHistoryFrom] = useState("");
@@ -678,6 +680,7 @@ function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
     setInlineName(deriveInlineScriptName(quickScriptDefaults[hostPlatform]));
     setInlineNameTouched(false);
     setInlineContent(quickScriptDefaults[hostPlatform]);
+    setInlineArguments([]);
     setSelectedScriptId("");
     setSelectedVersionId("");
     setTimeoutSeconds(60);
@@ -732,7 +735,7 @@ function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
     mutationFn: (bindings: ArgumentBindings) => api.post<CommandExecutionResult>(`/api/tunnels/${tunnel.id}/commands/execute`, {
       ...(executionMode === "saved"
         ? { scriptVersionId: selectedVersionId }
-        : { inlineScript: inlineContent, name: inlineName, language: inlineLanguage }),
+        : { inlineScript: inlineContent, name: inlineName, language: inlineLanguage, arguments: inlineArguments }),
       timeoutMs: timeoutSeconds * 1_000,
       argumentBindings: bindings
     }),
@@ -811,9 +814,10 @@ function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
         </div> : <div className="command-inline-script">
           <div className="command-inline-heading"><div><strong>Inline script</strong><span>Runs once and stays outside the library unless saved from history.</span></div></div>
           <div className="command-inline-metadata"><label className="field"><span className="field-label">Name <FieldHelp text="Identifies this one-off execution in tunnel history. It is also used if you later save the execution to the script library. Defaults from the script's first line until you edit it." /></span><input value={inlineName} maxLength={120} onChange={(event) => { setInlineName(event.target.value); setInlineNameTouched(true); }} placeholder="One-off maintenance" /></label>{hostPlatform === "unix" ? <label className="field"><span className="field-label">Language</span><select aria-label="Inline script language" value={inlineLanguage} onChange={(event) => setInlineLanguage(event.target.value as typeof inlineLanguage)}><option value="bash">Bash</option><option value="sh">POSIX sh</option></select></label> : <label className="field"><span className="field-label">Language</span><input value="PowerShell" disabled /></label>}</div>
+          <ScriptArgumentsEditor argumentsList={inlineArguments} onChange={setInlineArguments} description="Declared ad hoc for this run only - an inline script has no saved version to keep them on. Map each to a value on Execute." />
           <ScriptEditor value={inlineContent} language={inlineLanguage} height="220px" onChange={setInlineContent} />
         </div>}
-        <div className="command-execution-controls"><ArgumentSummary data={resolvedVariableData} loading={variablesLoading} error={variablesError} /><button className="button button-primary command-execute-button" type="button" disabled={!canExecute} onClick={() => { setArgumentBindings({}); setExecuteConfirmOpen(true); }}><TerminalSquare size={15} />Execute script</button></div>
+        <div className="command-execution-controls"><ArgumentSummary argumentsList={executionMode === "saved" ? resolvedVariableData?.arguments ?? [] : inlineArguments} data={resolvedVariableData} loading={variablesLoading} error={variablesError} /><button className="button button-primary command-execute-button" type="button" disabled={!canExecute} onClick={() => { setArgumentBindings({}); setExecuteConfirmOpen(true); }}><TerminalSquare size={15} />Execute script</button></div>
       </>}
       <div className="command-execution-history"><header><h4>Execution history</h4><div className="command-history-head-actions"><ExecutionStatsSummary stats={historySummary} /><span>{historyPagination?.total ?? 0} run{historyPagination?.total === 1 ? "" : "s"}</span><button className="icon-button" type="button" title="Refresh execution history" aria-label="Refresh execution history" disabled={refreshHistory.isPending} onClick={() => refreshHistory.mutate()}><RefreshCw size={14} className={refreshHistory.isPending ? "spin-icon" : undefined} /></button></div></header><div className="execution-history-filters"><label className="execution-history-search"><Search size={14} /><input type="search" value={historySearch} onChange={(event) => setHistorySearch(event.target.value)} placeholder="Search script, description, tunnel, tenant, or code" aria-label="Search tunnel execution history" /></label><label><span>From</span><input type="datetime-local" step="60" value={historyFrom} onChange={(event) => setHistoryFrom(event.target.value)} aria-label="Filter tunnel execution history from time" /></label><label><span>To</span><input type="datetime-local" step="60" value={historyTo} onChange={(event) => setHistoryTo(event.target.value)} aria-label="Filter tunnel execution history to time" /></label></div>{executions.length ? executions.map((execution: TunnelCommandExecution) => {
         const enrollment = execution.enrollmentId ? enrollmentById.get(execution.enrollmentId) : undefined;
@@ -838,8 +842,8 @@ function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
     <Modal open={executeConfirmOpen} title={`Execute · ${executionMode === "saved" ? selectedScript?.name ?? "saved script" : inlineName || "inline script"}`} onClose={() => setExecuteConfirmOpen(false)} width="wide">
       <div className="execution-confirmation">{variablesErrored ? <div className="inline-alert">{variablesError instanceof Error ? variablesError.message : "Unable to resolve available variables"}<button className="button button-secondary button-small" type="button" onClick={() => refetchVariables()}><RefreshCw size={14} />Retry</button></div> : variablesLoading || !resolvedVariableData ? <div className="quiet-empty">Resolving available variables...</div> : <>
         <div className="execution-confirmation-summary"><div><strong>{tunnel.displayName}</strong><span>{executionMode === "saved" ? `Version ${selectedScriptVersion?.version ?? "-"}` : "Inline script"}</span></div></div>
-        <ArgumentBindingsEditor argumentsList={resolvedVariableData.arguments} bindings={argumentBindings} availableVariables={resolvedVariableData.availableVariables} sources={resolvedVariableData.sources} onChange={setArgumentBindings} />
-        <div className="form-actions"><button className="button button-secondary cancel-button-left" type="button" onClick={() => setExecuteConfirmOpen(false)}>Cancel</button><span>{Object.keys(argumentBindings).length} argument{Object.keys(argumentBindings).length === 1 ? "" : "s"} mapped</span><label className="field bulk-timeout-field"><span className="field-label">Timeout (s) <FieldHelp text="The maximum time the command agent may let this script run before terminating it. Allowed range: 1 to 300 seconds." /></span><input type="number" min={1} max={300} value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Math.min(300, Math.max(1, Number(event.target.value) || 1)))} /></label><button className="button button-primary" type="button" disabled={execute.isPending} onClick={() => execute.mutate(argumentBindings)}><TerminalSquare size={15} />{execute.isPending ? "Executing..." : "Confirm execution"}</button></div>
+        <ArgumentBindingsEditor argumentsList={executionMode === "saved" ? resolvedVariableData.arguments : inlineArguments} bindings={argumentBindings} availableVariables={resolvedVariableData.availableVariables} sources={resolvedVariableData.sources} onChange={setArgumentBindings} />
+        <div className="form-actions"><button className="button button-secondary cancel-button-left" type="button" onClick={() => setExecuteConfirmOpen(false)}>Cancel</button><span>{Object.keys(argumentBindings).length} argument{Object.keys(argumentBindings).length === 1 ? "" : "s"} mapped</span><label className="field bulk-timeout-field"><span className="field-label">Timeout (s) <FieldHelp text="The maximum time the command agent may let this script run before terminating it. Allowed range: 1 to 300 seconds." /></span><input type="number" min={1} max={300} value={timeoutSeconds} onChange={(event) => setTimeoutSeconds(Math.min(300, Math.max(1, Number(event.target.value) || 1)))} /></label><button className="button button-primary" type="button" disabled={execute.isPending || Boolean(missingRequiredArgumentNames(executionMode === "saved" ? resolvedVariableData.arguments : inlineArguments, argumentBindings, resolvedVariableData.availableVariables).length)} onClick={() => execute.mutate(argumentBindings)}><TerminalSquare size={15} />{execute.isPending ? "Executing..." : "Confirm execution"}</button></div>
       </>}</div>
     </Modal>
   </>;

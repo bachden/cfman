@@ -372,7 +372,8 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     inlineScript: z.string().min(1).max(262144),
     name: z.string().trim().min(1).max(120).optional().describe("Operator-facing name shown beside the inline tag in execution history"),
     language: z.enum(["powershell", "bash", "sh"]).optional().describe("Optional for inline scripts; defaults to PowerShell on Windows and Bash on Unix"),
-    argumentBindings: argumentBindingsSchema.optional().describe("Inline scripts declare no arguments, so this is only useful if you plan to reference the bound names directly in the inline source."),
+    arguments: scriptArgumentsSchema.optional().describe("An inline script has no saved version to declare arguments on, so declare them here, ad hoc, for this run only. Bind them with argumentBindings the same way as a saved script's declared arguments. Carried over automatically if this execution is later saved as a script with cfman_save_inline_execution_as_script."),
+    argumentBindings: argumentBindingsSchema.optional().describe("Maps each name declared in `arguments` to a value the same way as cfman_execute_script: { type: 'custom', value } or { type: 'variable', variable }. A name with no binding uses its own declared default value."),
     timeoutMs: z.number().int().min(1000).max(300000).optional().default(60000)
   }, (args) => {
     const { tunnelId, ...body } = args;
@@ -385,7 +386,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     const { tunnelId, ...body } = args;
     return callApi(app, token, "POST", `/api/tunnels/${tunnelId}/execution-variables/resolve`, body);
   });
-  registerApiTool(server, app, token, "cfman_save_inline_execution_as_script", "Save the exact source snapshot from an inline execution as version 1 of a reusable script. Repeated calls return the same script and version identifiers.", {
+  registerApiTool(server, app, token, "cfman_save_inline_execution_as_script", "Save the exact source snapshot from an inline execution as version 1 of a reusable script, carrying over any ad hoc arguments that execution declared. Repeated calls return the same script and version identifiers.", {
     tunnelId: z.string().uuid(),
     executionId: z.string().uuid(),
     name: z.string().trim().min(1).max(120).optional().describe("Optional replacement for the inline execution name")

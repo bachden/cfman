@@ -148,13 +148,17 @@ const executeScriptSchema = z.object({
   name: z.string().trim().min(1).max(120).optional(),
   language: z.enum(["powershell", "bash", "sh"]).optional(),
   timeoutMs: z.number().int().min(1_000).max(300_000).optional(),
+  // A saved script's arguments are declared on its immutable version, not
+  // chosen per run - only an inline script, which has no version to declare
+  // them on, accepts an ad hoc list here.
+  arguments: scriptArgumentsSchema.optional(),
   argumentBindings: argumentBindingsSchema.default({})
 }).superRefine((data, context) => {
   if (Boolean(data.scriptVersionId) === Boolean(data.inlineScript)) {
     context.addIssue({ code: "custom", message: "Provide exactly one saved script version or inline script" });
   }
-  if (data.scriptVersionId && (data.language || data.name)) {
-    context.addIssue({ code: "custom", message: "Name and language are only accepted for inline scripts" });
+  if (data.scriptVersionId && (data.language || data.name || data.arguments)) {
+    context.addIssue({ code: "custom", message: "Name, language, and arguments are only accepted for inline scripts" });
   }
 });
 
@@ -1290,7 +1294,7 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
                 COALESCE(ce.script_version_number, sv.version) AS "scriptVersion",
                 COALESCE(ce.script_platform, ms.platform) AS platform,
                 COALESCE(ce.script_language, ms.language) AS language,
-                ce.script, ce.environment_variables AS "environmentVariables", ce.argument_sources AS "argumentSources", ce.timeout_ms AS "timeoutMs", ce.status, ce.task_id AS "taskId", ce.process_id AS "processId",
+                ce.script, ce.environment_variables AS "environmentVariables", ce.argument_sources AS "argumentSources", COALESCE(sv.arguments, ce.inline_arguments) AS "scriptArguments", ce.timeout_ms AS "timeoutMs", ce.status, ce.task_id AS "taskId", ce.process_id AS "processId",
                 ce.created_at AS "createdAt", ce.started_at AS "startedAt", ce.finished_at AS "finishedAt",
                 ce.elapsed_ms AS "elapsedMs", ce.exit_code AS "exitCode",
                 ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy"
@@ -1437,6 +1441,7 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
       scriptVersion = null;
       scriptPlatform = enrollmentPlatform;
       scriptLanguage = inlineLanguage;
+      scriptArguments = body.arguments ?? [];
     }
     const agent = await getCommandAgentConfig(id);
     if (!agent) return reply.code(409).send({ error: "No command agent route is configured for this tunnel" });
@@ -1463,7 +1468,8 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
       scriptLanguage,
       scriptVersion,
       environmentVariables: argumentValues,
-      argumentSources
+      argumentSources,
+      inlineArguments: scriptType === "inline" ? scriptArguments : undefined
     });
     try {
       const result = await executeTunnelScript(id, dispatchedScript, resolvedTimeoutMs, executionHandle);
@@ -1547,7 +1553,7 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
     const saved = await withTransaction(async (client) => {
       const executionResult = await client.query(
         `SELECT id, script_type, script_name, script_platform, script_language, script,
-                saved_script_id, saved_script_version_id
+                saved_script_id, saved_script_version_id, inline_arguments
            FROM tunnel_command_executions
           WHERE id = $1 AND tunnel_id = $2
           FOR UPDATE`,
@@ -1576,10 +1582,10 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
         [name, execution.script_platform, execution.script_language, `Saved from inline execution ${executionId}`, request.authUser!.id]
       );
       const version = await client.query(
-        `INSERT INTO managed_script_versions(script_id, version, content, created_by)
-         VALUES ($1, 1, $2, $3)
+        `INSERT INTO managed_script_versions(script_id, version, content, arguments, created_by)
+         VALUES ($1, 1, $2, $3, $4)
          RETURNING id, version`,
-        [script.rows[0].id, execution.script, request.authUser!.id]
+        [script.rows[0].id, execution.script, JSON.stringify(execution.inline_arguments), request.authUser!.id]
       );
       await client.query(
         `UPDATE tunnel_command_executions
