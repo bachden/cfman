@@ -5,7 +5,7 @@ import { requireAuth } from "../lib/auth.js";
 import { createCommandExecution, executeTunnelScript, getCommandAgentConfig } from "../lib/command-agent.js";
 import { pool, withTransaction } from "../lib/database.js";
 import { appendNameFilter, nameFilterFields, validateNameFilter } from "../lib/name-filter.js";
-import { argumentBindingsSchema, applyScriptArguments, assertNoArgumentNesting, describeArgumentValueSources, resolveArgumentValues, resolveAvailableVariablesForTunnels, scriptArgumentsSchema } from "../lib/execution-variables.js";
+import { argumentBindingsSchema, applyScriptArguments, describeArgumentValueSources, resolveArgumentValues, resolveAvailableVariablesForTunnels, scriptArgumentsSchema } from "../lib/execution-variables.js";
 import { latestEnrollmentJoin, onboardingStatusExpression } from "./tunnels.js";
 
 const platformSchema = z.enum(["windows", "unix"]);
@@ -627,7 +627,6 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     // rejected once here, before any tunnel is targeted, instead of
     // failing every single per-tunnel execution the same way.
     try {
-      assertNoArgumentNesting(scriptArguments, body.argumentBindings);
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : "Invalid argument bindings" });
     }

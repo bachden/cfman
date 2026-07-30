@@ -7,7 +7,6 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   applyScriptArguments,
-  assertNoArgumentNesting,
   describeArgumentValueSources,
   expandArgumentValue,
   expandVariableReferences,
@@ -223,16 +222,30 @@ test("a required argument that expands to nothing is still rejected", () => {
   );
 });
 
-test("a script argument's default value cannot reference another argument", () => {
-  const result = scriptArgumentsSchema.safeParse([argument("ARG_A"), argument("ARG_B", { defaultValue: "computed from $ARG_A" })]);
-  assert.equal(result.success, false);
-  assert.match(result.error!.issues[0].message, /Default value cannot reference argument ARG_A/);
+// Argument names and variable names are separate namespaces: a $NAME in any
+// value is resolved against the tunnel's variables, never against another
+// argument. Sharing a name is allowed and only warned about in the UI.
+test("an argument may be named after a variable without being rejected", () => {
+  const result = scriptArgumentsSchema.safeParse([argument("TENANT_CODE"), argument("GREETING", { defaultValue: "hi $TENANT_CODE" })]);
+  assert.equal(result.success, true);
 });
 
-test("a script argument's default value referencing itself is rejected the same way", () => {
-  const result = scriptArgumentsSchema.safeParse([argument("LOOP", { defaultValue: "x $LOOP" })]);
-  assert.equal(result.success, false);
-  assert.match(result.error!.issues[0].message, /Default value cannot reference argument LOOP/);
+test("a default value referencing a name shared with an argument resolves the variable, not the argument", () => {
+  const scope = tunnelScope();
+  const available = expandVariableReferences(scope.raw, scope.sources);
+  const argumentsList = [argument("TENANT_CODE", { defaultValue: "argument-own-value" }), argument("GREETING", { defaultValue: "hi $TENANT_CODE" })];
+  const values = resolveArgumentValues(argumentsList, available, {});
+  // $TENANT_CODE is the built-in variable, not the sibling argument's default.
+  assert.equal(values.GREETING, "hi acme");
+  assert.equal(values.TENANT_CODE, "argument-own-value");
+});
+
+test("a binding may point at a variable whose name is also an argument name", () => {
+  const scope = tunnelScope();
+  const available = expandVariableReferences(scope.raw, scope.sources);
+  const argumentsList = [argument("TENANT_CODE"), argument("ARG_B")];
+  const values = resolveArgumentValues(argumentsList, available, { ARG_B: { type: "variable", variable: "TENANT_CODE" } });
+  assert.equal(values.ARG_B, "acme");
 });
 
 test("a default value may still reference an environment variable", () => {
@@ -240,36 +253,13 @@ test("a default value may still reference an environment variable", () => {
   assert.equal(result.success, true);
 });
 
-test("a variable binding cannot point at another declared argument", () => {
-  const argumentsList = [argument("ARG_A"), argument("ARG_B")];
-  assert.throws(
-    () => assertNoArgumentNesting(argumentsList, { ARG_B: { type: "variable", variable: "ARG_A" } }),
-    /Argument ARG_B cannot bind to argument ARG_A - arguments cannot reference each other/
-  );
-});
-
-test("a custom binding cannot reference another declared argument via \\$NAME", () => {
-  const argumentsList = [argument("ARG_A"), argument("ARG_B")];
-  assert.throws(
-    () => assertNoArgumentNesting(argumentsList, { ARG_B: { type: "custom", value: "prefix-$ARG_A" } }),
-    /Argument ARG_B cannot reference argument ARG_A - arguments cannot reference each other/
-  );
-});
-
-test("bindings referencing real environment variables are unaffected by the nesting guard", () => {
-  const argumentsList = [argument("ARG_A"), argument("ARG_B")];
-  assert.doesNotThrow(() => assertNoArgumentNesting(argumentsList, {
-    ARG_A: { type: "variable", variable: "TUNNEL_NAME" },
-    ARG_B: { type: "custom", value: "hello $TUNNEL_NAME" }
-  }));
-});
-
-test("resolveArgumentValues rejects argument nesting before resolving anything", () => {
+// Binding to a name that no variable carries is not an error: the lookup
+// happens against the tunnel's variables, so it simply yields an empty value.
+// The UI warns about the naming collision rather than refusing the run.
+test("a binding naming something that is not a variable resolves empty instead of throwing", () => {
   const scope = tunnelScope();
   const available = expandVariableReferences(scope.raw, scope.sources);
   const argumentsList = [argument("ARG_A"), argument("ARG_B")];
-  assert.throws(
-    () => resolveArgumentValues(argumentsList, available, { ARG_B: { type: "variable", variable: "ARG_A" } }),
-    VariableResolutionError
-  );
+  const values = resolveArgumentValues(argumentsList, available, { ARG_B: { type: "variable", variable: "ARG_A" } });
+  assert.equal(values.ARG_B, "");
 });

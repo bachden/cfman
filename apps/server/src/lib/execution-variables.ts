@@ -34,20 +34,6 @@ export const scriptArgumentsSchema = z.array(scriptArgumentSchema).max(100).supe
     if (names.has(normalized)) context.addIssue({ code: "custom", path: [index, "name"], message: "Argument names must be unique" });
     names.add(normalized);
   });
-  // Arguments may not reference each other, even in their own declared default -
-  // only environment variables may nest inside a template. Two arguments that
-  // need to be combined must be combined inside the script itself, which
-  // receives every resolved argument as a script-scoped variable.
-  argumentsList.forEach((argument, index) => {
-    const referenced = referencedNames(argument.defaultValue).filter((name) => names.has(name));
-    if (referenced.length) {
-      context.addIssue({
-        code: "custom",
-        path: [index, "defaultValue"],
-        message: `Default value cannot reference argument ${referenced.join(", ")} - arguments cannot reference each other. Combine values inside the script instead.`
-      });
-    }
-  });
 });
 
 export type ExecutionVariables = z.infer<typeof executionVariablesSchema>;
@@ -251,34 +237,12 @@ export async function resolveAvailableVariablesForTunnels(
   return new Map((scopeResult.rows as TunnelVariableScope[]).map((scope) => [scope.id, resolveAvailableVariables(scope, globalVariables)]));
 }
 
-// An operator's binding choice may point an argument at a resolved environment
-// variable, or embed one inside a custom value - but never at another
-// declared argument. Only environment variables are allowed to nest inside
-// each other; two arguments that need each other's value must be combined
-// inside the script itself, which receives every resolved argument as a
-// script-scoped variable. This runs once, before any per-tunnel resolution,
-// so a misconfigured binding is rejected as a single clear error instead of
-// failing silently (as an unresolved reference) on every tunnel of a bulk run.
-export function assertNoArgumentNesting(argumentsList: ScriptArgument[], bindings: ArgumentBindings): void {
-  const argumentNames = new Set(argumentsList.map((argument) => argument.name.toUpperCase()));
-  for (const [name, binding] of Object.entries(bindings)) {
-    if (binding.type === "variable") {
-      if (argumentNames.has(binding.variable.toUpperCase())) {
-        throw new VariableResolutionError(`Argument ${name} cannot bind to argument ${binding.variable} - arguments cannot reference each other. Combine values inside the script instead.`);
-      }
-      continue;
-    }
-    const referenced = [...new Set(
-      [...binding.value.matchAll(VARIABLE_REFERENCE)]
-        .filter((match) => match[0] !== "$$")
-        .map((match) => (match[1] ?? match[2] ?? "").toUpperCase())
-    )].filter((referencedName) => argumentNames.has(referencedName));
-    if (referenced.length) {
-      throw new VariableResolutionError(`Argument ${name} cannot reference argument ${referenced.join(", ")} - arguments cannot reference each other. Combine values inside the script instead.`);
-    }
-  }
-}
-
+// Argument names and variable names are separate namespaces. Variables are
+// resolved on their own first, and only then bound to arguments, so a $NAME
+// inside a value always means the variable NAME - never the argument that
+// happens to carry the same name. Sharing a name is therefore allowed: it is
+// a readability problem for the operator, surfaced as a warning in the UI,
+// not a configuration error worth refusing to run.
 // Maps each declared script argument to its final value for one tunnel's
 // available variables, following the operator's explicit binding choice: a
 // literal custom value, or a reference to one of that tunnel's available
@@ -291,7 +255,6 @@ export function resolveArgumentValues(
   availableVariables: ExecutionVariables,
   bindings: ArgumentBindings
 ): ExecutionVariables {
-  assertNoArgumentNesting(argumentsList, bindings);
   const normalizedBindings = Object.fromEntries(Object.entries(bindings).map(([name, binding]) => [name.toUpperCase(), binding]));
   const values: ExecutionVariables = {};
   for (const argument of argumentsList) {
