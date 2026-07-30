@@ -620,11 +620,11 @@ tbody tr:hover td { background: #fbfcfb; }
 .streaming-log { max-height: 420px !important; }
 
 .execution-variable-editor { display: flex; flex-direction: column; gap: 10px; }
-.script-arguments-editor, .argument-bindings-editor { display: flex; flex-direction: column; gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 4px; background: #fbfcfb; }
-.script-arguments-editor > header, .argument-bindings-editor > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.script-arguments-editor > header > div { display: flex; flex-direction: column; gap: 2px; }
-.script-arguments-editor > header span, .argument-bindings-editor > header span { display: block; margin-top: 2px; color: var(--muted); font-size: 9px; font-weight: 500; }
-.script-arguments-editor > header h3, .argument-bindings-editor > header h3 { margin: 0; font-size: 12px; }
+.script-arguments-editor, .argument-bindings-editor, .inline-arguments-editor { display: flex; flex-direction: column; gap: 10px; padding: 10px; border: 1px solid var(--line); border-radius: 4px; background: #fbfcfb; }
+.script-arguments-editor > header, .argument-bindings-editor > header, .inline-arguments-editor > header { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.script-arguments-editor > header > div, .inline-arguments-editor > header > div { display: flex; flex-direction: column; gap: 2px; }
+.script-arguments-editor > header span, .argument-bindings-editor > header span, .inline-arguments-editor > header span { display: block; margin-top: 2px; color: var(--muted); font-size: 9px; font-weight: 500; }
+.script-arguments-editor > header h3, .argument-bindings-editor > header h3, .inline-arguments-editor > header h3 { margin: 0; font-size: 12px; }
 .execution-variable-list, .script-argument-list, .argument-binding-list { display: flex; flex-direction: column; gap: 8px; }
 .argument-binding-row { display: grid; grid-template-columns: minmax(0, .8fr) auto minmax(0, 1.2fr) minmax(0, .9fr); align-items: center; gap: 10px; }
 .argument-binding-label { font-size: 10px; }
@@ -643,6 +643,12 @@ tbody tr:hover td { background: #fbfcfb; }
 .argument-binding-requirements-summary { display: block; padding: 6px 9px; color: #3d4a41; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 4px; font-size: 10px; font-weight: 600; }
 .argument-binding-requirements-summary.argument-binding-requirements-missing { color: #8d4234; background: var(--red-soft); border-color: #efc9c4; }
 .argument-binding-required-flag { color: #8d4234; font-weight: 700; text-transform: uppercase; }
+.inline-argument-list { display: flex; flex-direction: column; gap: 8px; }
+.inline-argument-row { display: grid; grid-template-columns: minmax(0, .7fr) auto minmax(0, 1fr) auto minmax(0, .8fr) auto; align-items: center; gap: 10px; }
+.inline-argument-row select, .inline-argument-row input[type="text"], .inline-argument-row input:not([type]) { height: 34px; padding: 0 9px; color: var(--ink); background: white; border: 1px solid var(--line-strong); border-radius: 5px; outline: none; font-size: 11px; }
+.inline-argument-row select:focus, .inline-argument-row input:focus { border-color: var(--green); box-shadow: 0 0 0 3px rgba(8, 127, 91, .1); }
+.inline-argument-required { display: flex; align-items: center; gap: 6px; color: #445047; font-size: 9px; font-weight: 700; white-space: nowrap; }
+.inline-argument-required input { width: 15px; height: 15px; margin: 0; accent-color: var(--green); cursor: pointer; }
 .execution-variable-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 2fr) 112px; align-items: center; gap: 8px; }
 .execution-variable-row-header span { color: var(--muted); font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .02em; }
 .execution-variable-row input { width: 100%; height: 36px; padding: 0 10px; color: var(--ink); background: white; border: 1px solid var(--line-strong); border-radius: 5px; outline: none; font-size: 12px; font-weight: 450; }

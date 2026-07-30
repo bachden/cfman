@@ -115,6 +115,28 @@ test("a custom argument value resolves against the tunnel's variables", () => {
   assert.equal(values.GREETING, "hello from PhamHaiTest58");
 });
 
+test("a custom argument value resolves a chain of nested variables, not just one level", () => {
+  // LABEL depends on BANNER depends on TUNNEL_NAME (a built-in) - resolution
+  // must walk the whole chain before the argument ever sees a value, so the
+  // custom binding gets the fully-resolved string in one shot.
+  const scope = tunnelScope({ BANNER: "site $TUNNEL_NAME", LABEL: "hello, ${BANNER}!" }, { BANNER: "account", LABEL: "tunnel" });
+  const available = expandVariableReferences(scope.raw, scope.sources);
+  const values = resolveArgumentValues([argument("GREETING")], available, { GREETING: { type: "custom", value: "$LABEL - $TENANT_CODE" } });
+  assert.equal(values.GREETING, "hello, site PhamHaiTest58! - acme");
+});
+
+test("a cycle among environment variables is rejected before any argument binding is attempted", () => {
+  // Cycle detection lives entirely upstream, in expandVariableReferences -
+  // resolveArgumentValues never has to detect a cycle itself, because it only
+  // ever sees an already-fully-resolved variable map. A custom value
+  // referencing a variable caught in a cycle never gets the chance to run.
+  const scope = tunnelScope({ A: "$B", B: "$A" }, { A: "tunnel", B: "tunnel" });
+  assert.throws(
+    () => expandVariableReferences(scope.raw, scope.sources),
+    (error: unknown) => error instanceof VariableResolutionError && /cycle detected: A -> B -> A/.test((error as Error).message)
+  );
+});
+
 test("a declared default resolves the same way as a custom value", () => {
   const scope = tunnelScope();
   const available = expandVariableReferences(scope.raw, scope.sources);

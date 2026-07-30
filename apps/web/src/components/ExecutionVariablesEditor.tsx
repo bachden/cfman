@@ -331,3 +331,85 @@ export function ArgumentBindingsEditor({
     })}</div>
   </section>;
 }
+
+// An inline script has no saved version to declare arguments on and no
+// earlier run to bind against, so declaring an argument and giving it a
+// value for this run are the same step - unlike a saved script, where
+// ScriptArgumentsEditor (authoring a version) and ArgumentBindingsEditor
+// (preparing a run) are necessarily two different moments. defaultValue
+// doubles as both: the value resolved for this run, and - unchanged - what
+// becomes the argument's declared default if the execution is later saved
+// as a script. A custom value may still embed variables as $NAME, resolved
+// the same way as a saved script's custom binding.
+export function InlineArgumentsEditor({
+  argumentsList,
+  onChange,
+  availableVariables,
+  sources
+}: {
+  argumentsList: ScriptArgument[];
+  onChange: (argumentsList: ScriptArgument[]) => void;
+  availableVariables: ExecutionVariables;
+  sources?: Record<string, string>;
+}) {
+  // Whether each row shows a free-text custom value or a variable picker.
+  // Purely a display choice - inferred as "variable" the moment a row's
+  // value is a single bare/braced reference, so switching modes never loses
+  // or duplicates what the operator already typed.
+  const [customModes, setCustomModes] = useState<Set<string>>(new Set());
+  const variableNames = Object.keys(availableVariables).sort();
+  const requiredNames = argumentsList.filter((argument) => argument.required).map((argument) => argument.name);
+  const missingNames = missingRequiredArgumentNames(argumentsList, {}, availableVariables);
+  const modeFor = (argument: ScriptArgument): "custom" | "variable" => {
+    if (customModes.has(argument.name)) return "custom";
+    const referenced = referencedVariableNames(argument.defaultValue);
+    return referenced.length === 1 && (argument.defaultValue === `$${referenced[0]}` || argument.defaultValue === `\${${referenced[0]}}`) ? "variable" : "custom";
+  };
+  const update = (index: number, patch: Partial<ScriptArgument>) =>
+    onChange(argumentsList.map((item, itemIndex) => itemIndex === index ? { ...item, ...patch } : item));
+  const add = () => onChange([...argumentsList, { name: `ARGUMENT_${argumentsList.length + 1}`, defaultValue: "", description: "", required: false }]);
+  const remove = (index: number) => onChange(argumentsList.filter((_, itemIndex) => itemIndex !== index));
+  return <section className="inline-arguments-editor">
+    <header>
+      <div>
+        <h3>Script arguments</h3>
+        <span>
+          Declared ad hoc for this run only - an inline script has no saved version to keep them on. The value given here is used now, and becomes this argument's default value if the execution is later saved as a script.
+          {" "}<FieldHelp text="A custom value may embed variables as $NAME or ${NAME} - for example hello from $TUNNEL_NAME - resolved the same way as a saved script's custom binding. Variable mode binds directly to one of the tunnel's resolved environment variables instead. Avoid naming an argument after a built-in (TENANT_CODE, TUNNEL_NAME, TUNNEL_CODE) - the argument replaces it inside the script." />
+        </span>
+      </div>
+      <button className="button button-secondary button-small" type="button" onClick={add}><Plus size={14} />Argument</button>
+    </header>
+    {argumentsList.length ? <>
+      <div className="argument-binding-requirements">
+        {requiredNames.length
+          ? <span className={`argument-binding-requirements-summary${missingNames.length ? " argument-binding-requirements-missing" : ""}`}>
+              {missingNames.length
+                ? `Missing required argument${missingNames.length === 1 ? "" : "s"}: ${missingNames.join(", ")}`
+                : `All required arguments have a value (${requiredNames.join(", ")})`}
+            </span>
+          : <span className="argument-binding-requirements-summary">No required arguments</span>}
+      </div>
+      <div className="inline-argument-list">{argumentsList.map((argument, index) => {
+        const shadowsBuiltIn = TUNNEL_BUILT_IN_VARIABLES.includes(argument.name.toUpperCase());
+        const mode = modeFor(argument);
+        const effectiveValue = expandPreview(argument.defaultValue, availableVariables);
+        return <div className="inline-argument-row" key={index}>
+          <input className={`mono-input${shadowsBuiltIn ? " input-warning" : ""}`} value={argument.name} onChange={(event) => update(index, { name: event.target.value.toUpperCase() })} aria-label={`Argument name ${index + 1}`} />
+          <div className="argument-binding-type" role="radiogroup" aria-label={`Value source for ${argument.name}`}>
+            <label><input type="radio" name={`inline-argument-type-${index}`} checked={mode === "custom"} onChange={() => setCustomModes((current) => new Set(current).add(argument.name))} />Custom</label>
+            <label><input type="radio" name={`inline-argument-type-${index}`} checked={mode === "variable"} disabled={!variableNames.length} onChange={() => { setCustomModes((current) => { const next = new Set(current); next.delete(argument.name); return next; }); update(index, { defaultValue: variableNames.length ? `$${variableNames[0]}` : "" }); }} />Variable</label>
+          </div>
+          {mode === "variable"
+            ? <select value={referencedVariableNames(argument.defaultValue)[0] ?? ""} onChange={(event) => update(index, { defaultValue: `$${event.target.value}` })} aria-label={`Variable for ${argument.name}`}>
+                {variableNames.map((name) => <option key={name} value={name}>{name}{sources?.[name] ? ` · ${sources[name]}` : ""}</option>)}
+              </select>
+            : <input value={argument.defaultValue} onChange={(event) => update(index, { defaultValue: event.target.value })} aria-label={`Value for ${argument.name}`} placeholder="Custom value" />}
+          <label className="inline-argument-required"><input type="checkbox" checked={argument.required} onChange={(event) => update(index, { required: event.target.checked })} />Required</label>
+          <code className="argument-binding-preview mono" title="Effective value at execution time">{effectiveValue || "—"}</code>
+          <button className="icon-button account-delete" type="button" title={`Remove ${argument.name}`} aria-label={`Remove ${argument.name}`} onClick={() => remove(index)}><Trash2 size={15} /></button>
+        </div>;
+      })}</div>
+    </> : <div className="quiet-empty">No arguments declared for this run yet.</div>}
+  </section>;
+}
