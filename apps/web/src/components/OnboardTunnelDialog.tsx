@@ -1,39 +1,50 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 import { ApiError, api } from "../api";
-import type { EnrollmentResult, Tunnel } from "../types";
+import type { CloudflareAccount, EnrollmentResult, Tunnel } from "../types";
 import { connectivityPayload, createCommandAgentDraftPublication } from "./ConnectivityEditor";
 import { useDrawers } from "./DrawerContext";
 import { FieldHelp } from "./FieldHelp";
 import { Modal } from "./Modal";
+import { SearchableSelect } from "./SearchableSelect";
 
-// The account/zone assignment is deliberately not asked here - the server
-// already auto-picks the least-loaded active zone when zoneId is omitted
-// (selectZone, apps/server/src/lib/tunnels.ts), and the tunnel always starts
-// with just the command-agent route (createCommandAgentDraftPublication) so
-// there is nothing else to configure before installing. Both can still be
-// changed afterward from the drawer this opens into (Reassign zone, Edit
-// connectivity).
+// If no account/zone is picked, the server auto-picks the least-loaded active
+// zone (selectZone, apps/server/src/lib/tunnels.ts). The zone can still be
+// changed afterward from the drawer this opens into (Reassign zone).
 export function OnboardTunnelDialog({ open, onClose }: { open: boolean; onClose: () => void }) {
   const queryClient = useQueryClient();
   const { openTunnelDrawer } = useDrawers();
   const [tenantCode, setTenantCode] = useState("");
   const [tunnelCode, setTunnelCode] = useState("");
   const [displayName, setDisplayName] = useState("");
+  const [zoneId, setZoneId] = useState("");
   const [error, setError] = useState("");
   const { data: tenantCodesData } = useQuery({
     queryKey: ["tenant-codes"],
     queryFn: () => api.get<{ tenantCodes: string[] }>("/api/tunnels/tenant-codes"),
     enabled: open
   });
-  const reset = () => { setTenantCode(""); setTunnelCode(""); setDisplayName(""); setError(""); };
+  const { data: accountsData } = useQuery({
+    queryKey: ["accounts"],
+    queryFn: () => api.get<{ accounts: CloudflareAccount[] }>("/api/accounts"),
+    enabled: open
+  });
+  const zoneOptions = [
+    { value: "", label: "Auto-select (least-loaded zone)" },
+    ...(accountsData?.accounts.flatMap((account) => account.zones
+      .filter((zone) => account.status === "active" && zone.status === "active")
+      .map((zone) => ({ value: zone.id, label: `${account.name} / ${zone.name} · ${zone.tunnelCount}/${zone.softTunnelLimit}` }))) ?? [])
+  ];
+  useEffect(() => { if (open) setZoneId(""); }, [open]);
+  const reset = () => { setTenantCode(""); setTunnelCode(""); setDisplayName(""); setZoneId(""); setError(""); };
   const mutation = useMutation({
     mutationFn: async () => {
       const created = await api.post<{ tunnel: Tunnel }>("/api/tunnels", {
         tenantCode: tenantCode.trim(),
         tunnelCode: tunnelCode.trim(),
         displayName: displayName.trim(),
+        zoneId: zoneId || undefined,
         publications: connectivityPayload([createCommandAgentDraftPublication()])
       });
       const enrollment = await api.post<EnrollmentResult>(`/api/tunnels/${created.tunnel.id}/enrollments`, { expiresInHours: 24 });
@@ -81,6 +92,10 @@ export function OnboardTunnelDialog({ open, onClose }: { open: boolean; onClose:
       <label className="field">
         <span className="field-label">Tunnel name <FieldHelp text="A human-readable name shown only in CFMan. Use the name operators use to recognize this location." /></span>
         <input value={displayName} onChange={(event) => setDisplayName(event.target.value)} placeholder="Tunnel 1" maxLength={160} required />
+      </label>
+      <label className="field">
+        <span className="field-label">Account / zone <FieldHelp text="The Cloudflare account and zone that will host this tunnel's subdomain. Leave on auto-select to let CFMan pick the least-loaded active zone." /></span>
+        <SearchableSelect name="onboardZoneId" options={zoneOptions} value={zoneId} ariaLabel="Account and zone assignment" emptyMessage="No matching account or zone" onValueChange={setZoneId} />
       </label>
       <div className="form-actions">
         <button className="button button-secondary" type="button" onClick={close}>Cancel</button>
