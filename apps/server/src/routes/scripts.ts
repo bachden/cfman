@@ -251,7 +251,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                 ce.bulk_execution_id AS "bulkExecutionId",
                 COALESCE(executed_version.id, saved_version.id) AS "anchorScriptVersionId",
                 COALESCE(executed_version.version, saved_version.version) AS "scriptVersion",
-                COALESCE(ce.script_name, 'Inline script') AS "scriptName",
+                COALESCE(executed_script.name, saved_script.name, ce.script_name, 'Inline script') AS "scriptName",
                 ce.script_platform AS platform, ce.script_language AS language,
                 ce.script, ce.environment_variables AS "environmentVariables", ce.argument_sources AS "argumentSources", COALESCE(executed_version.arguments, ce.inline_arguments) AS "scriptArguments", ce.timeout_ms AS "timeoutMs", ce.status, ce.task_id AS "taskId", ce.process_id AS "processId",
                 ce.created_at AS "createdAt", ce.started_at AS "startedAt", ce.finished_at AS "finishedAt",
@@ -363,7 +363,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                  'bulkExecutionId', ce.bulk_execution_id,
                  'anchorScriptVersionId', COALESCE(executed_version.id, saved_version.id),
                  'scriptVersion', COALESCE(executed_version.version, saved_version.version),
-                 'scriptName', COALESCE(ce.script_name, executed_script.name, saved_script.name, 'Inline script'),
+                 'scriptName', COALESCE(executed_script.name, saved_script.name, ce.script_name, 'Inline script'),
                  'platform', ce.script_platform,
                  'language', ce.script_language,
                  'script', ce.script,
@@ -539,7 +539,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                 ce.script_type AS "scriptType",
                 ce.bulk_execution_id AS "bulkExecutionId",
                 ce.script_version_id AS "scriptVersionId", ce.saved_script_id AS "savedScriptId",
-                ce.saved_script_version_id AS "savedScriptVersionId", ce.script_name AS "scriptName",
+                ce.saved_script_version_id AS "savedScriptVersionId", COALESCE(ms.name, ce.script_name, 'Inline script') AS "scriptName",
                 ce.script_version_number AS "scriptVersion", ce.script_platform AS platform,
                 ce.script_language AS language, ce.script, ce.environment_variables AS "environmentVariables", ce.argument_sources AS "argumentSources", COALESCE(sv.arguments, ce.inline_arguments) AS "scriptArguments", ce.timeout_ms AS "timeoutMs", ce.status,
                 ce.task_id AS "taskId", ce.process_id AS "processId",
@@ -550,6 +550,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
            LEFT JOIN enrollments e ON e.id = ce.enrollment_id
            LEFT JOIN users u ON u.id = ce.requested_by
            LEFT JOIN managed_script_versions sv ON sv.id = ce.script_version_id
+           LEFT JOIN managed_scripts ms ON ms.id = sv.script_id
           WHERE ${where}
           ORDER BY ce.created_at ASC, ce.id ASC
           LIMIT $${limitParameter} OFFSET $${offsetParameter}`,

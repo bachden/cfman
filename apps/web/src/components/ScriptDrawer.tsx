@@ -342,7 +342,7 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
   };
 
   return <>
-    <SideDrawer open={Boolean(scriptId)} zIndex={zIndex} title={<div className="drawer-heading">{detail ? <HostPlatformIcon platform={detail.platform} size={18} /> : null}<strong>{detail?.name ?? "Script details"}</strong></div>} onClose={onClose}>
+    <SideDrawer open={Boolean(scriptId) && !initialBulkRunId} zIndex={zIndex} title={<div className="drawer-heading">{detail ? <HostPlatformIcon platform={detail.platform} size={18} /> : null}<strong>{detail?.name ?? "Script details"}</strong></div>} onClose={onClose}>
       {detail && <div className="tunnel-drawer-tab">
         <div className="script-metadata-grid">
           <label className="field"><span className="field-label">Name <FieldHelp text="The reusable script name shown when an operator selects a script for a tunnel. Names must be unique within the same platform." /></span><input value={name} onChange={(event) => setName(event.target.value)} /></label>
@@ -435,7 +435,7 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
         <div className="form-actions"><button className="button button-secondary bulk-cancel-button" type="button" onClick={() => setBulkOpen(false)}>Cancel</button><span>{bulkSelectAll ? `${bulkSelectAllCount} selected` : `${bulkSelectedList.length} selected`}</span><label className="field bulk-timeout-field"><span className="field-label">Timeout (s) <FieldHelp text="The maximum time the command agent may let each per-tunnel execution run before terminating it. Allowed range: 1 to 300 seconds." /></span><input type="number" min={1} max={300} value={bulkTimeoutSeconds} onChange={(event) => setBulkTimeoutSeconds(Math.min(300, Math.max(1, Number(event.target.value) || 1)))} /></label><button className="button button-primary" type="button" disabled={!bulkName.trim() || !selectedVersionData || bulkExecute.isPending || (bulkSelectAll ? !bulkSelectAllCount : !bulkSelectedList.length) || Boolean(missingRequiredArgumentNames(argumentsList, bulkArgumentBindings, bulkAvailableVariables, bulkVariesPerTunnelNames).length)} onClick={() => bulkExecute.mutate()}><Play size={15} />{bulkExecute.isPending ? "Starting..." : "Execute selected"}</button></div>
       </div>
     </Modal>
-    <SideDrawer open={Boolean(bulkDetailRun)} zIndex={(zIndex ?? 100) + 2} title={<div className="drawer-heading"><Layers3 size={18} /><strong>{bulkDetailRun?.name ?? "Bulk execution"}</strong></div>} onClose={() => setBulkDetailRun(null)}>
+    <SideDrawer open={Boolean(bulkDetailRun)} zIndex={(zIndex ?? 100) + 2} title={<div className="drawer-heading"><Layers3 size={18} /><strong>{bulkDetailRun?.name ?? "Bulk execution"}</strong></div>} onClose={() => { if (initialBulkRunId) onClose(); else setBulkDetailRun(null); }}>
       {bulkDetailRun && <div className="bulk-execution-detail"><header><div><p>{bulkDetailRun.description || "No description"}</p></div><time>{new Date(bulkDetailRun.createdAt).toLocaleString()}</time></header>{(() => {
         const previewVersion = detail?.versions.find((entry) => entry.id === bulkDetailRun.scriptVersionId) ?? selectedVersionData;
         const bindingEntries = Object.entries(bulkDetailRun.argumentBindings).sort(([left], [right]) => left.localeCompare(right));

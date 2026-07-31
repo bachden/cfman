@@ -527,7 +527,10 @@ const commandExecutionsJson = `COALESCE((
     'savedScriptVersionId', ce.saved_script_version_id,
     'savedAt', ce.saved_at,
     'bulkExecutionId', ce.bulk_execution_id,
-    'scriptName', COALESCE(ce.script_name, ce.name, 'inline'),
+    -- Prefer the live script name over the frozen run-time snapshot whenever the
+    -- execution is still linked to an existing script, so a rename (including
+    -- promoting an inline run into a saved script) is reflected in history too.
+    'scriptName', COALESCE(ce.name, ce.script_name, 'inline'),
     'scriptVersion', COALESCE(ce.script_version_number, ce.version),
     'platform', COALESCE(ce.script_platform, ce.platform),
     'language', COALESCE(ce.script_language, ce.language),
@@ -1309,7 +1312,7 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
                 ce.saved_script_version_id AS "savedScriptVersionId",
                 ce.saved_at AS "savedAt",
                 ce.bulk_execution_id AS "bulkExecutionId",
-                COALESCE(ce.script_name, ms.name, 'Inline script') AS "scriptName",
+                COALESCE(ms.name, ce.script_name, 'Inline script') AS "scriptName",
                 COALESCE(ce.script_version_number, sv.version) AS "scriptVersion",
                 COALESCE(ce.script_platform, ms.platform) AS platform,
                 COALESCE(ce.script_language, ms.language) AS language,
