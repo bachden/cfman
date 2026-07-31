@@ -119,6 +119,7 @@ export type Tunnel = {
   onboardingStatus: string;
   latestEnrollmentStatus?: string | null;
   hasPendingActivity?: boolean;
+  activeEnrollmentPlatform?: "windows" | "unix" | null;
   accountId: string;
   cfAccountId: string | null;
   accountName: string;

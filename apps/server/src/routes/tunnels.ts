@@ -110,6 +110,7 @@ const listQuerySchema = z.object({
   status: z.string().trim().max(40).optional(),
   cfTunnelStatus: z.string().trim().max(40).optional(),
   enrollmentStatus: z.string().trim().max(40).optional(),
+  activeEnrollmentPlatform: z.enum(["windows", "unix"]).optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(5).max(100).default(25)
 }).superRefine(validateNameFilter);
@@ -406,6 +407,18 @@ export const latestEnrollmentJoin = `LEFT JOIN LATERAL (
    LIMIT 1
 ) latest_enrollment ON TRUE`;
 
+// Platform of the enrollment currently servicing the tunnel, if any - same
+// "active enrollment" definition used to pick the bulk-execute target in
+// scripts.ts (ready/installed, not unenrolled, most recently installed).
+export const activeEnrollmentPlatformJoin = `LEFT JOIN LATERAL (
+  SELECT CASE WHEN e.platform = 'windows' THEN 'windows' WHEN e.platform IS NOT NULL THEN 'unix' ELSE null END AS platform
+    FROM enrollments e
+   WHERE e.tunnel_id = s.id AND e.status IN ('ready', 'installed')
+     AND e.unenrolled_at IS NULL AND e.deleted_at IS NULL
+   ORDER BY COALESCE(e.installed_at, e.claimed_at, e.created_at) DESC
+   LIMIT 1
+) active_enrollment ON TRUE`;
+
 // Kept in sync with the drawer's "isCurrent" concept (TunnelEnrollment.isCurrent,
 // apps/web/src/components/TunnelDrawer.tsx): a ready/installed enrollment that
 // hasn't been unenrolled is displayed as "active" everywhere, not the raw
@@ -594,8 +607,12 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
       values.push(query.enrollmentStatus);
       conditions.push(`${onboardingStatusExpression} = $${values.length}`);
     }
+    if (query.activeEnrollmentPlatform) {
+      values.push(query.activeEnrollmentPlatform);
+      conditions.push(`active_enrollment.platform = $${values.length}`);
+    }
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-    const countResult = await pool.query(`SELECT count(*)::int AS total FROM tunnels s ${latestEnrollmentJoin} ${where}`, values);
+    const countResult = await pool.query(`SELECT count(*)::int AS total FROM tunnels s ${latestEnrollmentJoin} ${activeEnrollmentPlatformJoin} ${where}`, values);
     const total = countResult.rows[0]?.total as number ?? 0;
     const offset = (query.page - 1) * query.pageSize;
     const pageValues = [...values, query.pageSize, offset];
@@ -615,11 +632,13 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
              s.created_at AS "createdAt", a.id AS "accountId", a.cf_account_id AS "cfAccountId", a.name AS "accountName", z.id AS "zoneId", z.name AS "zoneName",
              ${publicationsJson} AS publications,
              ${commandAgentJson} AS "commandAgent",
-             ${hasPendingActivityExpression} AS "hasPendingActivity"
+             ${hasPendingActivityExpression} AS "hasPendingActivity",
+             active_enrollment.platform AS "activeEnrollmentPlatform"
         FROM tunnels s
         JOIN cloudflare_accounts a ON a.id = s.account_id
         JOIN zones z ON z.id = s.zone_id
         ${latestEnrollmentJoin}
+        ${activeEnrollmentPlatformJoin}
         ${where}
        ORDER BY s.created_at DESC
        LIMIT $${limitParameter} OFFSET $${offsetParameter}

@@ -598,6 +598,10 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
       if (filters.cfTunnelStatus) { values.push(filters.cfTunnelStatus); conditions.push(`s.cf_tunnel_status = $${values.length}`); }
       if (filters.enrollmentStatus) { values.push(filters.enrollmentStatus); conditions.push(`${onboardingStatusExpression} = $${values.length}`); }
       if (body.excludeTunnelIds?.length) { values.push(body.excludeTunnelIds); conditions.push(`s.id <> ALL($${values.length}::uuid[])`); }
+      // "Select all matching filters" must only ever target tunnels the picker
+      // could have shown, so a platform mismatch can't sneak into the run unselected.
+      values.push(version.platform);
+      conditions.push(`(CASE WHEN e.platform = 'windows' THEN 'windows' WHEN e.platform IS NOT NULL THEN 'unix' ELSE NULL END) = $${values.length}`);
     }
     const tunnelIds = body.selectAll ? undefined : body.tunnelIds;
     if (!tunnelIds?.length && !body.selectAll) return reply.code(400).send({ error: "No tunnels selected" });

@@ -939,27 +939,32 @@ case "$MACHINE_ARCH" in
 esac
 
 if [ "$OS_NAME" = "linux" ]; then
-  STATE_DIR="/var/lib/cloudflare-man"
+  STATE_DIR="/var/lib/cfman"
+  LEGACY_STATE_DIR="/var/lib/cloudflare-man"
 else
-  STATE_DIR="/Library/Application Support/cloudflare-man"
+  STATE_DIR="/Library/Application Support/cfman"
+  LEGACY_STATE_DIR="/Library/Application Support/cloudflare-man"
 fi
 INSTALL_ID_FILE="$STATE_DIR/install-id"
 HOSTNAME_FILE="$STATE_DIR/assigned-hostname"
 TUNNEL_ID_FILE="$STATE_DIR/tunnel-id"
+LEGACY_INSTALL_ID_FILE="$LEGACY_STATE_DIR/install-id"
+LEGACY_HOSTNAME_FILE="$LEGACY_STATE_DIR/assigned-hostname"
+LEGACY_TUNNEL_ID_FILE="$LEGACY_STATE_DIR/tunnel-id"
 OVERRIDE_EXISTING=false
 PREVIOUS_INSTALL_ID=""
 PREVIOUS_TUNNEL_ID=""
 EXISTING_ENROLLMENT=0
-if [ -s "$INSTALL_ID_FILE" ] || pgrep -x cloudflared >/dev/null 2>&1 \\
+if [ -s "$INSTALL_ID_FILE" ] || [ -s "$LEGACY_INSTALL_ID_FILE" ] || pgrep -x cloudflared >/dev/null 2>&1 \\
   || [ -f /etc/systemd/system/cloudflared.service ] \\
   || [ -f /Library/LaunchDaemons/com.cloudflare.cloudflared.plist ]; then
   EXISTING_ENROLLMENT=1
 fi
 if [ "$EXISTING_ENROLLMENT" -eq 1 ]; then
   PREVIOUS_HOSTNAME=""
-  if [ -s "$HOSTNAME_FILE" ]; then PREVIOUS_HOSTNAME="$(cat "$HOSTNAME_FILE")"; fi
-  if [ -s "$INSTALL_ID_FILE" ]; then PREVIOUS_INSTALL_ID="$(cat "$INSTALL_ID_FILE")"; fi
-  if [ -s "$TUNNEL_ID_FILE" ]; then PREVIOUS_TUNNEL_ID="$(cat "$TUNNEL_ID_FILE")"; fi
+  if [ -s "$HOSTNAME_FILE" ]; then PREVIOUS_HOSTNAME="$(cat "$HOSTNAME_FILE")"; elif [ -s "$LEGACY_HOSTNAME_FILE" ]; then PREVIOUS_HOSTNAME="$(cat "$LEGACY_HOSTNAME_FILE")"; fi
+  if [ -s "$INSTALL_ID_FILE" ]; then PREVIOUS_INSTALL_ID="$(cat "$INSTALL_ID_FILE")"; elif [ -s "$LEGACY_INSTALL_ID_FILE" ]; then PREVIOUS_INSTALL_ID="$(cat "$LEGACY_INSTALL_ID_FILE")"; fi
+  if [ -s "$TUNNEL_ID_FILE" ]; then PREVIOUS_TUNNEL_ID="$(cat "$TUNNEL_ID_FILE")"; elif [ -s "$LEGACY_TUNNEL_ID_FILE" ]; then PREVIOUS_TUNNEL_ID="$(cat "$LEGACY_TUNNEL_ID_FILE")"; fi
   if [ -n "$PREVIOUS_HOSTNAME" ]; then
     log_message "warn" "existing-enrollment" "Existing enrollment detected for $PREVIOUS_HOSTNAME"
   else
@@ -991,8 +996,9 @@ if [ "$EXISTING_ENROLLMENT" -eq 1 ]; then
         launchctl bootout system/dev.cloudflare-man.command-agent >/dev/null 2>&1 || true
         rm -f /Library/LaunchDaemons/cfman.command-agent.plist /Library/LaunchDaemons/dev.cfman.command-agent.plist /Library/LaunchDaemons/dev.cloudflare-man.command-agent.plist
       fi
+      pkill -f "cfman/command-agent.py" >/dev/null 2>&1 || true
       pkill -f "cloudflare-man/command-agent.py" >/dev/null 2>&1 || true
-      rm -rf "$STATE_DIR"
+      rm -rf "$STATE_DIR" "$LEGACY_STATE_DIR"
       OVERRIDE_EXISTING=true
       ;;
     *)
@@ -1237,24 +1243,32 @@ $osVersion = [string]$osInfo.Version
 $osBuild = [string]$osInfo.BuildNumber
 $installDirectory = Join-Path $env:ProgramFiles "cloudflared"
 $binary = Join-Path $installDirectory "cloudflared.exe"
-$stateDirectory = Join-Path $env:ProgramData "cloudflare-man"
+$stateDirectory = Join-Path $env:ProgramData "cfman"
+$legacyStateDirectory = Join-Path $env:ProgramData "cloudflare-man"
 $installIdFile = Join-Path $stateDirectory "install-id"
 $hostnameFile = Join-Path $stateDirectory "assigned-hostname"
 $tunnelIdFile = Join-Path $stateDirectory "tunnel-id"
+$legacyInstallIdFile = Join-Path $legacyStateDirectory "install-id"
+$legacyHostnameFile = Join-Path $legacyStateDirectory "assigned-hostname"
+$legacyTunnelIdFile = Join-Path $legacyStateDirectory "tunnel-id"
 $overrideExisting = $false
 $previousHostname = ""
 $previousInstallId = ""
 $previousTunnelId = ""
 $existingService = Get-Service -Name "cloudflared" -ErrorAction SilentlyContinue
-$existingEnrollment = (Test-Path $installIdFile) -or ($null -ne $existingService)
+$existingEnrollment = (Test-Path $installIdFile) -or (Test-Path $legacyInstallIdFile) -or ($null -ne $existingService)
 if ($existingEnrollment) {
-  $existingLabel = "an existing cloudflare-man enrollment or cloudflared service"
+  $existingLabel = "an existing cfman enrollment or cloudflared service"
   if (Test-Path $hostnameFile) {
     $previousHostname = (Get-Content $hostnameFile -Raw).Trim()
-    if ($previousHostname) { $existingLabel = "the existing enrollment for $previousHostname" }
+  } elseif (Test-Path $legacyHostnameFile) {
+    $previousHostname = (Get-Content $legacyHostnameFile -Raw).Trim()
   }
+  if ($previousHostname) { $existingLabel = "the existing enrollment for $previousHostname" }
   if (Test-Path $installIdFile) { $previousInstallId = (Get-Content $installIdFile -Raw).Trim() }
+  elseif (Test-Path $legacyInstallIdFile) { $previousInstallId = (Get-Content $legacyInstallIdFile -Raw).Trim() }
   if (Test-Path $tunnelIdFile) { $previousTunnelId = (Get-Content $tunnelIdFile -Raw).Trim() }
+  elseif (Test-Path $legacyTunnelIdFile) { $previousTunnelId = (Get-Content $legacyTunnelIdFile -Raw).Trim() }
   Send-InstallLog -Level "warn" -Step "existing-enrollment" -Message "Detected $existingLabel"
   $confirmation = Read-Host "Cleanup and override $existingLabel? [y/N]"
   if ($confirmation -notmatch "^(y|yes)$") {
@@ -1295,9 +1309,10 @@ if ($existingEnrollment) {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
   }
   Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like "*cloudflare-man*command-agent.ps1*" } |
+    Where-Object { $_.CommandLine -like "*cfman*command-agent.ps1*" -or $_.CommandLine -like "*cloudflare-man*command-agent.ps1*" } |
     ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName Terminate -ErrorAction SilentlyContinue | Out-Null }
   if (Test-Path $stateDirectory) { Remove-Item $stateDirectory -Recurse -Force }
+  if (Test-Path $legacyStateDirectory) { Remove-Item $legacyStateDirectory -Recurse -Force }
   $overrideExisting = $true
 }
 New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
@@ -1483,7 +1498,7 @@ if command -v launchctl >/dev/null 2>&1; then
   launchctl bootout system/dev.cloudflare-man.command-agent >/dev/null 2>&1 || true
   rm -f /Library/LaunchDaemons/cfman.command-agent.plist /Library/LaunchDaemons/dev.cfman.command-agent.plist /Library/LaunchDaemons/dev.cloudflare-man.command-agent.plist
 fi
-rm -rf "/var/lib/cloudflare-man" "/Library/Application Support/cloudflare-man"
+rm -rf "/var/lib/cfman" "/var/lib/cloudflare-man" "/Library/Application Support/cfman" "/Library/Application Support/cloudflare-man"
 curl --silent --show-error --fail --retry 3 --retry-all-errors -X POST "$REPORT_URL" \\
   -H 'Content-Type: application/json' \\
   --data "{\\"token\\":\\"$UNENROLL_TOKEN\\",\\"scriptId\\":\\"$SCRIPT_ID\\",\\"platform\\":\\"unix\\",\\"status\\":\\"unenrolled\\"}" >/dev/null
@@ -1563,7 +1578,7 @@ try {
     Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
   }
   Get-CimInstance Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -like "*cloudflare-man*command-agent.ps1*" } |
+    Where-Object { $_.CommandLine -like "*cfman*command-agent.ps1*" -or $_.CommandLine -like "*cloudflare-man*command-agent.ps1*" } |
     ForEach-Object { Invoke-CimMethod -InputObject $_ -MethodName Terminate -ErrorAction SilentlyContinue | Out-Null }
   $service = Get-Service -Name "cloudflared" -ErrorAction SilentlyContinue
   if ($service) {
@@ -1573,8 +1588,10 @@ try {
   # cloudflared's own uninstall does not remove this key, and a leftover key would make
   # a future "service install" fail with "Cannot install event logger".
   Remove-Item -Path "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\Cloudflared" -Recurse -Force -ErrorAction SilentlyContinue
-  $stateDirectory = Join-Path $env:ProgramData "cloudflare-man"
+  $stateDirectory = Join-Path $env:ProgramData "cfman"
+  $legacyStateDirectory = Join-Path $env:ProgramData "cloudflare-man"
   if (Test-Path $stateDirectory) { Remove-Item $stateDirectory -Recurse -Force }
+  if (Test-Path $legacyStateDirectory) { Remove-Item $legacyStateDirectory -Recurse -Force }
   $body = @{ token = $UnenrollToken; scriptId = $ScriptId; platform = "windows"; status = "unenrolled" } | ConvertTo-Json
   Invoke-WithRetry { Invoke-RestMethod -Method Post -Uri $ReportUrl -ContentType "application/json" -Body $body | Out-Null }
   $ReportSent = $true
@@ -1604,11 +1621,16 @@ AGENT_TOKEN='${agentToken}'
 REPORT_URL='${reportUrl}'
 
 if [ "$(uname -s)" = "Linux" ]; then
-  STATE_DIR="/var/lib/cloudflare-man"
+  STATE_DIR="/var/lib/cfman"
+  LEGACY_STATE_DIR="/var/lib/cloudflare-man"
 else
-  STATE_DIR="/Library/Application Support/cloudflare-man"
+  STATE_DIR="/Library/Application Support/cfman"
+  LEGACY_STATE_DIR="/Library/Application Support/cloudflare-man"
 fi
 HOSTNAME_FILE="$STATE_DIR/assigned-hostname"
+if [ ! -s "$HOSTNAME_FILE" ] && [ -s "$LEGACY_STATE_DIR/assigned-hostname" ]; then
+  HOSTNAME_FILE="$LEGACY_STATE_DIR/assigned-hostname"
+fi
 
 echo "cloudflare-man diagnostics for $ASSIGNED_HOSTNAME"
 echo "----------------------------------------"
@@ -1660,10 +1682,13 @@ $TunnelId = "${tunnelId}"
 $DiagnosticRunId = "${diagnosticRunId}"
 $AgentToken = "${agentToken}"
 $ReportUrl = "${reportUrl}"
-$stateDirectory = Join-Path $env:ProgramData "cloudflare-man"
+$stateDirectory = Join-Path $env:ProgramData "cfman"
+$legacyStateDirectory = Join-Path $env:ProgramData "cloudflare-man"
 $hostnameFile = Join-Path $stateDirectory "assigned-hostname"
+$legacyHostnameFile = Join-Path $legacyStateDirectory "assigned-hostname"
+if (-not (Test-Path $hostnameFile) -and (Test-Path $legacyHostnameFile)) { $hostnameFile = $legacyHostnameFile }
 
-Write-Host "cloudflare-man diagnostics for $AssignedHostname"
+Write-Host "cfman diagnostics for $AssignedHostname"
 Write-Host "----------------------------------------"
 
 $cloudflaredService = Get-Service -Name "cloudflared" -ErrorAction SilentlyContinue

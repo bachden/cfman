@@ -90,8 +90,9 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
   if (bulkTenantCode) bulkFilterParams.set("tenantCode", bulkTenantCode);
   if (bulkCfTunnelStatus) bulkFilterParams.set("cfTunnelStatus", bulkCfTunnelStatus);
   if (bulkEnrollmentStatus) bulkFilterParams.set("enrollmentStatus", bulkEnrollmentStatus);
+  if (detail?.platform) bulkFilterParams.set("activeEnrollmentPlatform", detail.platform);
   const { data: bulkTunnelData } = useQuery({
-    queryKey: ["bulk-tunnel-matches", bulkNameFilter, bulkTenantCode, bulkCfTunnelStatus, bulkEnrollmentStatus, bulkTunnelPage],
+    queryKey: ["bulk-tunnel-matches", bulkNameFilter, bulkTenantCode, bulkCfTunnelStatus, bulkEnrollmentStatus, detail?.platform, bulkTunnelPage],
     queryFn: () => api.get<{ tunnels: Tunnel[]; pagination: { page: number; pageSize: number; total: number; totalPages: number } }>(`/api/tunnels?${bulkFilterParams}`),
     enabled: bulkOpen
   });
@@ -280,7 +281,8 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
     (!bulkNameFilter.trim() || tunnel.displayName.toLowerCase().includes(bulkNameFilter.trim().toLowerCase()) || tunnel.tunnelCode.toLowerCase().includes(bulkNameFilter.trim().toLowerCase()))
     && (!bulkTenantCode.trim() || tunnel.tenantCode.toLowerCase().includes(bulkTenantCode.trim().toLowerCase()))
     && (!bulkCfTunnelStatus || tunnel.cfTunnelStatus === bulkCfTunnelStatus)
-    && (!bulkEnrollmentStatus || tunnel.onboardingStatus === bulkEnrollmentStatus);
+    && (!bulkEnrollmentStatus || tunnel.onboardingStatus === bulkEnrollmentStatus)
+    && (!detail?.platform || tunnel.activeEnrollmentPlatform === detail.platform);
   const bulkSelectedVisibleList = bulkFilterAppliesToSelected ? bulkSelectedList.filter(matchesBulkFilter) : bulkSelectedList;
   const bulkExcludedMatchingCount = Object.values(bulkExcludedTunnels).filter(matchesBulkFilter).length;
   const bulkSelectAllCount = Math.max(0, (bulkTunnelData?.pagination.total ?? 0) - bulkExcludedMatchingCount);
@@ -389,7 +391,7 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, onClose, zIn
         </section>
         <div className="bulk-transfer-layout">
           <section className="bulk-transfer-panel">
-            <header className="bulk-transfer-panel-header"><h3>Matched tunnels</h3><span>The filter above is just a helper to find tunnels — use Add or Add all to build the run.</span></header>
+            <header className="bulk-transfer-panel-header"><h3>Matched tunnels</h3><span>The filter above is just a helper to find tunnels — use Add or Add all to build the run. Only tunnels currently enrolled on {detail?.platform === "windows" ? "Windows" : "Unix/Linux/macOS"} are shown, since that's what this script runs on.</span></header>
             <div className="bulk-tunnel-list">{(() => {
               const visibleTunnels = (bulkTunnelData?.tunnels ?? []).filter((tunnel) => bulkSelectAll ? Boolean(bulkExcludedTunnels[tunnel.id]) : !bulkSelectedTunnels[tunnel.id]);
               if (!bulkTunnelData) return null;
