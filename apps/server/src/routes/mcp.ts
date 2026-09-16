@@ -367,7 +367,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     const { tunnelId, ...body } = args;
     return callApi(app, token, "POST", `/api/tunnels/${tunnelId}/commands/execute`, body);
   });
-  registerApiTool(server, app, token, "cfman_execute_inline_script", "Schedule one named inline script without adding it to the script library. Returns a stable execution/task identifier; source, output, timing, status, and active enrollment are persisted in execution history with an inline tag and no version.", {
+  registerApiTool(server, app, token, "cfman_execute_inline_script", "Schedule one named inline script without adding it to the script library. Returns a stable execution/task identifier; source, output, timing, status, and active enrollment are persisted in execution history with an inline tag and no version. Reference declared arguments in the script body as $NAME (a plain script variable), never $env:NAME - argument values are injected as script-scoped variables, not OS/process environment variables.", {
     tunnelId: z.string().uuid(),
     inlineScript: z.string().min(1).max(262144),
     name: z.string().trim().min(1).max(120).optional().describe("Operator-facing name shown beside the inline tag in execution history"),
@@ -402,7 +402,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     const { tunnelId, ...body } = args;
     return callApi(app, token, "DELETE", `/api/tunnels/${tunnelId}`, body);
   });
-  registerApiTool(server, app, token, "cfman_create_script", "Create a reusable Windows or Unix script with immutable version 1. The argument definitions are recorded on version 1.", {
+  registerApiTool(server, app, token, "cfman_create_script", "Create a reusable Windows or Unix script with immutable version 1. The argument definitions are recorded on version 1. Reference declared arguments in the script body as $NAME (a plain script variable), never $env:NAME - argument values are injected as script-scoped variables, not OS/process environment variables.", {
     name: z.string().min(1),
     platform: z.enum(["windows", "unix"]),
     language: z.enum(["powershell", "bash", "sh"]),
@@ -445,7 +445,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
   registerApiTool(server, app, token, "cfman_delete_script", "Permanently delete a saved script, all of its versions, and every related execution history record.", {
     scriptId: z.string().uuid()
   }, (args) => callApi(app, token, "DELETE", `/api/scripts/${args.scriptId}`));
-  registerApiTool(server, app, token, "cfman_create_script_version", "Append a new immutable version to a saved script, carrying the argument definitions that version declares. Omitting arguments creates a version with none, so pass the current list when only the content changes.", {
+  registerApiTool(server, app, token, "cfman_create_script_version", "Append a new immutable version to a saved script, carrying the argument definitions that version declares. Omitting arguments creates a version with none, so pass the current list when only the content changes. Reference declared arguments in the script body as $NAME (a plain script variable), never $env:NAME - argument values are injected as script-scoped variables, not OS/process environment variables.", {
     scriptId: z.string().uuid(),
     content: z.string().min(1),
     arguments: scriptArgumentsSchema.optional()

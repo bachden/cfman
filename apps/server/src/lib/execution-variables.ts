@@ -9,7 +9,7 @@ export const executionVariablesSchema = z.record(variableNameSchema, variableVal
 });
 
 export const scriptArgumentSchema = z.object({
-  name: variableNameSchema,
+  name: variableNameSchema.describe("Referenced inside the script body as a plain script variable - $NAME in PowerShell, $NAME in bash/sh. NOT $env:NAME or an exported/OS environment variable: argument values are never injected into the process environment."),
   defaultValue: variableValueSchema.default(""),
   description: z.string().trim().max(300).default(""),
   required: z.boolean().default(false)
