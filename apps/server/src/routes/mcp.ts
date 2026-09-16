@@ -38,6 +38,25 @@ async function callApi(
   return payload;
 }
 
+const NON_ASCII_PATTERN = /[^\x00-\x7F]/;
+
+// Windows PowerShell 5.1's ConsoleHost, when fully headless (no console at all, as with the
+// command agent's redirected child processes), fixes its output encoding at process startup and
+// cannot be changed from inside a script - non-ASCII bytes get replaced with '?' in captured
+// stdout/stderr. Unix targets decode with explicit UTF-8 and are unaffected.
+function scriptEncodingWarning(content: string | undefined): string | undefined {
+  if (!content || !NON_ASCII_PATTERN.test(content)) return undefined;
+  return "This script contains non-ASCII characters (accented letters, symbols, emoji). On a Windows PowerShell target, a console-encoding limitation in headless execution can render these as '?' in captured stdout/stderr; Unix/bash targets are unaffected. Prefer plain ASCII in output text where exact rendering matters.";
+}
+
+async function withEncodingWarning(resultPromise: Promise<unknown>, content: string | undefined): Promise<unknown> {
+  const result = await resultPromise;
+  const warning = scriptEncodingWarning(content);
+  if (!warning) return result;
+  if (result && typeof result === "object" && !Array.isArray(result)) return { ...result, warning };
+  return { data: result, warning };
+}
+
 type IdentifierReference = { path: string; value: string };
 
 function collectIdentifierReferences(input: unknown, response: unknown): IdentifierReference[] {
@@ -358,7 +377,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
   registerApiTool(server, app, token, "cfman_retry_ssh", "Retry browser SSH provisioning for a tunnel that already has an ssh:// ingress route (add one via cfman_update_tunnel_connectivity first if it doesn't).", {
     tunnelId: z.string().uuid()
   }, (args) => callApi(app, token, "POST", `/api/tunnels/${args.tunnelId}/ssh/retry`));
-  registerApiTool(server, app, token, "cfman_execute_script", "Schedule a saved script version on the tunnel's command agent. Returns a stable execution/task identifier and scheduled status; poll execution history or logs for running and terminal results.", {
+  registerApiTool(server, app, token, "cfman_execute_script", "Schedule a saved script version on the tunnel's command agent. Returns a stable execution/task identifier and scheduled status; poll execution history or logs for running and terminal results. On Windows targets, non-ASCII output (accented characters, box-drawing, emoji) may render as '?' due to a PowerShell 5.1 console-encoding limitation in headless execution; prefer plain ASCII in Write-Output text when exact rendering matters.", {
     tunnelId: z.string().uuid(),
     scriptVersionId: z.string().uuid(),
     argumentBindings: argumentBindingsSchema.optional().describe("Per-declared-argument mapping, keyed by argument name: { type: 'custom', value } for a literal value, or { type: 'variable', variable } to bind to one of the tunnel's resolved environment variables (see cfman_resolve_execution_variables). Arguments with no binding use their own declared default value."),
@@ -367,7 +386,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     const { tunnelId, ...body } = args;
     return callApi(app, token, "POST", `/api/tunnels/${tunnelId}/commands/execute`, body);
   });
-  registerApiTool(server, app, token, "cfman_execute_inline_script", "Schedule one named inline script without adding it to the script library. Returns a stable execution/task identifier; source, output, timing, status, and active enrollment are persisted in execution history with an inline tag and no version. Reference declared arguments in the script body as $NAME (a plain script variable), never $env:NAME - argument values are injected as script-scoped variables, not OS/process environment variables.", {
+  registerApiTool(server, app, token, "cfman_execute_inline_script", "Schedule one named inline script without adding it to the script library. Returns a stable execution/task identifier; source, output, timing, status, and active enrollment are persisted in execution history with an inline tag and no version. Reference declared arguments in the script body as $NAME (a plain script variable), never $env:NAME - argument values are injected as script-scoped variables, not OS/process environment variables. On Windows targets, non-ASCII output (accented characters, box-drawing, emoji) may render as '?' due to a PowerShell 5.1 console-encoding limitation in headless execution; prefer plain ASCII in Write-Output text when exact rendering matters.", {
     tunnelId: z.string().uuid(),
     inlineScript: z.string().min(1).max(262144),
     name: z.string().trim().min(1).max(120).optional().describe("Operator-facing name shown beside the inline tag in execution history"),
@@ -377,7 +396,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     timeoutMs: z.number().int().min(1000).max(300000).optional().default(60000)
   }, (args) => {
     const { tunnelId, ...body } = args;
-    return callApi(app, token, "POST", `/api/tunnels/${tunnelId}/commands/execute`, body);
+    return withEncodingWarning(callApi(app, token, "POST", `/api/tunnels/${tunnelId}/commands/execute`, body), args.inlineScript);
   });
   registerApiTool(server, app, token, "cfman_resolve_execution_variables", "List every environment variable available to a tunnel (global, account, zone, tunnel, active-computer scopes, and built-in identity values) along with the script's declared arguments, without running anything or applying any mapping. Script arguments and environment variables are independent until an operator explicitly binds an argument to one of these variable names via argumentBindings on cfman_execute_script / cfman_bulk_execute_script; an argument with no binding uses its own declared default value instead.", {
     tunnelId: z.string().uuid(),
@@ -410,7 +429,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     defaultTimeoutMs: z.number().int().min(1000).max(300000).default(60000),
     arguments: scriptArgumentsSchema.optional(),
     content: z.string().min(1)
-  }, (args) => callApi(app, token, "POST", "/api/scripts", args));
+  }, (args) => withEncodingWarning(callApi(app, token, "POST", "/api/scripts", args), args.content));
   registerApiTool(server, app, token, "cfman_update_script", "Update saved script metadata without changing its immutable versions. Argument definitions belong to a version, so change them with cfman_create_script_version.", {
     scriptId: z.string().uuid(),
     name: z.string().min(1).optional(),
@@ -421,7 +440,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     const { scriptId, ...body } = args;
     return callApi(app, token, "PATCH", `/api/scripts/${scriptId}`, body);
   });
-  registerApiTool(server, app, token, "cfman_bulk_execute_script", "Schedule a named, described bulk execution of one saved script version concurrently across selected tunnels or all tunnels matching name/tenant/tunnel/enrollment filters. Each per-tunnel execution starts as scheduled and can be polled or cancelled independently. Each run is an independent, immutable record; running again with the same name does not edit or version the earlier run.", {
+  registerApiTool(server, app, token, "cfman_bulk_execute_script", "Schedule a named, described bulk execution of one saved script version concurrently across selected tunnels or all tunnels matching name/tenant/tunnel/enrollment filters. Each per-tunnel execution starts as scheduled and can be polled or cancelled independently. Each run is an independent, immutable record; running again with the same name does not edit or version the earlier run. On Windows targets, non-ASCII output (accented characters, box-drawing, emoji) may render as '?' due to a PowerShell 5.1 console-encoding limitation in headless execution; prefer plain ASCII in Write-Output text when exact rendering matters.", {
     scriptId: z.string().uuid(),
     scriptVersionId: z.string().uuid(),
     name: z.string().trim().min(1).max(120),
@@ -451,7 +470,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     arguments: scriptArgumentsSchema.optional()
   }, (args) => {
     const { scriptId, ...body } = args;
-    return callApi(app, token, "POST", `/api/scripts/${scriptId}/versions`, body);
+    return withEncodingWarning(callApi(app, token, "POST", `/api/scripts/${scriptId}/versions`, body), args.content);
   });
   registerApiTool(server, app, token, "cfman_update_public_base_url", "Update the public HTTPS origin used for enrollment URLs and the MCP endpoint.", {
     publicBaseUrl: z.string().min(1)

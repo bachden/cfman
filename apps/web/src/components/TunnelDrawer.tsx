@@ -21,7 +21,7 @@ import { StatusBadge, activeEnrollmentPlatform, cfmanSelfPublication, isCfmanSel
 
 export type { TunnelDrawerTab };
 
-export function TunnelDrawer({ tunnelId, tab, initialExpandEnrollmentId, onTabChange, onClose, zIndex }: { tunnelId: string | null; tab: TunnelDrawerTab; initialExpandEnrollmentId?: string | null | undefined; onTabChange: (tab: TunnelDrawerTab) => void; onClose: () => void; zIndex?: number | undefined }) {
+export function TunnelDrawer({ tunnelId, tab, initialExpandEnrollmentId, openSeq, onTabChange, onClose, width, onResize }: { tunnelId: string | null; tab: TunnelDrawerTab; initialExpandEnrollmentId?: string | null | undefined; openSeq: number; onTabChange: (tab: TunnelDrawerTab) => void; onClose: () => void; width: number; onResize: (width: number) => void }) {
   const queryClient = useQueryClient();
   const [enrollmentPage, setEnrollmentPage] = useState(1);
   const [autoExpandEnrollmentId, setAutoExpandEnrollmentId] = useState<string | null>(null);
@@ -210,7 +210,7 @@ export function TunnelDrawer({ tunnelId, tab, initialExpandEnrollmentId, onTabCh
   const close = () => { setAutoExpandEnrollmentId(null); setUnenrollTarget(null); setDeleteEnrollmentTarget(null); setDeleteOpen(false); setDeletePreflight(null); setDeleteName(""); setEditingConnectivity(false); setWafRoute(null); setEnableSshOpen(false); setTroubleshootOpen(false); onClose(); };
   return (
     <>
-    <SideDrawer open={Boolean(tunnelId)} zIndex={zIndex} title={<div className="drawer-heading"><strong>{currentTunnel?.displayName ?? "Tunnel details"}</strong>{isCfmanSelf && <span className="cfman-self-tag" title="This tunnel is CFMan's own self-hosted target">CFMAN SELF</span>}{currentTunnel && <StatusBadge status={tunnelOnlineStatus(currentTunnel.cfTunnelStatus)} />}</div>} onClose={close}>
+    <SideDrawer open={Boolean(tunnelId)} focusKey={String(openSeq)} width={width} onResize={onResize} title={<div className="drawer-heading"><strong>{currentTunnel?.displayName ?? "Tunnel details"}</strong>{isCfmanSelf && <span className="cfman-self-tag" title="This tunnel is CFMan's own self-hosted target">CFMAN SELF</span>}{currentTunnel && <StatusBadge status={tunnelOnlineStatus(currentTunnel.cfTunnelStatus)} />}</div>} onClose={close}>
       {currentTunnel && <div className="tunnel-drawer-content">
         <nav className="tunnel-drawer-tabs" aria-label="Tunnel detail sections">
           <button className={tab === "overall" ? "active" : ""} type="button" onClick={() => onTabChange("overall")}>Overall</button>

@@ -441,6 +441,8 @@ def run_execution(request_payload, task):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 start_new_session=True
             )
@@ -689,7 +691,8 @@ function Invoke-ExecutionWorker([string]$PayloadPath) {
   $stderrBuilder = New-Object Text.StringBuilder
   $timedOut = $false
   try {
-    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($script))
+    $outputPreamble = "try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch {}\`n"
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($outputPreamble + $script))
     $psi = New-Object Diagnostics.ProcessStartInfo
     $psi.FileName = "powershell.exe"
     $psi.Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -EncodedCommand $encoded"
@@ -697,6 +700,8 @@ function Invoke-ExecutionWorker([string]$PayloadPath) {
     $psi.CreateNoWindow = $true
     $psi.RedirectStandardOutput = $true
     $psi.RedirectStandardError = $true
+    $psi.StandardOutputEncoding = [Text.Encoding]::UTF8
+    $psi.StandardErrorEncoding = [Text.Encoding]::UTF8
     $process = New-Object Diagnostics.Process
     $process.StartInfo = $psi
     [void]$process.Start()
@@ -820,7 +825,7 @@ while ($true) {
       Send-JsonResponse $context 202 @{ accepted = $true; taskId = $taskId; status = "cancelling" }
       continue
     }
-    $reader = New-Object IO.StreamReader($context.Request.InputStream, $context.Request.ContentEncoding)
+    $reader = New-Object IO.StreamReader($context.Request.InputStream, [Text.Encoding]::UTF8)
     $body = $reader.ReadToEnd()
     $reader.Close()
     if ($body.Length -gt 70000) { Send-JsonResponse $context 413 @{ error = "Request is too large" }; continue }

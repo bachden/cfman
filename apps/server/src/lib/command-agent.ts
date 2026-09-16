@@ -333,7 +333,7 @@ export async function executeTunnelScript(
     const response = await fetch(agent.endpoint, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
+        "Content-Type": "application/json; charset=utf-8",
         "X-Cloudflare-Man-Agent-Token": agent.token
       },
       body: JSON.stringify({

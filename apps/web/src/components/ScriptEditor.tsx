@@ -3,6 +3,10 @@ import * as monaco from "monaco-editor/editor/editor.api";
 import EditorWorker from "monaco-editor/editor/editor.worker?worker";
 import "monaco-editor/languages/definitions/powershell/register";
 import "monaco-editor/languages/definitions/shell/register";
+import { ShieldAlert } from "lucide-react";
+import { useMemo } from "react";
+
+const NON_ASCII_PATTERN = /[^\x00-\x7F]/;
 
 (globalThis as typeof globalThis & { MonacoEnvironment?: { getWorker: () => Worker } }).MonacoEnvironment = {
   getWorker: () => new EditorWorker()
@@ -22,6 +26,7 @@ type ScriptEditorProps = {
 
 export function ScriptEditor({ value, language, onChange, readOnly = false, height = "420px", compactLineNumberGutter = false }: ScriptEditorProps) {
   const monacoLanguage = language === "powershell" ? "powershell" : "shell";
+  const hasEncodingRisk = useMemo(() => language === "powershell" && NON_ASCII_PATTERN.test(value), [language, value]);
   return <div className="script-editor"><Editor
     height={height}
     language={monacoLanguage}
@@ -45,5 +50,7 @@ export function ScriptEditor({ value, language, onChange, readOnly = false, heig
       automaticLayout: true,
       tabSize: 2
     }}
-  /></div>;
+  />
+    {hasEncodingRisk && <div className="command-note script-editor-encoding-note"><ShieldAlert size={14} />This script contains non-ASCII characters (accents, symbols, emoji). On a Windows PowerShell target, these may print as "?" in captured output. Prefer plain ASCII where exact rendering matters.</div>}
+  </div>;
 }

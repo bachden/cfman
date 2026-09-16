@@ -225,8 +225,11 @@ tbody tr:hover td { background: #fbfcfb; }
 .command-agent-table-action { color: var(--green); }
 .command-agent-table-action:hover { color: var(--green); background: var(--green-soft); }
 
-.drawer-backdrop { position: fixed; inset: 0; z-index: 90; display: flex; justify-content: flex-end; background: rgba(15, 23, 18, .42); }
-.side-drawer { width: min(880px, 100%); height: 100%; display: flex; flex-direction: column; overflow: hidden; background: white; border-left: 1px solid #cbd4cd; box-shadow: -12px 0 34px rgba(20, 30, 24, .18); animation: drawer-slide-in .2s ease-out; }
+.drawer-backdrop { position: fixed; inset: 0; z-index: 90; display: flex; justify-content: flex-end; }
+.drawer-backdrop-dim { background: rgba(15, 23, 18, .42); }
+.side-drawer { position: relative; width: min(880px, 100%); height: 100%; display: flex; flex-direction: column; overflow: hidden; background: white; border-left: 1px solid #cbd4cd; box-shadow: -12px 0 34px rgba(20, 30, 24, .18); animation: drawer-slide-in .2s ease-out; transition: transform .2s ease; }
+.side-drawer-resize-handle { position: absolute; top: 0; bottom: 0; left: 0; width: 6px; z-index: 5; cursor: col-resize; background: transparent; }
+.side-drawer-resize-handle:hover, .side-drawer-resize-handle:active { background: var(--green); opacity: .35; }
 .side-drawer-header { min-height: 64px; padding: 0 18px 0 22px; display: flex; align-items: center; justify-content: space-between; gap: 12px; border-bottom: 1px solid var(--line); }
 .side-drawer-title { min-width: 0; flex: 1; }
 .drawer-heading { min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 16px; }
@@ -550,6 +553,7 @@ tbody tr:hover td { background: #fbfcfb; }
 .script-version-meta > span { max-width: 100%; overflow: hidden; color: var(--muted); font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 .script-version-latest-tag { flex: 0 0 auto; padding: 1px 7px; color: var(--green); background: var(--green-soft); border-radius: 20px; font-size: 8px; font-weight: 750; text-transform: uppercase; letter-spacing: .03em; }
 .script-editor { min-height: 260px; overflow: hidden; border: 1px solid #26382f; border-radius: 5px; background: #1e1e1e; }
+.script-editor-encoding-note { border-top: 1px solid #edcf9c; font-weight: 500; }
 .script-editor-hint { margin-right: auto; color: var(--muted); font-size: 9px; }
 .script-editor-hint-row { min-height: 12px; margin: -10px 0; display: flex; align-items: center; justify-content: flex-end; }
 .script-editor-hint-row .script-editor-hint { margin-right: 0; text-align: right; }
