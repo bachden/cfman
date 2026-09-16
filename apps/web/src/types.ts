@@ -316,6 +316,7 @@ export type BulkScriptRun = {
   timeoutMs: number;
   createdAt: string;
   requestedBy: string | null;
+  requestedVia: "web" | "mcp";
   selectedCount: number;
   running: number;
   succeeded: number;

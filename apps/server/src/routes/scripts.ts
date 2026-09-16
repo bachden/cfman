@@ -408,6 +408,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                  'timeoutMs', r.timeout_ms,
                  'createdAt', r.created_at,
                  'requestedBy', bulk_user.username,
+                 'requestedVia', r.requested_via,
                  'argumentBindings', r.argument_overrides,
                  'selectedCount', count(ce.id)::int,
                  'running', count(ce.id) FILTER (WHERE ce.status = 'running'),
@@ -471,7 +472,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
       pool.query(
         `SELECT r.id, r.name, r.description,
                 r.saved_script_version_id AS "scriptVersionId", r.timeout_ms AS "timeoutMs", r.argument_overrides AS "argumentBindings",
-                r.created_at AS "createdAt", u.username AS "requestedBy",
+                r.created_at AS "createdAt", u.username AS "requestedBy", r.requested_via AS "requestedVia",
                 count(ce.id)::int AS "selectedCount",
                 (count(ce.id) FILTER (WHERE ce.status = 'running'))::int AS running,
                 (count(ce.id) FILTER (WHERE ce.status = 'succeeded'))::int AS succeeded,
@@ -507,7 +508,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     const runResult = await pool.query(
       `SELECT r.id, r.name, r.description,
               r.saved_script_version_id AS "scriptVersionId", r.timeout_ms AS "timeoutMs", r.argument_overrides AS "argumentBindings",
-              r.created_at AS "createdAt", u.username AS "requestedBy"
+              r.created_at AS "createdAt", u.username AS "requestedBy", r.requested_via AS "requestedVia"
          FROM script_bulk_executions r
          LEFT JOIN users u ON u.id = r.requested_by
         WHERE r.id = $1 AND r.saved_script_id = $2`,
@@ -645,9 +646,9 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     }
     const run = await withTransaction(async (client) => {
       const inserted = await client.query(
-        `INSERT INTO script_bulk_executions(saved_script_id, saved_script_version_id, name, description, timeout_ms, requested_by, argument_overrides)
-         VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-        [id, body.scriptVersionId, body.name, body.description, timeoutMs, request.authUser!.id, body.argumentBindings]
+        `INSERT INTO script_bulk_executions(saved_script_id, saved_script_version_id, name, description, timeout_ms, requested_by, argument_overrides, requested_via)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+        [id, body.scriptVersionId, body.name, body.description, timeoutMs, request.authUser!.id, body.argumentBindings, requestedVia]
       );
       return inserted.rows[0] as { id: string };
     });
