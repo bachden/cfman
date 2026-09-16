@@ -1319,7 +1319,7 @@ New-Item -ItemType Directory -Path $installDirectory -Force | Out-Null
 New-Item -ItemType Directory -Path $stateDirectory -Force | Out-Null
 & icacls.exe $stateDirectory /inheritance:r /grant:r "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F" | Out-Null
 $installId = [guid]::NewGuid().ToString()
-Set-Content -Path $installIdFile -Value $installId -NoNewline
+[System.IO.File]::WriteAllText($installIdFile, $installId)
 Send-InstallLog -Level "info" -Step "preflight" -Message "Local enrollment state is ready"
 
 if (-not (Test-Path $binary)) {
@@ -1425,8 +1425,8 @@ $reportBody = $reportPayload | ConvertTo-Json
 Send-InstallLog -Level "info" -Step "report" -Message "Reporting successful installation"
 Invoke-RestMethod -Method Post -Uri $ReportUrl -ContentType "application/json" -Body $reportBody | Out-Null
 $ReportSent = $true
-Set-Content -Path $hostnameFile -Value $AssignedHostname -NoNewline
-Set-Content -Path $tunnelIdFile -Value ([string]$claim.cfTunnelId) -NoNewline
+[System.IO.File]::WriteAllText($hostnameFile, $AssignedHostname)
+[System.IO.File]::WriteAllText($tunnelIdFile, [string]$claim.cfTunnelId)
 Send-InstallLog -Level "info" -Step "complete" -Message "Tunnel tunnel installed successfully for $AssignedHostname"
 Write-Host "Tunnel tunnel installed: $AssignedHostname"
 } catch {
