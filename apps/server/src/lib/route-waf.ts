@@ -47,14 +47,32 @@ export function isValidIpOrCidr(value: string): boolean {
   return Number.isInteger(numericPrefix) && numericPrefix >= 0 && numericPrefix <= (version === 4 ? 32 : 128);
 }
 
-export async function defaultWafAllowedIps(providerMode: "live" | "mock"): Promise<string[]> {
-  if (configuredWafIps.length) return configuredWafIps;
-  if (providerMode === "mock") return ["127.0.0.1/32"];
+async function fetchPublicIp(): Promise<string> {
   const response = await fetch("https://api.ipify.org?format=json", { signal: AbortSignal.timeout(5_000) });
   if (!response.ok) throw new Error("Unable to detect CFMan public IP; set CFMAN_WAF_ALLOWED_IPS and retry");
   const payload = await response.json() as { ip?: string };
   if (!payload.ip || !isIP(payload.ip)) throw new Error("Public IP detection returned an invalid address; set CFMAN_WAF_ALLOWED_IPS and retry");
-  return [`${payload.ip}/${payload.ip.includes(":") ? 128 : 32}`];
+  return `${payload.ip}/${payload.ip.includes(":") ? 128 : 32}`;
+}
+
+export async function defaultWafAllowedIps(providerMode: "live" | "mock"): Promise<string[]> {
+  if (configuredWafIps.length) return configuredWafIps;
+  if (providerMode === "mock") return ["127.0.0.1/32"];
+  return [await fetchPublicIp()];
+}
+
+// CFMAN_WAF_ALLOWED_IPS is a static, operator-set value and can silently
+// drift from this machine's actual outbound IP (ISP/NAT change, moving to a
+// new host, ...). Unlike defaultWafAllowedIps, this never throws - it's only
+// ever used to supplement an already-resolved allow-list, so an ipify hiccup
+// here should never block route provisioning that already succeeded via the
+// configured IP.
+async function detectActualPublicIp(): Promise<string | null> {
+  try {
+    return await fetchPublicIp();
+  } catch {
+    return null;
+  }
 }
 
 export async function resolveWafAllowedIps(values: string[], providerMode: "live" | "mock"): Promise<string[]> {
@@ -231,9 +249,12 @@ async function reconcileZoneWafUnlocked(
 }
 
 // Called after a successful install so a tunnel's command agent endpoint never
-// silently locks the CFMan server out of its own WAF allow-list -
-// e.g. after the server's public IP changes - without the operator having to
-// remember to open the WAF dialog and click "Add CFMan origin".
+// silently locks the CFMan server out of its own WAF allow-list - e.g. after
+// the server's public IP changes - without the operator having to remember
+// to open the WAF dialog and click "Add CFMan origin". Live-detects this
+// machine's actual outbound IP and folds it in alongside whatever
+// defaultWafAllowedIps resolves (a configured CFMAN_WAF_ALLOWED_IPS wins
+// there and is never overridden - only supplemented - since it can go stale).
 // Only touches the route when WAF protection is already enabled there, and
 // only writes back when an IP is actually missing.
 export async function ensureCommandAgentWafAllowsCloudflareMan(tunnelId: string): Promise<void> {
@@ -253,8 +274,12 @@ export async function ensureCommandAgentWafAllowsCloudflareMan(tunnelId: string)
   const route = result.rows[0];
   if (!route) return;
   const cloudflareManIps = await defaultWafAllowedIps(route.providerMode);
+  const actualIp = route.providerMode === "live" ? await detectActualPublicIp() : null;
+  const effectiveCloudflareManIps = actualIp && !cloudflareManIps.includes(actualIp)
+    ? [...cloudflareManIps, actualIp]
+    : cloudflareManIps;
   const currentIps = (route.wafAllowedIps ?? []) as string[];
-  const missing = cloudflareManIps.filter((ip) => !currentIps.includes(ip));
+  const missing = effectiveCloudflareManIps.filter((ip) => !currentIps.includes(ip));
   if (!missing.length) return;
   const allowedIps = [...new Set([...currentIps, ...missing])];
   await pool.query(
