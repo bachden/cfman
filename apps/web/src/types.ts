@@ -236,6 +236,7 @@ export type TunnelCommandExecution = {
   stderr: string;
   error: string | null;
   requestedBy: string | null;
+  requestedVia: "web" | "mcp";
   bulkExecutionId?: string | null;
   environmentVariables: ExecutionVariables;
   argumentSources: Record<string, ArgumentValueSource>;

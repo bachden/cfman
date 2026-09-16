@@ -548,6 +548,7 @@ const commandExecutionsJson = `COALESCE((
     'stderr', ce.stderr,
     'error', ce.error,
     'requestedBy', ce.username,
+    'requestedVia', ce.requested_via,
     'environmentVariables', ce.environment_variables,
     'argumentSources', ce.argument_sources
   ) ORDER BY ce.created_at DESC)
@@ -1319,7 +1320,7 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
                 ce.script, ce.environment_variables AS "environmentVariables", ce.argument_sources AS "argumentSources", COALESCE(sv.arguments, ce.inline_arguments) AS "scriptArguments", ce.timeout_ms AS "timeoutMs", ce.status, ce.task_id AS "taskId", ce.process_id AS "processId",
                 ce.created_at AS "createdAt", ce.started_at AS "startedAt", ce.finished_at AS "finishedAt",
                 ce.elapsed_ms AS "elapsedMs", ce.exit_code AS "exitCode",
-                ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy"
+                ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy", ce.requested_via AS "requestedVia"
            FROM tunnel_command_executions ce
            JOIN tunnels st ON st.id = ce.tunnel_id
            ${joins}
@@ -1491,7 +1492,8 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
       scriptVersion,
       environmentVariables: argumentValues,
       argumentSources,
-      inlineArguments: scriptType === "inline" ? scriptArguments : undefined
+      inlineArguments: scriptType === "inline" ? scriptArguments : undefined,
+      requestedVia: request.authUser!.sessionId === null ? "mcp" : "web"
     });
     try {
       const result = await executeTunnelScript(id, dispatchedScript, resolvedTimeoutMs, executionHandle);

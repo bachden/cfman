@@ -114,6 +114,7 @@ export async function createCommandExecution(
     argumentSources?: Record<string, unknown>;
     inlineArguments?: unknown[] | undefined;
     bulkExecutionId?: string | null;
+    requestedVia?: "web" | "mcp";
   }
 ): Promise<CommandExecutionHandle> {
   const reportToken = createOpaqueToken();
@@ -121,9 +122,10 @@ export async function createCommandExecution(
     `INSERT INTO tunnel_command_executions(
        tunnel_id, enrollment_id, script_version_id, requested_by, script, timeout_ms,
        script_type, script_name, script_platform, script_language, script_version_number,
-       report_token_hash, bulk_execution_id, environment_variables, argument_sources, inline_arguments
+       report_token_hash, bulk_execution_id, environment_variables, argument_sources, inline_arguments,
+       requested_via
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
      RETURNING id`,
     [
       input.tunnelId,
@@ -141,7 +143,8 @@ export async function createCommandExecution(
       input.bulkExecutionId ?? null,
       input.environmentVariables ?? {},
       input.argumentSources ?? {},
-      JSON.stringify(input.inlineArguments ?? [])
+      JSON.stringify(input.inlineArguments ?? []),
+      input.requestedVia ?? "web"
     ]
   );
   return { executionId: result.rows[0].id as string, reportToken };

@@ -256,7 +256,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                 ce.script, ce.environment_variables AS "environmentVariables", ce.argument_sources AS "argumentSources", COALESCE(executed_version.arguments, ce.inline_arguments) AS "scriptArguments", ce.timeout_ms AS "timeoutMs", ce.status, ce.task_id AS "taskId", ce.process_id AS "processId",
                 ce.created_at AS "createdAt", ce.started_at AS "startedAt", ce.finished_at AS "finishedAt",
                 ce.elapsed_ms AS "elapsedMs", ce.exit_code AS "exitCode",
-                ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy"
+                ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy", ce.requested_via AS "requestedVia"
          ${joins}
          ${where}
          ORDER BY ce.created_at DESC, ce.id DESC
@@ -382,7 +382,8 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                  'stdout', ce.stdout,
                  'stderr', ce.stderr,
                  'error', ce.error,
-                 'requestedBy', u.username
+                 'requestedBy', u.username,
+                 'requestedVia', ce.requested_via
                )
              ) AS item,
              ce.created_at AS sort_at,
@@ -544,7 +545,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                 ce.script_language AS language, ce.script, ce.environment_variables AS "environmentVariables", ce.argument_sources AS "argumentSources", COALESCE(sv.arguments, ce.inline_arguments) AS "scriptArguments", ce.timeout_ms AS "timeoutMs", ce.status,
                 ce.task_id AS "taskId", ce.process_id AS "processId",
                 ce.created_at AS "createdAt", ce.started_at AS "startedAt", ce.finished_at AS "finishedAt", ce.elapsed_ms AS "elapsedMs",
-                ce.exit_code AS "exitCode", ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy"
+                ce.exit_code AS "exitCode", ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy", ce.requested_via AS "requestedVia"
            FROM tunnel_command_executions ce
            JOIN tunnels st ON st.id = ce.tunnel_id
            LEFT JOIN enrollments e ON e.id = ce.enrollment_id
@@ -589,6 +590,7 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
     );
     const version = selectedVersion.rows[0];
     if (!version) return reply.code(404).send({ error: "Script version not found" });
+    const requestedVia = request.authUser!.sessionId === null ? "mcp" : "web";
     const filters = body.filters;
     const values: unknown[] = [];
     const conditions: string[] = [];
@@ -674,7 +676,8 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
           scriptLanguage: version.language,
           scriptVersion: version.version,
           environmentVariables: {},
-          bulkExecutionId: run.id
+          bulkExecutionId: run.id,
+          requestedVia
         });
         executions.push(execution.executionId);
         await pool.query(
@@ -697,7 +700,8 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
         scriptVersion: version.version,
         environmentVariables: argumentValues,
         argumentSources,
-        bulkExecutionId: run.id
+        bulkExecutionId: run.id,
+        requestedVia
       });
       executions.push(execution.executionId);
       if (!target.enrollmentId) {
