@@ -825,7 +825,7 @@ function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
         const statusLabel = execution.status === "succeeded" ? "Succeeded" : execution.status === "failed" ? "Error" : execution.status === "timed_out" ? "Timeout" : execution.status === "cancelled" ? "Cancelled" : execution.status === "scheduled" ? "Scheduled" : execution.status === "never_run" ? "Never run" : "Running";
         const managedScriptId = execution.scriptId ?? execution.savedScriptId;
         const managedVersion = execution.scriptVersion ?? (execution.savedScriptVersionId ? 1 : null);
-        const scriptLabel = `${execution.scriptName ?? "Saved script"}${managedVersion ? ` v${managedVersion}` : ""}`;
+        const scriptLabel = `${execution.scriptName ?? "Saved script"}${managedVersion ? ` · v${managedVersion}` : ""}`;
         const inlineName = execution.scriptName ?? "Inline script";
         const isInline = execution.scriptType === "inline" && !execution.savedScriptId;
         const isBulk = Boolean(execution.bulkExecutionId);
