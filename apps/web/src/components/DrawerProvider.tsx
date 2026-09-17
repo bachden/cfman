@@ -7,12 +7,12 @@ const ScriptDrawer = lazy(() => import("./ScriptDrawer").then((module) => ({ def
 
 const DRAWER_DEFAULT_WIDTH = 1080;
 
-type TunnelDrawerEntry = { tunnelId: string; tab: TunnelDrawerTab; enrollmentId: string | undefined; width: number; openSeq: number };
-type ScriptDrawerEntry = { scriptId: string; version: number | null; bulkRunId: string | null; width: number; openSeq: number };
+type TunnelDrawerEntry = { key: number; tunnelId: string; tab: TunnelDrawerTab; enrollmentId: string | undefined; width: number; openSeq: number };
+type ScriptDrawerEntry = { key: number; scriptId: string; version: number | null; bulkRunId: string | null; width: number; openSeq: number };
 
-// Each open tunnel/script gets its own stacked drawer instance (keyed by its id), rather than
-// a single reused slot per type - opening a second tunnel while the first is still open must
-// add a new drawer behind/in front of it, not replace it.
+// Every open call pushes a brand new stacked drawer instance (keyed by a fresh sequence number),
+// even if a drawer for the same tunnel/script id is already open - reusing an existing instance
+// silently discards its scroll position/expanded state, which loses context while tracing issues.
 export function DrawerProvider({ children }: { children: ReactNode }) {
   const [tunnelDrawers, setTunnelDrawers] = useState<TunnelDrawerEntry[]>([]);
   const [scriptDrawers, setScriptDrawers] = useState<ScriptDrawerEntry[]>([]);
@@ -22,20 +22,15 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
     openTunnelDrawer: (tunnelId: string, tab: TunnelDrawerTab = "overall", enrollmentId?: string) => {
       openSeq.current += 1;
       const seq = openSeq.current;
-      setTunnelDrawers((current) => {
-        const existing = current.find((entry) => entry.tunnelId === tunnelId);
-        const next = { tunnelId, tab, enrollmentId, width: existing?.width ?? DRAWER_DEFAULT_WIDTH, openSeq: seq };
-        return existing ? current.map((entry) => (entry.tunnelId === tunnelId ? next : entry)) : [...current, next];
-      });
+      setTunnelDrawers((current) => [...current, { key: seq, tunnelId, tab, enrollmentId, width: DRAWER_DEFAULT_WIDTH, openSeq: seq }]);
     },
     openScriptDrawer: (scriptId: string, version: number | null = null, options?: { bulkRunId?: string | undefined }) => {
       openSeq.current += 1;
       const seq = openSeq.current;
-      setScriptDrawers((current) => {
-        const existing = current.find((entry) => entry.scriptId === scriptId);
-        const next = { scriptId, version, bulkRunId: options?.bulkRunId ?? null, width: existing?.width ?? DRAWER_DEFAULT_WIDTH, openSeq: seq };
-        return existing ? current.map((entry) => (entry.scriptId === scriptId ? next : entry)) : [...current, next];
-      });
+      setScriptDrawers((current) => [
+        ...current,
+        { key: seq, scriptId, version, bulkRunId: options?.bulkRunId ?? null, width: DRAWER_DEFAULT_WIDTH, openSeq: seq }
+      ]);
     }
   }), []);
 
@@ -45,28 +40,28 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
       <DrawerStackProvider>
         {tunnelDrawers.map((entry) => (
           <TunnelDrawer
-            key={entry.tunnelId}
+            key={entry.key}
             tunnelId={entry.tunnelId}
             tab={entry.tab}
             initialExpandEnrollmentId={entry.enrollmentId ?? null}
             openSeq={entry.openSeq}
-            onTabChange={(tab) => setTunnelDrawers((current) => current.map((item) => (item.tunnelId === entry.tunnelId ? { ...item, tab } : item)))}
-            onClose={() => setTunnelDrawers((current) => current.filter((item) => item.tunnelId !== entry.tunnelId))}
+            onTabChange={(tab) => setTunnelDrawers((current) => current.map((item) => (item.key === entry.key ? { ...item, tab } : item)))}
+            onClose={() => setTunnelDrawers((current) => current.filter((item) => item.key !== entry.key))}
             width={entry.width}
-            onResize={(width) => setTunnelDrawers((current) => current.map((item) => (item.tunnelId === entry.tunnelId ? { ...item, width } : item)))}
+            onResize={(width) => setTunnelDrawers((current) => current.map((item) => (item.key === entry.key ? { ...item, width } : item)))}
           />
         ))}
         <Suspense fallback={null}>
           {scriptDrawers.map((entry) => (
             <ScriptDrawer
-              key={entry.scriptId}
+              key={entry.key}
               scriptId={entry.scriptId}
               version={entry.version}
               initialBulkRunId={entry.bulkRunId}
               openSeq={entry.openSeq}
-              onClose={() => setScriptDrawers((current) => current.filter((item) => item.scriptId !== entry.scriptId))}
+              onClose={() => setScriptDrawers((current) => current.filter((item) => item.key !== entry.key))}
               width={entry.width}
-              onResize={(width) => setScriptDrawers((current) => current.map((item) => (item.scriptId === entry.scriptId ? { ...item, width } : item)))}
+              onResize={(width) => setScriptDrawers((current) => current.map((item) => (item.key === entry.key ? { ...item, width } : item)))}
             />
           ))}
         </Suspense>
