@@ -206,8 +206,34 @@ test("saving an edited script creates a version, and a run records the version i
   assert.equal(detail.run.scriptVersion, 1);
   assert.equal(detail.run.outputBody, "one");
 
+  const last = await context.call("getLastRun", [key]) as { run: { sequence: number; scriptVersion: number; outputBody: string } | null };
+  assert.equal(last.run?.sequence, 2);
+  assert.equal(last.run?.outputBody, "two");
+
   await assert.rejects(() => context.call("getRun", [key, 99]), /has no run #99/);
   await assert.rejects(() => context.call("getRun", ["no-such-rule-key", 1]), /No automation rule matches/);
+  await assert.rejects(() => context.call("getLastRun", ["no-such-rule-key"]), /No automation rule matches/);
+
+  // A rule that has never finished a run has no last run, which is a null
+  // rather than an error: the first run of a rule is an ordinary case.
+  const fresh = await pool.query(
+    `INSERT INTO automation_rules(key, name, cron, timezone, script_timeout_ms)
+     VALUES ($1, $1, '0 0 * * *', 'UTC', 10000) RETURNING id`,
+    [`${key}-fresh`]
+  );
+  const freshLast = await context.call("getLastRun", [`${key}-fresh`]) as { run: unknown };
+  assert.equal(freshLast.run, null);
+  await pool.query("DELETE FROM automation_rules WHERE id = $1", [fresh.rows[0].id]);
+
+  // A run still in progress is not "the last run": a script reading its own
+  // rule mid-run must see the run before itself.
+  await pool.query(
+    `INSERT INTO automation_runs(rule_id, sequence, trigger_source, status, trigger_payload)
+     VALUES ($1, 99, 'manual', 'running', '{}'::jsonb)`,
+    [ruleId]
+  );
+  const stillSecond = await context.call("getLastRun", [key]) as { run: { sequence: number } | null };
+  assert.equal(stillSecond.run?.sequence, 2);
 });
 
 // The MCP tool is the only description an agent writing a rule ever sees, so

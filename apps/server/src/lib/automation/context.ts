@@ -81,6 +81,10 @@ const runProjection = `run.id, r.key AS "ruleKey", r.name AS "ruleName", run.seq
        run.output_mime_type AS "outputMimeType", run.error,
        run.started_at AS "startedAt", run.finished_at AS "finishedAt", run.elapsed_ms AS "elapsedMs"`;
 
+const runDetailProjection = `${runProjection}, run.output_body AS "outputBody",
+       run.output_truncated AS "outputTruncated", run.logs,
+       run.trigger_payload->>'scheduledFor' AS "scheduledFor"`;
+
 const runFrom = `FROM automation_runs run
        JOIN automation_rules r ON r.id = run.rule_id
        LEFT JOIN automation_rule_versions run_version ON run_version.id = run.script_version_id`;
@@ -198,6 +202,11 @@ export const AUTOMATION_CONTEXT_METHODS: AutomationContextMethodDoc[] = [
     name: "getRun",
     declaration: "getRun(rule: string, sequence: number): Promise<{ run: CfmanRunDetail }>",
     description: "One run of one rule, addressed by the rule key and that run's sequence number, including its output body, console logs, and what triggered it."
+  },
+  {
+    name: "getLastRun",
+    declaration: "getLastRun(rule: string): Promise<{ run: CfmanRunDetail | null }>",
+    description: "The most recent finished run of one rule, or null when it has never finished one. A run still in progress is skipped, so a script asking about its own rule gets the run before itself - which is what comparing against last time needs."
   },
   {
     name: "sendMessage",
@@ -653,14 +662,27 @@ export function createAutomationContext(options: AutomationContextOptions) {
       const rule = await resolveRule(ruleReference);
       const wanted = z.number().int().min(1).parse(sequence);
       const result = await pool.query(
-        `SELECT ${runProjection}, run.output_body AS "outputBody", run.output_truncated AS "outputTruncated",
-                run.logs, run.trigger_payload->>'scheduledFor' AS "scheduledFor"
-           ${runFrom}
+        `SELECT ${runDetailProjection} ${runFrom}
           WHERE run.rule_id = $1 AND run.sequence = $2`,
         [rule.id, wanted]
       );
       if (!result.rowCount) throw new AutomationContextError(`Rule "${rule.key}" has no run #${wanted}`);
       return toPlainJson({ run: result.rows[0] });
+    },
+
+    getLastRun: async (ruleReference?: unknown) => {
+      const rule = await resolveRule(ruleReference);
+      // A run still in progress is skipped, which is what makes this usable
+      // from inside a run: a script asking for its rule's last run means the
+      // one before itself, not the one it is sitting in.
+      const result = await pool.query(
+        `SELECT ${runDetailProjection} ${runFrom}
+          WHERE run.rule_id = $1 AND run.status <> 'running'
+          ORDER BY run.sequence DESC
+          LIMIT 1`,
+        [rule.id]
+      );
+      return toPlainJson({ run: result.rows[0] ?? null });
     },
 
     sendMessage: async (channelKey?: unknown, body?: unknown) => {
