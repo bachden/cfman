@@ -3,6 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
+import { automationScriptToolDescription } from "../lib/automation/context.js";
 import { argumentBindingsSchema, executionVariablesSchema, scriptArgumentsSchema } from "../lib/execution-variables.js";
 import { requireMcpAuth } from "../lib/auth.js";
 
@@ -120,6 +121,35 @@ function setNameFilterParams(
   params.set("name", args.name);
   params.set("nameMatch", args.nameMatch);
 }
+
+const channelKeyField = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64)
+  .regex(/^[a-z0-9][a-z0-9_-]*$/)
+  .describe("Stable lowercase key used by every reference to this record; it cannot be changed later");
+
+const automationScheduleField = z.object({
+  cron: z.string().min(1).max(200).describe("Five-field cron expression (minute hour day-of-month month day-of-week), or six fields with seconds first"),
+  timezone: z.string().min(1).max(80).optional().describe("IANA time zone the expression is written in; defaults to the server's")
+}).describe("When the rule's script runs");
+
+const automationScriptField = z
+  .string()
+  .min(1)
+  .max(262_144)
+  .describe(automationScriptToolDescription());
+
+// The full contract is spelled out once, on the create tool; repeating all of
+// it here would double the size of the tool list for the same text.
+const automationScriptUpdateField = z
+  .string()
+  .min(1)
+  .max(262_144)
+  .describe("The rule's new script, under the same contract as scriptSource on cfman_create_automation_rule; call cfman_get_automation_capabilities for the full call list and TypeScript declarations. A script that differs from the current version is saved as a new version.");
+
+const automationRuleToolDescription = "Create a scheduled rule: a cron timer runs one script that does everything the rule does. The script is saved as version 1, and every later edit adds a version. Read cfman_get_automation_capabilities first.";
 
 function registerApiTool<T extends ToolShape>(
   server: McpServer,
@@ -508,6 +538,94 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     const { tunnelId, enrollmentId, ...body } = args;
     return callApi(app, token, "PUT", `/api/tunnels/${tunnelId}/enrollments/${enrollmentId}/execution-variables`, body);
   });
+
+  registerApiTool(server, app, token, "cfman_list_channels", "List notification channels with their key, type, target, last send result, and whether the channel can show buttons (supportsButtons) so a rule script may ask a question with cfman.ask. A rule script addresses a channel by its key, never by its id.", {}, () => callApi(app, token, "GET", "/api/notifications/channels"));
+  registerApiTool(server, app, token, "cfman_create_channel", "Create a notification channel. For type telegram, config takes chatId (numeric id or @channelusername), optional parseMode (none, markdown, html) and disableNotification; secrets takes botToken.", {
+    key: channelKeyField,
+    name: z.string().trim().min(1).max(120).describe("Human-readable label; processing always uses the key"),
+    type: z.enum(["telegram"]),
+    description: z.string().trim().max(500).default(""),
+    enabled: z.boolean().default(true),
+    config: z.record(z.string(), z.unknown()).describe("Non-secret per-type settings"),
+    secrets: z.record(z.string(), z.string()).describe("Per-type credentials; stored encrypted and never returned")
+  }, (args) => callApi(app, token, "POST", "/api/notifications/channels", args));
+  registerApiTool(server, app, token, "cfman_update_channel", "Update a channel. Only the secrets included here are replaced; the key cannot change because rules reference it.", {
+    channelId: z.string().uuid(),
+    name: z.string().trim().min(1).max(120).optional(),
+    description: z.string().trim().max(500).optional(),
+    enabled: z.boolean().optional(),
+    config: z.record(z.string(), z.unknown()).optional(),
+    secrets: z.record(z.string(), z.string()).optional()
+  }, (args) => {
+    const { channelId, ...body } = args;
+    return callApi(app, token, "PATCH", `/api/notifications/channels/${channelId}`, body);
+  });
+  registerApiTool(server, app, token, "cfman_delete_channel", "Delete a channel. Refused while any automation rule script still names its key.", {
+    channelId: z.string().uuid()
+  }, (args) => callApi(app, token, "DELETE", `/api/notifications/channels/${args.channelId}`));
+  registerApiTool(server, app, token, "cfman_send_channel_message", "Send a message through one channel immediately and record it in that channel's message log.", {
+    channelId: z.string().uuid(),
+    body: z.string().min(1).max(20_000)
+  }, (args) => {
+    const { channelId, ...body } = args;
+    return callApi(app, token, "POST", `/api/notifications/channels/${channelId}/send`, body);
+  });
+  registerApiTool(server, app, token, "cfman_get_channel_messages", "Read the send log of one channel, including which automation run produced each message.", {
+    channelId: z.string().uuid(),
+    page: z.number().int().min(1).default(1),
+    pageSize: z.number().int().min(5).max(100).default(20)
+  }, (args) => callApi(app, token, "GET", `/api/notifications/channels/${args.channelId}/messages?page=${args.page}&pageSize=${args.pageSize}`));
+  registerApiTool(server, app, token, "cfman_get_automation_capabilities", "The rule-script contract in full: every cfman call with its signature and description, the TypeScript declarations of every global and type a script can touch, and the server's default time zone. Read this before writing or editing a rule script.", {}, () => callApi(app, token, "GET", "/api/automation/capabilities"));
+  registerApiTool(server, app, token, "cfman_preview_cron", "Validate a cron expression in one IANA time zone and return a plain-language reading of it plus its next five occurrences as ISO timestamps. A six-field expression is read as seconds-first (second minute hour day-of-month month day-of-week).", {
+    cron: z.string().min(1).max(200).describe("Five-field cron expression (minute hour day-of-month month day-of-week), or six fields with seconds first"),
+    timezone: z.string().min(1).max(80).optional().describe("IANA time zone; defaults to the server's")
+  }, (args) => callApi(app, token, "POST", "/api/automation/cron/preview", args));
+  registerApiTool(server, app, token, "cfman_list_automation_rules", "List automation rules with their schedule, current script version, next run, and last run status.", {
+    search: z.string().trim().max(160).optional()
+  }, (args) => callApi(app, token, "GET", `/api/automation/rules${args.search ? `?search=${encodeURIComponent(args.search)}` : ""}`));
+  registerApiTool(server, app, token, "cfman_get_automation_rule", "Read one rule including every version of its script, newest first; the newest version is what the rule runs.", {
+    ruleId: z.string().uuid()
+  }, (args) => callApi(app, token, "GET", `/api/automation/rules/${args.ruleId}`));
+  registerApiTool(server, app, token, "cfman_create_automation_rule", automationRuleToolDescription, {
+    key: channelKeyField,
+    name: z.string().trim().min(1).max(120),
+    description: z.string().trim().max(1_000).default(""),
+    enabled: z.boolean().default(true),
+    schedule: automationScheduleField,
+    scriptSource: automationScriptField,
+    scriptTimeoutMs: z.number().int().min(1_000).max(600_000).default(30_000)
+  }, (args) => callApi(app, token, "POST", "/api/automation/rules", args));
+  registerApiTool(server, app, token, "cfman_update_automation_rule", "Update a rule. Omitted fields keep their stored value. A scriptSource that differs from the current version is saved as a new version; an identical one adds no version.", {
+    ruleId: z.string().uuid(),
+    name: z.string().trim().min(1).max(120).optional(),
+    description: z.string().trim().max(1_000).optional(),
+    enabled: z.boolean().optional(),
+    schedule: automationScheduleField.optional(),
+    scriptSource: automationScriptUpdateField.optional(),
+    scriptTimeoutMs: z.number().int().min(1_000).max(600_000).optional()
+  }, (args) => {
+    const { ruleId, ...body } = args;
+    return callApi(app, token, "PATCH", `/api/automation/rules/${ruleId}`, body);
+  });
+  registerApiTool(server, app, token, "cfman_delete_automation_rule", "Delete a rule and its run history.", {
+    ruleId: z.string().uuid()
+  }, (args) => callApi(app, token, "DELETE", `/api/automation/rules/${args.ruleId}`));
+  registerApiTool(server, app, token, "cfman_run_automation_rule", "Run the rule's current script version now, outside its schedule, and return its outcome: the version that ran, status, script output, and console logs. The script performs its own side effects, so a run started here is a real one.", {
+    ruleId: z.string().uuid()
+  }, (args) => callApi(app, token, "POST", `/api/automation/rules/${args.ruleId}/run`, {}));
+  registerApiTool(server, app, token, "cfman_get_automation_runs", "Read the run history of one rule, including the script version each run executed, its output, console logs, and every question the run asked in chat with the button that was pressed.", {
+    ruleId: z.string().uuid(),
+    status: z.enum(["running", "succeeded", "failed", "timed_out"]).optional(),
+    page: z.number().int().min(1).default(1),
+    pageSize: z.number().int().min(5).max(100).default(20)
+  }, (args) => {
+    const params = new URLSearchParams({ page: String(args.page), pageSize: String(args.pageSize) });
+    if (args.status) params.set("status", args.status);
+    return callApi(app, token, "GET", `/api/automation/rules/${args.ruleId}/runs?${params}`);
+  });
+  registerApiTool(server, app, token, "cfman_get_automation_run", "Read one automation run in full, including the questions it asked in chat and how each was answered.", {
+    runId: z.string().uuid()
+  }, (args) => callApi(app, token, "GET", `/api/automation/runs/${args.runId}`));
 
   for (const [name, path] of [
     ["dashboard", "/api/dashboard"],

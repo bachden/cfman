@@ -114,7 +114,7 @@ export async function createCommandExecution(
     argumentSources?: Record<string, unknown>;
     inlineArguments?: unknown[] | undefined;
     bulkExecutionId?: string | null;
-    requestedVia?: "web" | "mcp";
+    requestedVia?: "web" | "mcp" | "automation";
   }
 ): Promise<CommandExecutionHandle> {
   const reportToken = createOpaqueToken();

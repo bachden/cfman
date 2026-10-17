@@ -9,7 +9,9 @@ import { ZodError } from "zod";
 import { config } from "./config.js";
 import { getPublicBaseUrl } from "./lib/app-settings.js";
 import { accountRoutes } from "./routes/accounts.js";
+import { automationRoutes } from "./routes/automation.js";
 import { authRoutes } from "./routes/auth.js";
+import { notificationRoutes } from "./routes/notifications.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
 import { enrollmentRoutes } from "./routes/enrollment.js";
 import { mcpRoutes } from "./routes/mcp.js";
@@ -71,6 +73,8 @@ export async function buildApp() {
   await scriptRoutes(app);
   await enrollmentRoutes(app);
   await dashboardRoutes(app);
+  await notificationRoutes(app);
+  await automationRoutes(app);
   await settingsRoutes(app);
   await mcpRoutes(app);
 

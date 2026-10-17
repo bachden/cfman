@@ -1,6 +1,8 @@
 import { buildApp } from "./app.js";
 import { config } from "./config.js";
 import { runMigrations, seedRootUser } from "./lib/database.js";
+import { reconcileAutomationSchedules, startAutomationScheduler } from "./lib/automation/scheduler.js";
+import { reconcileInterruptedPrompts } from "./lib/notification-prompts.js";
 import { runStartupReconciliation, scheduleExpiredEnrollmentSweep } from "./lib/reconciliation.js";
 import { disableCloudflareManPublicHostnameWaf } from "./lib/route-waf.js";
 
@@ -12,6 +14,10 @@ if (publicHostnameWaf.failures.length) {
   console.error("Unable to disable WAF on the CFMan public hostname", publicHostnameWaf.failures);
 }
 scheduleExpiredEnrollmentSweep();
+await reconcileAutomationSchedules();
+// A question whose script died with the process can never be answered.
+await reconcileInterruptedPrompts();
+startAutomationScheduler();
 
 const app = await buildApp();
 await app.listen({ host: config.SERVER_HOST, port: config.SERVER_PORT });

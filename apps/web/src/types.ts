@@ -365,3 +365,122 @@ export type DiagnoseResult = {
     powershell: string;
   };
 };
+
+export type NotificationChannelType = "telegram";
+
+export type NotificationChannel = {
+  id: string;
+  key: string;
+  name: string;
+  type: NotificationChannelType;
+  typeLabel: string;
+  description: string;
+  enabled: boolean;
+  config: Record<string, unknown>;
+  // Never the secret itself - only the last characters of what is stored.
+  secretHints: Record<string, string>;
+  target: string;
+  // Whether a rule script can ask a question with buttons on this channel.
+  supportsButtons: boolean;
+  maxButtons: number;
+  lastUsedAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type NotificationMessage = {
+  id: string;
+  body: string;
+  status: "sent" | "failed";
+  error: string | null;
+  providerMessageId: string | null;
+  automationRunId: string | null;
+  ruleKey: string | null;
+  ruleName: string | null;
+  requestedVia: "web" | "mcp" | "automation";
+  requestedBy: string | null;
+  createdAt: string;
+};
+
+export type AutomationRuleVersion = {
+  id: string;
+  version: number;
+  scriptSource: string;
+  createdAt: string;
+  createdBy: string | null;
+};
+
+export type AutomationRule = {
+  id: string;
+  key: string;
+  name: string;
+  description: string;
+  enabled: boolean;
+  schedule: { cron: string; timezone: string };
+  scriptTimeoutMs: number;
+  // The newest version is the script the rule runs; the full list comes with
+  // the single-rule read only.
+  latestVersionId: string | null;
+  latestVersion: number | null;
+  versionCount: number;
+  versions?: AutomationRuleVersion[];
+  nextRunAt: string | null;
+  lastRunAt: string | null;
+  lastRunStatus: AutomationRunStatus | null;
+  createdAt: string;
+  updatedAt: string;
+  createdBy: string | null;
+};
+
+export type AutomationRunStatus = "running" | "succeeded" | "failed" | "timed_out";
+
+export type AutomationRunLog = { at: string; level: "log" | "warn" | "error"; message: string };
+
+export type AutomationRunPrompt = {
+  id: string;
+  channelKey: string;
+  body: string;
+  buttons: Array<{ label: string; value: string }>;
+  status: "pending" | "answered" | "timed_out" | "failed";
+  answerLabel: string | null;
+  answerValue: string | null;
+  answeredBy: string | null;
+  answeredAt: string | null;
+  error: string | null;
+  createdAt: string;
+};
+
+export type AutomationRun = {
+  id: string;
+  ruleId: string;
+  // Counts up per rule across every version of its script; how a run is
+  // referred to, including by cfman.getRun(ruleKey, sequence).
+  sequence: number;
+  ruleKey?: string;
+  ruleName?: string;
+  trigger: "timer" | "manual" | "mcp";
+  status: AutomationRunStatus;
+  triggerPayload: Record<string, unknown>;
+  scriptVersionId: string | null;
+  scriptVersion: number | null;
+  outputBody: string;
+  outputMimeType: string | null;
+  outputTruncated: boolean;
+  logs: AutomationRunLog[];
+  // Questions this run asked in chat, with the button that was pressed.
+  prompts: AutomationRunPrompt[];
+  error: string | null;
+  startedAt: string;
+  finishedAt: string | null;
+  elapsedMs: number | null;
+  triggeredBy: string | null;
+};
+
+export type AutomationCapabilities = {
+  context: Array<{ signature: string; description: string }>;
+  defaultTimezone: string;
+  // TypeScript declarations for the sandbox globals, fed to the Monaco
+  // JavaScript language service so cfman. completes to the real calls.
+  typeDefinitions: string;
+};

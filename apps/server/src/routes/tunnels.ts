@@ -19,6 +19,7 @@ import { createOpaqueToken, hashToken } from "../lib/security.js";
 import { selectZone, slugifyLabel } from "../lib/tunnels.js";
 import { automaticUnenrollmentScript, cancelCommandExecution, createCommandExecution, executeTunnelScript, getCommandAgentConfig, ensureCommandAgentToken, COMMAND_AGENT_SERVICE_URL } from "../lib/command-agent.js";
 import { argumentBindingsSchema, applyScriptArguments, describeArgumentValueSources, executionVariablesSchema, resolveArgumentValues, resolveAvailableVariablesForTunnel, scriptArgumentsSchema, type ExecutionVariables, type ScriptArgument } from "../lib/execution-variables.js";
+import { executeScriptOnTunnel, ScriptExecutionError } from "../lib/script-execution.js";
 
 const serviceUrlSchema = z.string().url().refine((value) => value.startsWith("http://") || value.startsWith("https://") || value.startsWith("ssh://"), {
   message: "Service URL must use HTTP, HTTPS, or SSH"
@@ -1400,123 +1401,25 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
   app.post("/api/tunnels/:id/commands/execute", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = executeScriptSchema.parse(request.body);
-    const enrollmentResult = await pool.query(
-      `SELECT id, platform
-         FROM enrollments
-        WHERE tunnel_id = $1
-          AND status IN ('ready', 'installed')
-          AND unenrolled_at IS NULL
-          AND deleted_at IS NULL
-        ORDER BY COALESCE(installed_at, claimed_at, created_at) DESC
-        LIMIT 1`,
-      [id]
-    );
-    const enrollment = enrollmentResult.rows[0];
-    if (!enrollment) return reply.code(409).send({ error: "This tunnel has no active enrollment" });
-    const enrollmentPlatform = enrollment.platform === "windows" ? "windows" : "unix";
-    let executionScript: string;
-    let scriptType: "managed" | "inline";
-    let scriptVersionId: string | null;
-    let scriptName: string;
-    let scriptVersion: number | null;
-    let scriptPlatform: "windows" | "unix";
-    let scriptLanguage: "powershell" | "bash" | "sh";
-    let scriptId: string | null;
-    let scriptArguments: ScriptArgument[] = [];
-    let resolvedTimeoutMs = body.timeoutMs ?? 60_000;
-    if (body.scriptVersionId) {
-      const scriptVersionResult = await pool.query(
-        `SELECT v.id, v.content, v.version, v.arguments, s.id AS script_id, s.name, s.platform, s.language,
-                s.default_timeout_ms AS "defaultTimeoutMs"
-          FROM managed_script_versions v
-           JOIN managed_scripts s ON s.id = v.script_id
-          WHERE v.id = $1`,
-        [body.scriptVersionId]
-      );
-      const managedScript = scriptVersionResult.rows[0];
-      if (!managedScript) return reply.code(404).send({ error: "Script version not found" });
-      if (managedScript.platform !== enrollmentPlatform) {
-        return reply.code(409).send({ error: `This script is for ${managedScript.platform}, but the active enrollment is ${enrollmentPlatform}` });
-      }
-      executionScript = managedScript.content;
-      scriptType = "managed";
-      scriptVersionId = managedScript.id;
-      scriptId = managedScript.script_id;
-      scriptName = managedScript.name;
-      scriptVersion = managedScript.version;
-      scriptPlatform = managedScript.platform;
-      scriptLanguage = managedScript.language;
-      scriptArguments = scriptArgumentsSchema.parse(managedScript.arguments);
-      resolvedTimeoutMs = body.timeoutMs ?? managedScript.defaultTimeoutMs;
-    } else {
-      const inlineLanguage = body.language ?? (enrollmentPlatform === "windows" ? "powershell" : "bash");
-      if (enrollmentPlatform === "windows" && inlineLanguage !== "powershell") {
-        return reply.code(409).send({ error: "Windows inline scripts must use PowerShell" });
-      }
-      if (enrollmentPlatform === "unix" && inlineLanguage === "powershell") {
-        return reply.code(409).send({ error: "Unix inline scripts must use Bash or sh" });
-      }
-      executionScript = body.inlineScript!;
-      scriptType = "inline";
-      scriptVersionId = null;
-      scriptId = null;
-      scriptName = body.name ?? "Inline script";
-      scriptVersion = null;
-      scriptPlatform = enrollmentPlatform;
-      scriptLanguage = inlineLanguage;
-      scriptArguments = body.arguments ?? [];
-    }
-    const agent = await getCommandAgentConfig(id);
-    if (!agent) return reply.code(409).send({ error: "No command agent route is configured for this tunnel" });
-    let argumentValues: ExecutionVariables;
-    let argumentSources: ReturnType<typeof describeArgumentValueSources>;
     try {
-      const available = await resolveAvailableVariablesForTunnel(id);
-      argumentValues = resolveArgumentValues(scriptArguments, available.variables, body.argumentBindings);
-      argumentSources = describeArgumentValueSources(scriptArguments, available.sources, body.argumentBindings);
-    } catch (error) {
-      return reply.code(409).send({ error: error instanceof Error ? error.message : "Unable to resolve script arguments" });
-    }
-    const dispatchedScript = applyScriptArguments(executionScript, scriptLanguage, argumentValues);
-    const executionHandle = await createCommandExecution({
-      tunnelId: id,
-      enrollmentId: enrollment.id,
-      scriptVersionId,
-      requestedBy: request.authUser!.id,
-      script: executionScript,
-      timeoutMs: resolvedTimeoutMs,
-      scriptType,
-      scriptName,
-      scriptPlatform,
-      scriptLanguage,
-      scriptVersion,
-      environmentVariables: argumentValues,
-      argumentSources,
-      inlineArguments: scriptType === "inline" ? scriptArguments : undefined,
-      requestedVia: request.authUser!.sessionId === null ? "mcp" : "web"
-    });
-    try {
-      const result = await executeTunnelScript(id, dispatchedScript, resolvedTimeoutMs, executionHandle);
-      if (!result) return reply.code(409).send({ error: "No command agent route is configured for this tunnel" });
-      await writeAudit({
-        actorUserId: request.authUser!.id,
-        action: "tunnel.command_executed",
-        entityType: "tunnel",
-        entityId: id,
-        details: { endpoint: agent.endpoint, executionId: executionHandle.executionId, taskId: result.taskId, enrollmentId: enrollment.id, scriptType, scriptId, scriptVersionId, timeoutMs: resolvedTimeoutMs, argumentNames: Object.keys(argumentValues), status: result.status, success: result.result?.success ?? null, exitCode: result.result?.exitCode ?? null }
+      const result = await executeScriptOnTunnel({
+        tunnelId: id,
+        scriptVersionId: body.scriptVersionId,
+        inlineScript: body.inlineScript,
+        name: body.name,
+        language: body.language,
+        timeoutMs: body.timeoutMs,
+        arguments: body.arguments,
+        argumentBindings: body.argumentBindings,
+        requestedBy: request.authUser!.id,
+        requestedVia: request.authUser!.sessionId === null ? "mcp" : "web"
       });
-      const response = { executionId: executionHandle.executionId, taskId: result.taskId, status: result.status, scheduled: result.scheduled, endpoint: agent.endpoint, enrollmentId: enrollment.id, scriptType, scriptId, scriptVersionId, scriptName, version: scriptVersion, platform: scriptPlatform, language: scriptLanguage, ...(result.result ?? {}) };
-      return result.scheduled ? reply.code(202).send(response) : response;
+      return result.scheduled ? reply.code(202).send(result.response) : result.response;
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Command agent execution failed";
-      await writeAudit({
-        actorUserId: request.authUser!.id,
-        action: "tunnel.command_executed",
-        entityType: "tunnel",
-        entityId: id,
-        details: { endpoint: agent.endpoint, executionId: executionHandle.executionId, enrollmentId: enrollment.id, scriptType, scriptId, scriptVersionId, timeoutMs: resolvedTimeoutMs, success: false, error: message }
-      });
-      return reply.code(502).send({ error: message, executionId: executionHandle.executionId });
+      if (error instanceof ScriptExecutionError) {
+        return reply.code(error.statusCode).send({ error: error.message, ...(error.executionId ? { executionId: error.executionId } : {}) });
+      }
+      throw error;
     }
   });
 

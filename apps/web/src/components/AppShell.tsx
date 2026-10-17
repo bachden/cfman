@@ -1,6 +1,7 @@
 import {
   Activity,
   Code2,
+  Workflow,
   CloudCog,
   Menu,
   ScrollText,
@@ -20,6 +21,7 @@ const navigation = [
   { to: "/accounts", label: "Accounts", icon: CloudCog },
   { to: "/tunnels", label: "Tunnels", icon: TunnelIcon },
   { to: "/scripts", label: "Scripts", icon: Code2 },
+  { to: "/automation", label: "Automation", icon: Workflow },
   { to: "/audit", label: "Audit log", icon: ScrollText },
   { to: "/settings", label: "Settings", icon: Settings }
 ];
