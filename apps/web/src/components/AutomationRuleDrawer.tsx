@@ -14,6 +14,7 @@ import {
   type CronFrequency
 } from "../cron";
 import type { AutomationCapabilities, AutomationRule, AutomationRun, NotificationChannel } from "../types";
+import { useDrawers } from "./DrawerContext";
 import { FieldHelp } from "./FieldHelp";
 import { Modal } from "./Modal";
 import { ScriptEditor } from "./ScriptEditor";
@@ -64,6 +65,7 @@ export function AutomationRuleDrawer({
   onResize: (width: number) => void;
 }) {
   const queryClient = useQueryClient();
+  const { openTunnelDrawer } = useDrawers();
   const isNew = ruleId === null;
   const browserTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const [form, setForm] = useState<RuleForm>(() => emptyRuleForm(browserTimezone));
@@ -347,8 +349,23 @@ export function AutomationRuleDrawer({
                     <header><strong>Output</strong><code>{item.outputMimeType ?? "—"}</code>{item.outputTruncated && <span>truncated</span>}</header>
                     <pre>{item.outputBody || "(empty)"}</pre>
                   </div>
+                  {item.executions.length > 0 && <div className="automation-run-block">
+                    <header><strong>Script executions</strong><span>{item.executions.length} on {new Set(item.executions.map((execution) => execution.tunnelId)).size} tunnel(s)</span></header>
+                    <ul className="automation-run-executions">{item.executions.map((execution) => <li key={execution.id}>
+                      <StatusBadge status={execution.status} />
+                      <div className="automation-run-execution-main">
+                        <button
+                          type="button"
+                          className="automation-run-version-link"
+                          title="Open this execution's log in the tunnel drawer"
+                          onClick={(event) => { event.stopPropagation(); openTunnelDrawer(execution.tunnelId, "connect", { executionId: execution.id }); }}
+                        >{execution.tunnelDisplayName}</button>
+                        <span className="automation-run-prompt-meta">{execution.tenantCode} / {execution.tunnelCode} · {execution.scriptName}{execution.scriptVersion === null ? "" : ` · v${execution.scriptVersion}`}{execution.exitCode === null ? "" : ` · exit ${execution.exitCode}`}{execution.elapsedMs === null ? "" : ` · ${execution.elapsedMs} ms`}</span>
+                      </div>
+                    </li>)}</ul>
+                  </div>}
                   {item.prompts.length > 0 && <div className="automation-run-block">
-                    <header><strong>Questions asked</strong></header>
+                    <header><strong>Questions asked</strong><span>{item.prompts.length}</span></header>
                     <ul className="automation-run-prompts">{item.prompts.map((prompt) => <li key={prompt.id}>
                       <StatusBadge status={prompt.status === "answered" ? "succeeded" : prompt.status === "timed_out" ? "timed_out" : prompt.status === "pending" ? "running" : "failed"} label={prompt.status === "answered" ? prompt.answerLabel ?? "answered" : prompt.status.replaceAll("_", " ")} />
                       <span className="automation-run-prompt-body">{prompt.body}</span>

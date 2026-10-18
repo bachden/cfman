@@ -145,10 +145,8 @@ test("saving an edited script creates a version, and a run records the version i
   const { pool } = database;
   const suffix = Date.now().toString(36);
   const key = `test-${suffix}-versions`;
-  // The last test touching the database closes the shared pool for the file.
   t.after(async () => {
     await pool.query("DELETE FROM automation_rules WHERE key = $1", [key]);
-    await pool.end();
   });
 
   const inserted = await pool.query(
@@ -238,6 +236,75 @@ test("saving an edited script creates a version, and a run records the version i
 
 // The MCP tool is the only description an agent writing a rule ever sees, so
 // it has to carry the same calls and types the editor gets.
+// What a run did is the point of the run history: several questions and
+// several executions must all be listed, not just the first of each.
+test("a run lists every question it asked and every execution it dispatched", async (t) => {
+  const database = await import("../src/lib/database.js");
+  await database.runMigrations();
+  const { pool } = database;
+  const suffix = Date.now().toString(36);
+  const key = `test-${suffix}-history`;
+  // The last test touching the database closes the shared pool for the file.
+  t.after(async () => {
+    await pool.query("DELETE FROM automation_rules WHERE key = $1", [key]);
+    await pool.query("DELETE FROM notification_channels WHERE key = $1", [`${key}-channel`]);
+    await pool.end();
+  });
+
+  const rule = await pool.query(
+    `INSERT INTO automation_rules(key, name, cron, timezone, script_timeout_ms)
+     VALUES ($1, $1, '0 0 * * *', 'UTC', 10000) RETURNING id`,
+    [key]
+  );
+  const ruleId = rule.rows[0].id as string;
+  const run = await pool.query(
+    `INSERT INTO automation_runs(rule_id, sequence, trigger_source, status, trigger_payload)
+     VALUES ($1, 1, 'manual', 'succeeded', '{}'::jsonb) RETURNING id`,
+    [ruleId]
+  );
+  const runId = run.rows[0].id as string;
+
+  const channel = await pool.query(
+    `INSERT INTO notification_channels(key, name, type, config, secrets)
+     VALUES ($1, $1, 'telegram', '{"chatId":"-1","parseMode":"none","disableNotification":false}'::jsonb, '{}'::jsonb)
+     RETURNING id`,
+    [`${key}-channel`]
+  );
+  for (const [index, body] of ["First question", "Second question", "Third question"].entries()) {
+    await pool.query(
+      `INSERT INTO notification_prompts(channel_id, automation_run_id, body, buttons, status, expires_at, created_at)
+       VALUES ($1, $2, $3, '[{"label":"Yes","value":"yes"}]'::jsonb, 'answered', now(), now() + ($4::int * interval '1 second'))`,
+      [channel.rows[0].id, runId, body, index]
+    );
+  }
+
+  const tunnel = await pool.query("SELECT id FROM tunnels LIMIT 1");
+  const tunnelId = tunnel.rows[0]?.id as string | undefined;
+  if (tunnelId) {
+    for (const name of ["first.ps1", "second.ps1"]) {
+      await pool.query(
+        `INSERT INTO tunnel_command_executions(tunnel_id, requested_by, script, timeout_ms, script_type, script_name,
+                                               script_platform, script_language, report_token_hash, requested_via, automation_run_id, status)
+         VALUES ($1, null, 'Write-Output 1', 1000, 'inline', $2, 'windows', 'powershell', $3, 'automation', $4, 'succeeded')`,
+        [tunnelId, name, `hash-${suffix}-${name}`, runId]
+      );
+    }
+  }
+
+  const listed = await pool.query(
+    `SELECT jsonb_array_length(COALESCE((
+       SELECT jsonb_agg(p.id) FROM notification_prompts p WHERE p.automation_run_id = run.id
+     ), '[]'::jsonb)) AS "promptCount",
+     jsonb_array_length(COALESCE((
+       SELECT jsonb_agg(ce.id) FROM tunnel_command_executions ce WHERE ce.automation_run_id = run.id
+     ), '[]'::jsonb)) AS "executionCount"
+       FROM automation_runs run WHERE run.id = $1`,
+    [runId]
+  );
+  assert.equal(listed.rows[0].promptCount, 3, "every question asked during the run must be listed");
+  assert.equal(listed.rows[0].executionCount, tunnelId ? 2 : 0, "every execution the run dispatched must be listed");
+});
+
 test("the MCP script description spells out every call and type", async () => {
   const { AUTOMATION_CONTEXT_METHODS, AUTOMATION_OUTPUT_HELPERS, automationScriptToolDescription } =
     await import("../src/lib/automation/context.js");

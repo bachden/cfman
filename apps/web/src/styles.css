@@ -928,6 +928,10 @@ tbody tr:hover td { background: #fbfcfb; }
 .automation-run-logs { color: #cfe0d4; }
 .automation-channel-type { display: flex; align-items: center; gap: 7px; }
 .automation-buttons-chip { padding: 1px 7px; color: var(--green); background: var(--green-soft); border-radius: 20px; font-size: 8px; font-weight: 750; text-transform: uppercase; letter-spacing: .03em; }
+.execution-focus-note { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; padding: 7px 11px; color: #7a5a1f; background: #fdf6e7; border: 1px solid #efe0bf; border-radius: 5px; font-size: 10px; }
+.automation-run-executions { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
+.automation-run-executions li { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; }
+.automation-run-execution-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; align-items: flex-start; }
 .automation-run-prompts { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .automation-run-prompts li { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: start; gap: 4px 10px; }
 .automation-run-prompt-body { color: #44524a; font-size: 10px; white-space: pre-wrap; }

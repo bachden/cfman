@@ -563,7 +563,8 @@ export function createAutomationContext(options: AutomationContextOptions) {
         timeoutMs: request.timeoutMs,
         argumentBindings: request.argumentBindings,
         requestedBy: options.requestedBy,
-        requestedVia: "automation"
+        requestedVia: "automation",
+        automationRunId: options.automationRunId
       });
       const executionId = execution.response.executionId as string;
       if (!request.wait) return toPlainJson({ ...execution.response, tunnel });

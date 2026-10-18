@@ -121,6 +121,10 @@ const refreshTunnelsSchema = z.object({
 });
 
 const commandExecutionListSchema = z.object({
+  // Addresses one execution directly, which is how a link from somewhere else
+  // (an automation run, a notification) lands on it no matter which page of
+  // the history it would otherwise sit on.
+  executionId: z.string().uuid().optional(),
   search: z.string().trim().max(120).optional(),
   from: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/, "Timestamp must use ISO 8601 format").optional(),
   to: z.string().regex(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})$/, "Timestamp must use ISO 8601 format").optional(),
@@ -1281,6 +1285,10 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
     const offset = (query.page - 1) * query.pageSize;
     const values: unknown[] = [id];
     const conditions = ["ce.tunnel_id = $1"];
+    if (query.executionId) {
+      values.push(query.executionId);
+      conditions.push(`ce.id = $${values.length}`);
+    }
     if (query.search) {
       values.push(query.search);
       conditions.push(`strpos(lower(concat_ws(' ', ce.script_name, ms.name, ms.description, saved_ms.name, saved_ms.description, st.display_name, st.tenant_code, st.tunnel_code, u.username)), lower($${values.length})) > 0`);
@@ -1321,7 +1329,8 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
                 ce.script, ce.environment_variables AS "environmentVariables", ce.argument_sources AS "argumentSources", COALESCE(sv.arguments, ce.inline_arguments) AS "scriptArguments", ce.timeout_ms AS "timeoutMs", ce.status, ce.task_id AS "taskId", ce.process_id AS "processId",
                 ce.created_at AS "createdAt", ce.started_at AS "startedAt", ce.finished_at AS "finishedAt",
                 ce.elapsed_ms AS "elapsedMs", ce.exit_code AS "exitCode",
-                ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy", ce.requested_via AS "requestedVia"
+                ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy", ce.requested_via AS "requestedVia",
+                ce.automation_run_id AS "automationRunId"
            FROM tunnel_command_executions ce
            JOIN tunnels st ON st.id = ce.tunnel_id
            ${joins}

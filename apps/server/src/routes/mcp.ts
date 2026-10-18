@@ -277,11 +277,16 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     if (query.tunnelSearch) params.set("tunnelSearch", query.tunnelSearch);
     return callApi(app, token, "GET", `/api/scripts/${scriptId}/bulk-executions${runId ? `/${runId}` : ""}?${params}`);
   });
-  registerApiTool(server, app, token, "cfman_get_tunnel_execution_history", "Read paginated command execution history for one tunnel, including saved and inline script snapshots.", {
+  registerApiTool(server, app, token, "cfman_get_tunnel_execution_history", "Read paginated command execution history for one tunnel, including saved and inline script snapshots. Each entry carries requestedVia (web, mcp, or automation) and, for one a rule script dispatched, the automationRunId it belongs to. Pass executionId to read exactly one execution instead of a page.", {
     tunnelId: z.string().uuid(),
+    executionId: z.string().uuid().optional().describe("Return only this execution, whichever page it would otherwise be on"),
     page: z.number().int().min(1).default(1),
     pageSize: z.number().int().min(5).max(50).default(10)
-  }, (args) => callApi(app, token, "GET", `/api/tunnels/${args.tunnelId}/command-executions?page=${args.page}&pageSize=${args.pageSize}`));
+  }, (args) => {
+    const params = new URLSearchParams({ page: String(args.page), pageSize: String(args.pageSize) });
+    if (args.executionId) params.set("executionId", args.executionId);
+    return callApi(app, token, "GET", `/api/tunnels/${args.tunnelId}/command-executions?${params}`);
+  });
   registerApiTool(server, app, token, "cfman_get_execution_logs", "Read streamed stdout and stderr lines for one tunnel command execution. Use after to incrementally poll without replaying prior lines.", {
     tunnelId: z.string().uuid(),
     executionId: z.string().uuid(),
@@ -613,7 +618,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
   registerApiTool(server, app, token, "cfman_run_automation_rule", "Run the rule's current script version now, outside its schedule, and return its outcome: the version that ran, status, script output, and console logs. The script performs its own side effects, so a run started here is a real one.", {
     ruleId: z.string().uuid()
   }, (args) => callApi(app, token, "POST", `/api/automation/rules/${args.ruleId}/run`, {}));
-  registerApiTool(server, app, token, "cfman_get_automation_runs", "Read the run history of one rule, including the script version each run executed, its output, console logs, and every question the run asked in chat with the button that was pressed.", {
+  registerApiTool(server, app, token, "cfman_get_automation_runs", "Read the run history of one rule: the script version each run executed, its output, console logs, every question it asked in chat with the button that was pressed, and every script execution it dispatched on a tunnel (with the execution id to read that execution's log).", {
     ruleId: z.string().uuid(),
     status: z.enum(["running", "succeeded", "failed", "timed_out"]).optional(),
     page: z.number().int().min(1).default(1),
@@ -623,7 +628,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     if (args.status) params.set("status", args.status);
     return callApi(app, token, "GET", `/api/automation/rules/${args.ruleId}/runs?${params}`);
   });
-  registerApiTool(server, app, token, "cfman_get_automation_run", "Read one automation run in full, including the questions it asked in chat and how each was answered.", {
+  registerApiTool(server, app, token, "cfman_get_automation_run", "Read one automation run in full, including the questions it asked in chat with their answers and the script executions it dispatched on tunnels.", {
     runId: z.string().uuid()
   }, (args) => callApi(app, token, "GET", `/api/automation/runs/${args.runId}`));
 

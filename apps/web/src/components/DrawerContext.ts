@@ -3,7 +3,9 @@ import { createContext, useContext } from "react";
 export type TunnelDrawerTab = "overall" | "ingress" | "connect";
 
 export type DrawerApi = {
-  openTunnelDrawer: (tunnelId: string, tab?: TunnelDrawerTab, enrollmentId?: string) => void;
+  // `executionId` opens the Connect tab on exactly that execution, whichever
+  // page of the history it would otherwise be on.
+  openTunnelDrawer: (tunnelId: string, tab?: TunnelDrawerTab, options?: { enrollmentId?: string; executionId?: string }) => void;
   openScriptDrawer: (scriptId: string, version?: number | null, options?: { bulkRunId?: string | undefined }) => void;
   // A null id opens the drawer in create mode; both drawers edit in place otherwise.
   openAutomationRuleDrawer: (ruleId: string | null) => void;

@@ -236,7 +236,9 @@ export type TunnelCommandExecution = {
   stderr: string;
   error: string | null;
   requestedBy: string | null;
-  requestedVia: "web" | "mcp";
+  requestedVia: "web" | "mcp" | "automation";
+  // Set when a rule script dispatched this execution.
+  automationRunId?: string | null;
   bulkExecutionId?: string | null;
   environmentVariables: ExecutionVariables;
   argumentSources: Record<string, ArgumentValueSource>;
@@ -316,7 +318,7 @@ export type BulkScriptRun = {
   timeoutMs: number;
   createdAt: string;
   requestedBy: string | null;
-  requestedVia: "web" | "mcp";
+  requestedVia: "web" | "mcp" | "automation";
   selectedCount: number;
   running: number;
   succeeded: number;
@@ -437,6 +439,21 @@ export type AutomationRunStatus = "running" | "succeeded" | "failed" | "timed_ou
 
 export type AutomationRunLog = { at: string; level: "log" | "warn" | "error"; message: string };
 
+export type AutomationRunExecution = {
+  id: string;
+  tunnelId: string;
+  tunnelDisplayName: string;
+  tenantCode: string;
+  tunnelCode: string;
+  scriptName: string;
+  scriptId: string | null;
+  scriptVersion: number | null;
+  status: string;
+  exitCode: number | null;
+  elapsedMs: number | null;
+  createdAt: string;
+};
+
 export type AutomationRunPrompt = {
   id: string;
   channelKey: string;
@@ -470,6 +487,8 @@ export type AutomationRun = {
   logs: AutomationRunLog[];
   // Questions this run asked in chat, with the button that was pressed.
   prompts: AutomationRunPrompt[];
+  // Script executions this run dispatched on tunnels.
+  executions: AutomationRunExecution[];
   error: string | null;
   startedAt: string;
   finishedAt: string | null;

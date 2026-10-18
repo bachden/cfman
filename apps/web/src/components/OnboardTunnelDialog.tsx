@@ -57,7 +57,7 @@ export function OnboardTunnelDialog({ open, onClose }: { open: boolean; onClose:
         queryClient.invalidateQueries({ queryKey: ["tenant-codes"] })
       ]);
       toast.success("Tunnel ready for installation");
-      openTunnelDrawer(tunnel.id, "overall", enrollment.id);
+      openTunnelDrawer(tunnel.id, "overall", { enrollmentId: enrollment.id });
       reset();
       onClose();
     },

@@ -9,7 +9,7 @@ const ChannelDrawer = lazy(() => import("./ChannelDrawer").then((module) => ({ d
 
 const DRAWER_DEFAULT_WIDTH = 1080;
 
-type TunnelDrawerEntry = { key: number; tunnelId: string; tab: TunnelDrawerTab; enrollmentId: string | undefined; width: number; openSeq: number };
+type TunnelDrawerEntry = { key: number; tunnelId: string; tab: TunnelDrawerTab; enrollmentId: string | undefined; executionId: string | undefined; width: number; openSeq: number };
 type ScriptDrawerEntry = { key: number; scriptId: string; version: number | null; bulkRunId: string | null; width: number; openSeq: number };
 type AutomationRuleDrawerEntry = { key: number; ruleId: string | null; width: number };
 type ChannelDrawerEntry = { key: number; channelId: string | null; width: number };
@@ -25,10 +25,18 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
   const openSeq = useRef(0);
 
   const api = useMemo(() => ({
-    openTunnelDrawer: (tunnelId: string, tab: TunnelDrawerTab = "overall", enrollmentId?: string) => {
+    openTunnelDrawer: (tunnelId: string, tab: TunnelDrawerTab = "overall", options?: { enrollmentId?: string; executionId?: string }) => {
       openSeq.current += 1;
       const seq = openSeq.current;
-      setTunnelDrawers((current) => [...current, { key: seq, tunnelId, tab, enrollmentId, width: DRAWER_DEFAULT_WIDTH, openSeq: seq }]);
+      setTunnelDrawers((current) => [...current, {
+        key: seq,
+        tunnelId,
+        tab,
+        enrollmentId: options?.enrollmentId,
+        executionId: options?.executionId,
+        width: DRAWER_DEFAULT_WIDTH,
+        openSeq: seq
+      }]);
     },
     openScriptDrawer: (scriptId: string, version: number | null = null, options?: { bulkRunId?: string | undefined }) => {
       openSeq.current += 1;
@@ -60,6 +68,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
             tunnelId={entry.tunnelId}
             tab={entry.tab}
             initialExpandEnrollmentId={entry.enrollmentId ?? null}
+            initialExecutionId={entry.executionId ?? null}
             openSeq={entry.openSeq}
             onTabChange={(tab) => setTunnelDrawers((current) => current.map((item) => (item.key === entry.key ? { ...item, tab } : item)))}
             onClose={() => setTunnelDrawers((current) => current.filter((item) => item.key !== entry.key))}

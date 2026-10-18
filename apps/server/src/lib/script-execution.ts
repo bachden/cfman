@@ -23,6 +23,9 @@ export type ExecuteScriptOnTunnelInput = {
   argumentBindings?: ArgumentBindings | undefined;
   requestedBy: string | null;
   requestedVia: "web" | "mcp" | "automation";
+  // The automation run this execution belongs to, when a rule script asked
+  // for it.
+  automationRunId?: string | null | undefined;
 };
 
 export type ExecuteScriptOnTunnelResult = {
@@ -135,7 +138,8 @@ export async function executeScriptOnTunnel(input: ExecuteScriptOnTunnelInput): 
     environmentVariables: argumentValues,
     argumentSources,
     inlineArguments: scriptType === "inline" ? scriptArguments : undefined,
-    requestedVia: input.requestedVia
+    requestedVia: input.requestedVia,
+    automationRunId: input.automationRunId ?? null
   });
   try {
     const result = await executeTunnelScript(tunnelId, dispatchedScript, resolvedTimeoutMs, executionHandle);

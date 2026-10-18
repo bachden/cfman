@@ -21,7 +21,7 @@ import { StatusBadge, activeEnrollmentPlatform, cfmanSelfPublication, isCfmanSel
 
 export type { TunnelDrawerTab };
 
-export function TunnelDrawer({ tunnelId, tab, initialExpandEnrollmentId, openSeq, onTabChange, onClose, width, onResize }: { tunnelId: string | null; tab: TunnelDrawerTab; initialExpandEnrollmentId?: string | null | undefined; openSeq: number; onTabChange: (tab: TunnelDrawerTab) => void; onClose: () => void; width: number; onResize: (width: number) => void }) {
+export function TunnelDrawer({ tunnelId, tab, initialExpandEnrollmentId, initialExecutionId, openSeq, onTabChange, onClose, width, onResize }: { tunnelId: string | null; tab: TunnelDrawerTab; initialExpandEnrollmentId?: string | null | undefined; initialExecutionId?: string | null | undefined; openSeq: number; onTabChange: (tab: TunnelDrawerTab) => void; onClose: () => void; width: number; onResize: (width: number) => void }) {
   const queryClient = useQueryClient();
   const [enrollmentPage, setEnrollmentPage] = useState(1);
   const [autoExpandEnrollmentId, setAutoExpandEnrollmentId] = useState<string | null>(null);
@@ -278,7 +278,7 @@ export function TunnelDrawer({ tunnelId, tab, initialExpandEnrollmentId, openSeq
             {currentTunnel.sshLastError && <div className="inline-alert">{currentTunnel.sshLastError}</div>}
           </section>}
           {!drawerHostPlatform && <div className="inline-note"><ShieldCheck size={15} />Remote desktop or SSH access appears here automatically once a Windows or Linux enrollment finishes installing.</div>}
-          {currentTunnel.commandAgent ? <CommandExecutionPanel tunnel={currentTunnel} /> : <div className="inline-alert">This tunnel does not have a command agent endpoint.</div>}
+          {currentTunnel.commandAgent ? <CommandExecutionPanel tunnel={currentTunnel} focusExecutionId={initialExecutionId ?? null} /> : <div className="inline-alert">This tunnel does not have a command agent endpoint.</div>}
         </div>}
       </div>}
     </SideDrawer>
@@ -609,7 +609,7 @@ function ArgumentSummary({ argumentsList, data, loading, error }: { argumentsLis
   return <div className="argument-summary-hint">{argumentsList.length} argument{argumentsList.length === 1 ? "" : "s"} declared{requiredNames.length ? ` (required: ${requiredNames.join(", ")})` : ""} · {variableCount} variable{variableCount === 1 ? "" : "s"} available to map · configure on Execute</div>;
 }
 
-function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
+function CommandExecutionPanel({ tunnel, focusExecutionId }: { tunnel: Tunnel; focusExecutionId?: string | null }) {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const { openScriptDrawer } = useDrawers();
@@ -626,7 +626,12 @@ function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
   const [historySearch, setHistorySearch] = useState("");
   const [historyFrom, setHistoryFrom] = useState("");
   const [historyTo, setHistoryTo] = useState("");
-  const [expandedExecutionId, setExpandedExecutionId] = useState<string | null>(null);
+  const [expandedExecutionId, setExpandedExecutionId] = useState<string | null>(focusExecutionId ?? null);
+  // A link from elsewhere (an automation run) points at one execution, which
+  // may sit on any page of the history behind any filter; narrowing the list
+  // to that execution is what makes the link land, and clearing the chip
+  // brings the whole history back.
+  const [focusedExecutionId, setFocusedExecutionId] = useState<string | null>(focusExecutionId ?? null);
   const [expandLatestAfterExecution, setExpandLatestAfterExecution] = useState(false);
   const [quickCreateOpen, setQuickCreateOpen] = useState(false);
   const [quickName, setQuickName] = useState("");
@@ -640,11 +645,12 @@ function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
   const hostPlatform = activeEnrollmentPlatform(tunnel);
   const historyPageSize = 10;
   const historyParams = new URLSearchParams({ page: String(historyPage), pageSize: String(historyPageSize) });
+  if (focusedExecutionId) historyParams.set("executionId", focusedExecutionId);
   if (historySearch.trim()) historyParams.set("search", historySearch.trim());
   if (historyFrom) historyParams.set("from", new Date(historyFrom).toISOString());
   if (historyTo) historyParams.set("to", new Date(historyTo).toISOString());
   const { data: executionData } = useQuery({
-    queryKey: ["command-executions", tunnel.id, historySearch.trim(), historyFrom, historyTo, historyPage, historyPageSize],
+    queryKey: ["command-executions", tunnel.id, focusedExecutionId, historySearch.trim(), historyFrom, historyTo, historyPage, historyPageSize],
     queryFn: () => api.get<CommandExecutionPage>(`/api/tunnels/${tunnel.id}/command-executions?${historyParams.toString()}`),
     refetchInterval: (query) => query.state.data?.summary && (query.state.data.summary.scheduled > 0 || query.state.data.summary.running > 0) ? 2000 : false
   });
@@ -699,6 +705,12 @@ function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
     setHistoryPage(1);
     setExpandedExecutionId(null);
   }, [historySearch, historyFrom, historyTo]);
+  // Declared after the two effects above because both clear the expansion on
+  // mount: an execution opened by link has to end up expanded, not collapsed
+  // by whichever effect ran last.
+  useEffect(() => {
+    if (focusedExecutionId) setExpandedExecutionId(focusedExecutionId);
+  }, [focusedExecutionId]);
   const openQuickCreate = () => {
     if (!hostPlatform) return;
     setQuickName("");
@@ -818,7 +830,7 @@ function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
         </div>}
         <div className="command-execution-controls"><ArgumentSummary argumentsList={executionMode === "saved" ? resolvedVariableData?.arguments ?? [] : inlineArguments} data={resolvedVariableData} loading={variablesLoading} error={variablesError} /><button className="button button-primary command-execute-button" type="button" disabled={!canExecute} onClick={() => { setArgumentBindings({}); setExecuteConfirmOpen(true); }}><TerminalSquare size={15} />Execute script</button></div>
       </>}
-      <div className="command-execution-history"><header><h4>Execution history</h4><div className="command-history-head-actions"><ExecutionStatsSummary stats={historySummary} /><span>{historyPagination?.total ?? 0} run{historyPagination?.total === 1 ? "" : "s"}</span><button className="icon-button" type="button" title="Refresh execution history" aria-label="Refresh execution history" disabled={refreshHistory.isPending} onClick={() => refreshHistory.mutate()}><RefreshCw size={14} className={refreshHistory.isPending ? "spin-icon" : undefined} /></button></div></header><div className="execution-history-filters"><label className="execution-history-search"><Search size={14} /><input type="search" value={historySearch} onChange={(event) => setHistorySearch(event.target.value)} placeholder="Search script, description, tunnel, tenant, or code" aria-label="Search tunnel execution history" /></label><label><span>From</span><input type="datetime-local" step="60" value={historyFrom} onChange={(event) => setHistoryFrom(event.target.value)} aria-label="Filter tunnel execution history from time" /></label><label><span>To</span><input type="datetime-local" step="60" value={historyTo} onChange={(event) => setHistoryTo(event.target.value)} aria-label="Filter tunnel execution history to time" /></label></div>{executions.length ? executions.map((execution: TunnelCommandExecution) => {
+      <div className="command-execution-history"><header><h4>Execution history</h4><div className="command-history-head-actions"><ExecutionStatsSummary stats={historySummary} /><span>{historyPagination?.total ?? 0} run{historyPagination?.total === 1 ? "" : "s"}</span><button className="icon-button" type="button" title="Refresh execution history" aria-label="Refresh execution history" disabled={refreshHistory.isPending} onClick={() => refreshHistory.mutate()}><RefreshCw size={14} className={refreshHistory.isPending ? "spin-icon" : undefined} /></button></div></header>{focusedExecutionId && <div className="execution-focus-note"><span>Showing one execution opened from an automation run.</span><button className="button button-secondary button-small" type="button" onClick={() => { setFocusedExecutionId(null); setHistoryPage(1); }}>Show full history</button></div>}<div className="execution-history-filters"><label className="execution-history-search"><Search size={14} /><input type="search" value={historySearch} onChange={(event) => setHistorySearch(event.target.value)} placeholder="Search script, description, tunnel, tenant, or code" aria-label="Search tunnel execution history" /></label><label><span>From</span><input type="datetime-local" step="60" value={historyFrom} onChange={(event) => setHistoryFrom(event.target.value)} aria-label="Filter tunnel execution history from time" /></label><label><span>To</span><input type="datetime-local" step="60" value={historyTo} onChange={(event) => setHistoryTo(event.target.value)} aria-label="Filter tunnel execution history to time" /></label></div>{executions.length ? executions.map((execution: TunnelCommandExecution) => {
         const enrollment = execution.enrollmentId ? enrollmentById.get(execution.enrollmentId) : undefined;
         const environment = enrollment ? enrollmentEnvironment(enrollment) : "Enrollment unavailable";
         const computerName = enrollment ? enrollmentComputerName(enrollment) : "Enrollment unavailable";
@@ -830,10 +842,11 @@ function CommandExecutionPanel({ tunnel }: { tunnel: Tunnel }) {
         const isInline = execution.scriptType === "inline" && !execution.savedScriptId;
         const isBulk = Boolean(execution.bulkExecutionId);
         const isAi = execution.requestedVia === "mcp";
+        const isAutomation = execution.requestedVia === "automation";
         const isSaving = saveInlineExecution.isPending && saveInlineExecution.variables?.id === execution.id;
         const executionLanguage = execution.language ?? (execution.platform === "windows" ? "powershell" : "bash");
         const executionTime = execution.startedAt ?? execution.createdAt;
-        return <details className={`command-execution command-execution-${execution.status}`} key={execution.id} open={expandedExecutionId === execution.id} onToggle={(event) => { if (event.currentTarget.open) setExpandedExecutionId(execution.id); else if (expandedExecutionId === execution.id) setExpandedExecutionId(null); }}><summary><span className="command-execution-summary-main"><StatusBadge status={execution.status} label={statusLabel} />{isBulk && <span className="command-execution-source-tag">bulk</span>}{isAi && <span className="command-execution-source-tag">AI</span>}<span className="command-execution-script-identity">{isInline ? <><span className="command-execution-source-tag">inline</span><strong className="command-execution-inline-name">{inlineName}</strong></> : managedScriptId ? <button className="command-execution-script-link" type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); openScriptDrawer(managedScriptId, managedVersion); }}>{scriptLabel}</button> : <strong>{scriptLabel}</strong>}</span><span className="host-identity" title={environment}><HostPlatformIcon environment={enrollment?.environment} platform={enrollment?.platform} osName={enrollment?.hostInfo.osName} /><code>{computerName}</code></span></span><span className="command-execution-timing"><time>{new Date(executionTime).toLocaleString()}</time><code>{execution.elapsedMs !== null ? `${execution.elapsedMs} ms` : execution.status}</code></span></summary>{expandedExecutionId === execution.id && <div className="command-execution-body">{(isInline || (isBulk && managedScriptId && execution.bulkExecutionId)) && <div className="command-execution-actions">{isInline && <button className="button button-secondary button-small" type="button" disabled={isSaving} onClick={() => saveInlineExecution.mutate(execution)}><Save size={14} />{isSaving ? "Saving..." : "Save script"}</button>}{isBulk && managedScriptId && execution.bulkExecutionId && <button className="button button-secondary button-small" type="button" onClick={() => openScriptDrawer(managedScriptId, managedVersion, { bulkRunId: execution.bulkExecutionId! })}><Layers3 size={14} />Open bulk run details</button>}</div>}<ScriptEditor value={execution.script} language={executionLanguage} height="200px" readOnly compactLineNumberGutter /><ExecutionLog tunnelId={tunnel.id} execution={execution} /></div>}</details>;
+        return <details className={`command-execution command-execution-${execution.status}`} key={execution.id} open={expandedExecutionId === execution.id} onToggle={(event) => { if (event.currentTarget.open) setExpandedExecutionId(execution.id); else if (expandedExecutionId === execution.id) setExpandedExecutionId(null); }}><summary><span className="command-execution-summary-main"><StatusBadge status={execution.status} label={statusLabel} />{isBulk && <span className="command-execution-source-tag">bulk</span>}{isAi && <span className="command-execution-source-tag">AI</span>}{isAutomation && <span className="command-execution-source-tag">automation</span>}<span className="command-execution-script-identity">{isInline ? <><span className="command-execution-source-tag">inline</span><strong className="command-execution-inline-name">{inlineName}</strong></> : managedScriptId ? <button className="command-execution-script-link" type="button" onClick={(event) => { event.preventDefault(); event.stopPropagation(); openScriptDrawer(managedScriptId, managedVersion); }}>{scriptLabel}</button> : <strong>{scriptLabel}</strong>}</span><span className="host-identity" title={environment}><HostPlatformIcon environment={enrollment?.environment} platform={enrollment?.platform} osName={enrollment?.hostInfo.osName} /><code>{computerName}</code></span></span><span className="command-execution-timing"><time>{new Date(executionTime).toLocaleString()}</time><code>{execution.elapsedMs !== null ? `${execution.elapsedMs} ms` : execution.status}</code></span></summary>{expandedExecutionId === execution.id && <div className="command-execution-body">{(isInline || (isBulk && managedScriptId && execution.bulkExecutionId)) && <div className="command-execution-actions">{isInline && <button className="button button-secondary button-small" type="button" disabled={isSaving} onClick={() => saveInlineExecution.mutate(execution)}><Save size={14} />{isSaving ? "Saving..." : "Save script"}</button>}{isBulk && managedScriptId && execution.bulkExecutionId && <button className="button button-secondary button-small" type="button" onClick={() => openScriptDrawer(managedScriptId, managedVersion, { bulkRunId: execution.bulkExecutionId! })}><Layers3 size={14} />Open bulk run details</button>}</div>}<ScriptEditor value={execution.script} language={executionLanguage} height="200px" readOnly compactLineNumberGutter /><ExecutionLog tunnelId={tunnel.id} execution={execution} /></div>}</details>;
       }) : <div className="quiet-empty">No scripts have been executed for this tunnel.</div>}{historyPagination && historyPagination.totalPages > 1 && <div className="command-history-pagination"><button className="icon-button" type="button" title="Previous execution page" aria-label="Previous execution page" disabled={historyPagination.page <= 1} onClick={() => { setExpandedExecutionId(null); setHistoryPage((page) => Math.max(1, page - 1)); }}><ChevronLeft size={15} /></button><span>Page {historyPagination.page} of {historyPagination.totalPages}</span><button className="icon-button" type="button" title="Next execution page" aria-label="Next execution page" disabled={historyPagination.page >= historyPagination.totalPages} onClick={() => { setExpandedExecutionId(null); setHistoryPage((page) => page + 1); }}><ChevronRight size={15} /></button></div>}</div>
     </section>
     <Modal open={quickCreateOpen} title="Create new script" onClose={() => setQuickCreateOpen(false)} width="wide">

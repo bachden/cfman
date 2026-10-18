@@ -59,7 +59,22 @@ const runColumns = `run.id, run.rule_id AS "ruleId", run.sequence, run.trigger_s
            FROM notification_prompts p
            JOIN notification_channels c ON c.id = p.channel_id
           WHERE p.automation_run_id = run.id
-       ), '[]'::jsonb) AS prompts`;
+       ), '[]'::jsonb) AS prompts,
+       COALESCE((
+         SELECT jsonb_agg(jsonb_build_object(
+           'id', ce.id, 'tunnelId', ce.tunnel_id, 'tunnelDisplayName', t.display_name,
+           'tenantCode', t.tenant_code, 'tunnelCode', t.tunnel_code,
+           'scriptName', COALESCE(ms.name, ce.script_name, 'Inline script'),
+           'scriptId', ms.id, 'scriptVersion', COALESCE(ce.script_version_number, sv.version),
+           'status', ce.status, 'exitCode', ce.exit_code, 'elapsedMs', ce.elapsed_ms,
+           'createdAt', ce.created_at
+         ) ORDER BY ce.created_at)
+           FROM tunnel_command_executions ce
+           JOIN tunnels t ON t.id = ce.tunnel_id
+           LEFT JOIN managed_script_versions sv ON sv.id = ce.script_version_id
+           LEFT JOIN managed_scripts ms ON ms.id = sv.script_id
+          WHERE ce.automation_run_id = run.id
+       ), '[]'::jsonb) AS executions`;
 
 export async function automationRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/automation/capabilities", { preHandler: requireAuth }, async () => ({

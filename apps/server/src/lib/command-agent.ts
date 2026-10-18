@@ -115,6 +115,9 @@ export async function createCommandExecution(
     inlineArguments?: unknown[] | undefined;
     bulkExecutionId?: string | null;
     requestedVia?: "web" | "mcp" | "automation";
+    // Set when a rule script dispatched this execution, so the run that did it
+    // can list it later.
+    automationRunId?: string | null;
   }
 ): Promise<CommandExecutionHandle> {
   const reportToken = createOpaqueToken();
@@ -123,9 +126,9 @@ export async function createCommandExecution(
        tunnel_id, enrollment_id, script_version_id, requested_by, script, timeout_ms,
        script_type, script_name, script_platform, script_language, script_version_number,
        report_token_hash, bulk_execution_id, environment_variables, argument_sources, inline_arguments,
-       requested_via
+       requested_via, automation_run_id
      )
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
      RETURNING id`,
     [
       input.tunnelId,
@@ -144,7 +147,8 @@ export async function createCommandExecution(
       input.environmentVariables ?? {},
       input.argumentSources ?? {},
       JSON.stringify(input.inlineArguments ?? []),
-      input.requestedVia ?? "web"
+      input.requestedVia ?? "web",
+      input.automationRunId ?? null
     ]
   );
   return { executionId: result.rows[0].id as string, reportToken };
