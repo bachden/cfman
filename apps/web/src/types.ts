@@ -237,8 +237,13 @@ export type TunnelCommandExecution = {
   error: string | null;
   requestedBy: string | null;
   requestedVia: "web" | "mcp" | "automation";
-  // Set when a rule script dispatched this execution.
+  // Set when a rule script dispatched this execution: enough to open that
+  // rule on the very run that did it.
   automationRunId?: string | null;
+  automationRunSequence?: number | null;
+  automationRuleId?: string | null;
+  automationRuleKey?: string | null;
+  automationRuleName?: string | null;
   bulkExecutionId?: string | null;
   environmentVariables: ExecutionVariables;
   argumentSources: Record<string, ArgumentValueSource>;

@@ -929,6 +929,12 @@ tbody tr:hover td { background: #fbfcfb; }
 .automation-channel-type { display: flex; align-items: center; gap: 7px; }
 .automation-buttons-chip { padding: 1px 7px; color: var(--green); background: var(--green-soft); border-radius: 20px; font-size: 8px; font-weight: 750; text-transform: uppercase; letter-spacing: .03em; }
 .execution-focus-note { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; padding: 7px 11px; color: #7a5a1f; background: #fdf6e7; border: 1px solid #efe0bf; border-radius: 5px; font-size: 10px; }
+.automation-run-activity { display: flex; flex-direction: column; gap: 9px; margin: 0; padding: 0; list-style: none; }
+.automation-run-activity li { display: grid; grid-template-columns: auto auto minmax(0, 1fr); align-items: center; gap: 10px; }
+.automation-run-activity > li > time { color: var(--muted); font-size: 9px; font-variant-numeric: tabular-nums; }
+.automation-run-activity-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.automation-run-activity-title { display: flex; align-items: center; flex-wrap: wrap; gap: 5px; color: #44524a; font-size: 10px; }
+.automation-run-activity-title strong { color: var(--ink); }
 .automation-run-executions { display: flex; flex-direction: column; gap: 8px; margin: 0; padding: 0; list-style: none; }
 .automation-run-executions li { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 10px; }
 .automation-run-execution-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; align-items: flex-start; }

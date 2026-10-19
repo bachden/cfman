@@ -214,6 +214,8 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
       LEFT JOIN managed_script_versions saved_version ON saved_version.id = ce.saved_script_version_id
       LEFT JOIN managed_scripts executed_script ON executed_script.id = executed_version.script_id
       LEFT JOIN managed_scripts saved_script ON saved_script.id = saved_version.script_id
+      LEFT JOIN automation_runs automation_run ON automation_run.id = ce.automation_run_id
+      LEFT JOIN automation_rules automation_rule ON automation_rule.id = automation_run.rule_id
      WHERE (executed_version.script_id = $1 OR saved_version.script_id = $1)
        AND ce.bulk_execution_id IS NULL
        AND ($2::int IS NULL OR COALESCE(executed_version.version, saved_version.version) = $2)`;
@@ -256,7 +258,10 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                 ce.script, ce.environment_variables AS "environmentVariables", ce.argument_sources AS "argumentSources", COALESCE(executed_version.arguments, ce.inline_arguments) AS "scriptArguments", ce.timeout_ms AS "timeoutMs", ce.status, ce.task_id AS "taskId", ce.process_id AS "processId",
                 ce.created_at AS "createdAt", ce.started_at AS "startedAt", ce.finished_at AS "finishedAt",
                 ce.elapsed_ms AS "elapsedMs", ce.exit_code AS "exitCode",
-                ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy", ce.requested_via AS "requestedVia"
+                ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy", ce.requested_via AS "requestedVia",
+                ce.automation_run_id AS "automationRunId", automation_run.sequence AS "automationRunSequence",
+                automation_rule.id AS "automationRuleId", automation_rule.key AS "automationRuleKey",
+                automation_rule.name AS "automationRuleName"
          ${joins}
          ${where}
          ORDER BY ce.created_at DESC, ce.id DESC
@@ -361,6 +366,11 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
                  'savedScriptVersionId', ce.saved_script_version_id,
                  'savedAt', ce.saved_at,
                  'bulkExecutionId', ce.bulk_execution_id,
+                 'automationRunId', ce.automation_run_id,
+                 'automationRunSequence', automation_run.sequence,
+                 'automationRuleId', automation_rule.id,
+                 'automationRuleKey', automation_rule.key,
+                 'automationRuleName', automation_rule.name,
                  'anchorScriptVersionId', COALESCE(executed_version.id, saved_version.id),
                  'scriptVersion', COALESCE(executed_version.version, saved_version.version),
                  'scriptName', COALESCE(executed_script.name, saved_script.name, ce.script_name, 'Inline script'),
@@ -396,6 +406,8 @@ export async function scriptRoutes(app: FastifyInstance): Promise<void> {
         LEFT JOIN managed_script_versions saved_version ON saved_version.id = ce.saved_script_version_id
         LEFT JOIN managed_scripts executed_script ON executed_script.id = executed_version.script_id
         LEFT JOIN managed_scripts saved_script ON saved_script.id = saved_version.script_id
+        LEFT JOIN automation_runs automation_run ON automation_run.id = ce.automation_run_id
+        LEFT JOIN automation_rules automation_rule ON automation_rule.id = automation_run.rule_id
        WHERE ${regularWhere}
       UNION ALL
       SELECT jsonb_build_object(

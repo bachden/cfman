@@ -11,7 +11,7 @@ const DRAWER_DEFAULT_WIDTH = 1080;
 
 type TunnelDrawerEntry = { key: number; tunnelId: string; tab: TunnelDrawerTab; enrollmentId: string | undefined; executionId: string | undefined; width: number; openSeq: number };
 type ScriptDrawerEntry = { key: number; scriptId: string; version: number | null; bulkRunId: string | null; width: number; openSeq: number };
-type AutomationRuleDrawerEntry = { key: number; ruleId: string | null; width: number };
+type AutomationRuleDrawerEntry = { key: number; ruleId: string | null; runId: string | undefined; width: number };
 type ChannelDrawerEntry = { key: number; channelId: string | null; width: number };
 
 // Every open call pushes a brand new stacked drawer instance (keyed by a fresh sequence number),
@@ -25,7 +25,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
   const openSeq = useRef(0);
 
   const api = useMemo(() => ({
-    openTunnelDrawer: (tunnelId: string, tab: TunnelDrawerTab = "overall", options?: { enrollmentId?: string; executionId?: string }) => {
+    openTunnelDrawer: (tunnelId: string, tab: TunnelDrawerTab = "overall", options?: { enrollmentId?: string | undefined; executionId?: string | undefined }) => {
       openSeq.current += 1;
       const seq = openSeq.current;
       setTunnelDrawers((current) => [...current, {
@@ -46,10 +46,10 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
         { key: seq, scriptId, version, bulkRunId: options?.bulkRunId ?? null, width: DRAWER_DEFAULT_WIDTH, openSeq: seq }
       ]);
     },
-    openAutomationRuleDrawer: (ruleId: string | null) => {
+    openAutomationRuleDrawer: (ruleId: string | null, options?: { runId?: string | undefined }) => {
       openSeq.current += 1;
       const seq = openSeq.current;
-      setAutomationRuleDrawers((current) => [...current, { key: seq, ruleId, width: DRAWER_DEFAULT_WIDTH }]);
+      setAutomationRuleDrawers((current) => [...current, { key: seq, ruleId, runId: options?.runId, width: DRAWER_DEFAULT_WIDTH }]);
     },
     openChannelDrawer: (channelId: string | null) => {
       openSeq.current += 1;
@@ -93,6 +93,7 @@ export function DrawerProvider({ children }: { children: ReactNode }) {
             <AutomationRuleDrawer
               key={entry.key}
               ruleId={entry.ruleId}
+              initialRunId={entry.runId ?? null}
               onClose={() => setAutomationRuleDrawers((current) => current.filter((item) => item.key !== entry.key))}
               width={entry.width}
               onResize={(width) => setAutomationRuleDrawers((current) => current.map((item) => (item.key === entry.key ? { ...item, width } : item)))}

@@ -34,6 +34,20 @@ await cfman.sendMessage("ops-alerts", \`\${rule.name}: \${offline.map((tunnel) =
 return cfman.json({ total: tunnels.length, offline: offline.map((tunnel) => tunnel.displayName) });
 `;
 
+type RunActivityEntry =
+  | { kind: "execution"; key: string; at: string; execution: AutomationRun["executions"][number] }
+  | { kind: "prompt"; key: string; at: string; prompt: AutomationRun["prompts"][number] };
+
+// One trace of what the run did, oldest first: an execution and a question are
+// steps of the same script, so reading them apart hides the order they
+// happened in.
+function runActivity(run: AutomationRun): RunActivityEntry[] {
+  return [
+    ...run.executions.map((execution) => ({ kind: "execution" as const, key: `execution-${execution.id}`, at: execution.createdAt, execution })),
+    ...run.prompts.map((prompt) => ({ kind: "prompt" as const, key: `prompt-${prompt.id}`, at: prompt.createdAt, prompt }))
+  ].sort((left, right) => new Date(left.at).getTime() - new Date(right.at).getTime());
+}
+
 function formatTimestamp(value: string | null | undefined): string {
   return value ? new Date(value).toLocaleString() : "—";
 }
@@ -55,11 +69,13 @@ type RuleForm = ReturnType<typeof emptyRuleForm>;
 
 export function AutomationRuleDrawer({
   ruleId,
+  initialRunId,
   onClose,
   width,
   onResize
 }: {
   ruleId: string | null;
+  initialRunId?: string | null | undefined;
   onClose: () => void;
   width: number;
   onResize: (width: number) => void;
@@ -72,8 +88,11 @@ export function AutomationRuleDrawer({
   const [loadedRuleId, setLoadedRuleId] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [runPage, setRunPage] = useState(1);
-  const [expandedRunId, setExpandedRunId] = useState<string | null>(null);
+  const [expandedRunId, setExpandedRunId] = useState<string | null>(initialRunId ?? null);
   const [selectedVersion, setSelectedVersion] = useState<number | null>(null);
+  // An execution links back to the run that dispatched it; narrowing the
+  // history to that run is what makes the link land regardless of paging.
+  const [focusedRunId, setFocusedRunId] = useState<string | null>(initialRunId ?? null);
   const [scheduleMode, setScheduleMode] = useState<"builder" | "expression">("builder");
   const [builder, setBuilder] = useState<CronBuilderState>(() => parseCron(emptyRuleForm("UTC").cron) ?? DEFAULT_CRON_BUILDER);
 
@@ -120,8 +139,8 @@ export function AutomationRuleDrawer({
   });
 
   const { data: runData } = useQuery({
-    queryKey: ["automation", "runs", ruleId, runPage],
-    queryFn: () => api.get<{ runs: AutomationRun[]; pagination: { page: number; totalPages: number; total: number } }>(`/api/automation/rules/${ruleId}/runs?page=${runPage}&pageSize=10`),
+    queryKey: ["automation", "runs", ruleId, runPage, focusedRunId],
+    queryFn: () => api.get<{ runs: AutomationRun[]; pagination: { page: number; totalPages: number; total: number } }>(`/api/automation/rules/${ruleId}/runs?page=${runPage}&pageSize=10${focusedRunId ? `&runId=${focusedRunId}` : ""}`),
     enabled: Boolean(ruleId),
     refetchInterval: 15_000
   });
@@ -329,6 +348,7 @@ export function AutomationRuleDrawer({
 
       {!isNew && <section className="automation-section">
         <header><h3>Run history</h3><span>{runData?.pagination.total ?? 0} run(s)</span></header>
+        {focusedRunId && <div className="execution-focus-note"><span>Showing one run opened from a script execution.</span><button className="button button-secondary button-small" type="button" onClick={() => { setFocusedRunId(null); setRunPage(1); }}>Show full history</button></div>}
         <div className="table-scroll"><table><thead><tr><th>Run</th><th>Started</th><th>Trigger</th><th>Version</th><th>Status</th><th>Result</th><th>Elapsed</th></tr></thead><tbody>
           {(runData?.runs ?? []).length === 0
             ? <tr><td colSpan={7}><div className="quiet-empty">This rule has not run yet.</div></td></tr>
@@ -349,28 +369,37 @@ export function AutomationRuleDrawer({
                     <header><strong>Output</strong><code>{item.outputMimeType ?? "—"}</code>{item.outputTruncated && <span>truncated</span>}</header>
                     <pre>{item.outputBody || "(empty)"}</pre>
                   </div>
-                  {item.executions.length > 0 && <div className="automation-run-block">
-                    <header><strong>Script executions</strong><span>{item.executions.length} on {new Set(item.executions.map((execution) => execution.tunnelId)).size} tunnel(s)</span></header>
-                    <ul className="automation-run-executions">{item.executions.map((execution) => <li key={execution.id}>
-                      <StatusBadge status={execution.status} />
-                      <div className="automation-run-execution-main">
-                        <button
-                          type="button"
-                          className="automation-run-version-link"
-                          title="Open this execution's log in the tunnel drawer"
-                          onClick={(event) => { event.stopPropagation(); openTunnelDrawer(execution.tunnelId, "connect", { executionId: execution.id }); }}
-                        >{execution.tunnelDisplayName}</button>
-                        <span className="automation-run-prompt-meta">{execution.tenantCode} / {execution.tunnelCode} · {execution.scriptName}{execution.scriptVersion === null ? "" : ` · v${execution.scriptVersion}`}{execution.exitCode === null ? "" : ` · exit ${execution.exitCode}`}{execution.elapsedMs === null ? "" : ` · ${execution.elapsedMs} ms`}</span>
-                      </div>
-                    </li>)}</ul>
-                  </div>}
-                  {item.prompts.length > 0 && <div className="automation-run-block">
-                    <header><strong>Questions asked</strong><span>{item.prompts.length}</span></header>
-                    <ul className="automation-run-prompts">{item.prompts.map((prompt) => <li key={prompt.id}>
-                      <StatusBadge status={prompt.status === "answered" ? "succeeded" : prompt.status === "timed_out" ? "timed_out" : prompt.status === "pending" ? "running" : "failed"} label={prompt.status === "answered" ? prompt.answerLabel ?? "answered" : prompt.status.replaceAll("_", " ")} />
-                      <span className="automation-run-prompt-body">{prompt.body}</span>
-                      <span className="automation-run-prompt-meta">{prompt.channelKey}{prompt.answeredBy ? ` · ${prompt.answeredBy}` : ""}{prompt.error ? ` · ${prompt.error}` : ""}</span>
-                    </li>)}</ul>
+                  {runActivity(item).length > 0 && <div className="automation-run-block">
+                    <header><strong>What the run did</strong><span>{runActivity(item).length} action(s), oldest first</span></header>
+                    <ol className="automation-run-activity">{runActivity(item).map((entry) => <li key={entry.key}>
+                      <time>{new Date(entry.at).toLocaleTimeString()}</time>
+                      {entry.kind === "execution"
+                        ? <>
+                          <StatusBadge status={entry.execution.status} />
+                          <div className="automation-run-activity-main">
+                            <span className="automation-run-activity-title">
+                              Ran <strong>{entry.execution.scriptName}</strong>{entry.execution.scriptVersion === null ? "" : ` · v${entry.execution.scriptVersion}`} on
+                              <button
+                                type="button"
+                                className="automation-run-version-link"
+                                title="Open this execution's log in the tunnel drawer"
+                                onClick={(event) => { event.stopPropagation(); openTunnelDrawer(entry.execution.tunnelId, "connect", { executionId: entry.execution.id }); }}
+                              >{entry.execution.tunnelDisplayName}</button>
+                            </span>
+                            <span className="automation-run-prompt-meta">{entry.execution.tenantCode} / {entry.execution.tunnelCode}{entry.execution.exitCode === null ? "" : ` · exit ${entry.execution.exitCode}`}{entry.execution.elapsedMs === null ? "" : ` · ${entry.execution.elapsedMs} ms`}</span>
+                          </div>
+                        </>
+                        : <>
+                          <StatusBadge
+                            status={entry.prompt.status === "answered" ? "succeeded" : entry.prompt.status === "timed_out" ? "timed_out" : entry.prompt.status === "pending" ? "running" : "failed"}
+                            label={entry.prompt.status === "answered" ? entry.prompt.answerLabel ?? "answered" : entry.prompt.status.replaceAll("_", " ")}
+                          />
+                          <div className="automation-run-activity-main">
+                            <span className="automation-run-activity-title">Asked <strong>{entry.prompt.body}</strong></span>
+                            <span className="automation-run-prompt-meta">{entry.prompt.channelKey}{entry.prompt.answeredBy ? ` · ${entry.prompt.answeredBy}` : ""}{entry.prompt.error ? ` · ${entry.prompt.error}` : ""}</span>
+                          </div>
+                        </>}
+                    </li>)}</ol>
                   </div>}
                   {item.logs.length > 0 && <div className="automation-run-block">
                     <header><strong>Console</strong></header>

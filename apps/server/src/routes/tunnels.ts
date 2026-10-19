@@ -1307,7 +1307,9 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
            LEFT JOIN managed_script_versions sv ON sv.id = ce.script_version_id
            LEFT JOIN managed_scripts ms ON ms.id = sv.script_id
            LEFT JOIN managed_script_versions saved_sv ON saved_sv.id = ce.saved_script_version_id
-           LEFT JOIN managed_scripts saved_ms ON saved_ms.id = saved_sv.script_id`;
+           LEFT JOIN managed_scripts saved_ms ON saved_ms.id = saved_sv.script_id
+           LEFT JOIN automation_runs automation_run ON automation_run.id = ce.automation_run_id
+           LEFT JOIN automation_rules automation_rule ON automation_rule.id = automation_run.rule_id`;
     const limitParameter = values.length + 1;
     const offsetParameter = values.length + 2;
     const [tunnelResult, executionResult, statsResult] = await Promise.all([
@@ -1330,7 +1332,9 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
                 ce.created_at AS "createdAt", ce.started_at AS "startedAt", ce.finished_at AS "finishedAt",
                 ce.elapsed_ms AS "elapsedMs", ce.exit_code AS "exitCode",
                 ce.stdout, ce.stderr, ce.error, u.username AS "requestedBy", ce.requested_via AS "requestedVia",
-                ce.automation_run_id AS "automationRunId"
+                ce.automation_run_id AS "automationRunId", automation_run.sequence AS "automationRunSequence",
+                automation_rule.id AS "automationRuleId", automation_rule.key AS "automationRuleKey",
+                automation_rule.name AS "automationRuleName"
            FROM tunnel_command_executions ce
            JOIN tunnels st ON st.id = ce.tunnel_id
            ${joins}

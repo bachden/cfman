@@ -257,6 +257,9 @@ export async function automationRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/automation/rules/:id/runs", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const query = z.object({
+      // Addresses one run directly, the way an execution links back to the run
+      // that dispatched it, so the link lands whichever page it would be on.
+      runId: z.string().uuid().optional(),
       status: z.enum(["running", "succeeded", "failed", "timed_out"]).optional(),
       page: z.coerce.number().int().min(1).default(1),
       pageSize: z.coerce.number().int().min(5).max(100).default(20)
@@ -265,6 +268,10 @@ export async function automationRoutes(app: FastifyInstance): Promise<void> {
     if (!exists.rowCount) return reply.code(404).send({ error: "Automation rule not found" });
     const values: unknown[] = [id];
     const conditions = ["run.rule_id = $1"];
+    if (query.runId) {
+      values.push(query.runId);
+      conditions.push(`run.id = $${values.length}`);
+    }
     if (query.status) {
       values.push(query.status);
       conditions.push(`run.status = $${values.length}`);

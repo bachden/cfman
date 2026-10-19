@@ -5,10 +5,11 @@ export type TunnelDrawerTab = "overall" | "ingress" | "connect";
 export type DrawerApi = {
   // `executionId` opens the Connect tab on exactly that execution, whichever
   // page of the history it would otherwise be on.
-  openTunnelDrawer: (tunnelId: string, tab?: TunnelDrawerTab, options?: { enrollmentId?: string; executionId?: string }) => void;
+  openTunnelDrawer: (tunnelId: string, tab?: TunnelDrawerTab, options?: { enrollmentId?: string | undefined; executionId?: string | undefined }) => void;
   openScriptDrawer: (scriptId: string, version?: number | null, options?: { bulkRunId?: string | undefined }) => void;
-  // A null id opens the drawer in create mode; both drawers edit in place otherwise.
-  openAutomationRuleDrawer: (ruleId: string | null) => void;
+  // A null id opens the drawer in create mode; both drawers edit in place
+  // otherwise. `runId` opens the rule on exactly that run of its history.
+  openAutomationRuleDrawer: (ruleId: string | null, options?: { runId?: string | undefined }) => void;
   openChannelDrawer: (channelId: string | null) => void;
 };
 
