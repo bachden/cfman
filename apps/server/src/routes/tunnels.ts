@@ -178,7 +178,11 @@ const saveInlineExecutionSchema = z.object({
 
 const deleteTunnelSchema = z.object({
   confirmName: z.string().trim().max(160).optional(),
-  force: z.boolean().default(false)
+  force: z.boolean().default(false),
+  // Finishes a deletion whose Cloudflare side cannot be reached at all - the
+  // zone was removed, typically. Every cleanup failure is then recorded rather
+  // than aborting, so the audit log says what was left behind.
+  ignoreCloudflareCleanupErrors: z.boolean().default(false)
 });
 
 type TunnelDeleteExecutor = Pick<PoolClient, "query">;
@@ -196,6 +200,7 @@ type TunnelDeleteContext = {
   cfAccountId: string | null;
   apiTokenEncrypted: string | null;
   zoneId: string;
+  zoneName: string;
   cfZoneId: string | null;
   activeEnrollmentCount: number;
   activeEnrollmentPlatforms: string | null;
@@ -250,7 +255,7 @@ async function loadTunnelDeleteContext(executor: TunnelDeleteExecutor, tunnelId:
             s.rdp_route_id AS "rdpRouteId", s.rdp_target_id AS "rdpTargetId", s.rdp_vnet_id AS "rdpVnetId",
             s.zone_id AS "zoneId",
             a.id AS "accountRowId", a.provider_mode AS "providerMode", a.cf_account_id AS "cfAccountId",
-            a.api_token_encrypted AS "apiTokenEncrypted", z.cf_zone_id AS "cfZoneId",
+            a.api_token_encrypted AS "apiTokenEncrypted", z.cf_zone_id AS "cfZoneId", z.name AS "zoneName",
             (SELECT count(*)::int FROM enrollments e
               WHERE e.tunnel_id = s.id
                 AND e.status IN ('claimed', 'provisioning', 'ready', 'installed')
@@ -285,7 +290,60 @@ async function loadTunnelDeleteContext(executor: TunnelDeleteExecutor, tunnelId:
   return { ...tunnelResult.rows[0], publications: publicationResult.rows } as TunnelDeleteContext;
 }
 
-function buildTunnelDeletePreflight(context: TunnelDeleteContext): TunnelDeletePreflight {
+// Separated from the DB-only checks because it is the one that costs a round
+// trip to Cloudflare. Credentials merely being present is what this check used
+// to assert, which let cfman green-light a deletion that could not possibly
+// succeed - a zone removed from Cloudflare, or a token whose scope no longer
+// covers it, both fail only once the first DNS record is actually deleted.
+function buildCloudflareCheck(context: TunnelDeleteContext, zoneProbe: ZoneProbe): TunnelDeleteCheck {
+  if (context.providerMode === "mock") {
+    return { id: "cloudflare", label: "Cloudflare cleanup can reach this tunnel's resources", ok: true, detail: "Mock account; nothing is deleted in Cloudflare.", resolution: "No action required." };
+  }
+  if (!context.cfAccountId || !context.cfZoneId || !context.apiTokenEncrypted) {
+    return {
+      id: "cloudflare",
+      label: "Cloudflare cleanup can reach this tunnel's resources",
+      ok: false,
+      detail: "The live account or zone is missing its API credentials.",
+      resolution: "Open Account pool and restore the account token and zone ID before deleting, otherwise Cloudflare resources could be orphaned."
+    };
+  }
+  if (zoneProbe.reachable) {
+    return {
+      id: "cloudflare",
+      label: "Cloudflare cleanup can reach this tunnel's resources",
+      ok: true,
+      detail: `Zone ${context.zoneName} answered, so tunnel-owned DNS and tunnel resources can be cleaned from the live account.`,
+      resolution: "No action required."
+    };
+  }
+  return {
+    id: "cloudflare",
+    label: "Cloudflare cleanup can reach this tunnel's resources",
+    ok: false,
+    detail: `Cloudflare refused a read of zone ${context.zoneName}: ${zoneProbe.reason ?? "unknown error"}.`,
+    // Cloudflare answers a deleted zone and an out-of-scope zone identically,
+    // so cfman states both possibilities instead of picking one: skipping
+    // cleanup on a guess would silently orphan live DNS records in a zone
+    // somebody still owns.
+    resolution: "Either the zone was removed from Cloudflare, or this account's API token no longer covers it - Cloudflare answers both the same way, so cfman cannot tell them apart. If the token lost access, fix it in Account pool and delete normally. If the zone really is gone there is nothing left to clean up: delete with \"leave unreachable Cloudflare resources\" and cfman will record what it skipped in the audit log."
+  };
+}
+
+type ZoneProbe = { reachable: boolean; reason: string | null };
+
+// Probes the tunnel's zone with the account's own token. A tunnel with no
+// Cloudflare identity has nothing to probe, and a failure to probe is itself
+// the answer, so this never throws.
+async function probeTunnelZone(context: TunnelDeleteContext): Promise<ZoneProbe> {
+  if (context.providerMode === "mock" || !context.cfAccountId || !context.cfZoneId || !context.apiTokenEncrypted) {
+    return { reachable: true, reason: null };
+  }
+  const client = new CloudflareClient(context.cfAccountId, decryptSecret(context.apiTokenEncrypted), context.providerMode);
+  return client.probeZone(context.cfZoneId);
+}
+
+function buildTunnelDeletePreflight(context: TunnelDeleteContext, zoneProbe: ZoneProbe): TunnelDeletePreflight {
   const activeTunnel = Boolean(context.cfTunnelId && ["healthy", "degraded", "connector_online"].includes(context.cfTunnelStatus));
   const tunnelCheck: TunnelDeleteCheck = {
     id: "tunnel",
@@ -318,16 +376,7 @@ function buildTunnelDeletePreflight(context: TunnelDeleteContext): TunnelDeleteP
       ? "Wait for the command to finish or fail. Force delete removes the local execution history and may interrupt the remote request."
       : "No action required."
   };
-  const cloudflareReady = context.providerMode === "mock" || Boolean(context.cfAccountId && context.cfZoneId && context.apiTokenEncrypted);
-  const cloudflareCheck: TunnelDeleteCheck = {
-    id: "cloudflare",
-    label: "Cloudflare cleanup credentials are available",
-    ok: cloudflareReady,
-    detail: cloudflareReady ? `Tunnel-owned DNS and tunnel resources can be cleaned from the ${context.providerMode} account.` : "The live account or zone is missing its API credentials.",
-    resolution: cloudflareReady
-      ? "No action required."
-      : "Open Account pool and restore the account token and zone ID before deleting, otherwise Cloudflare resources could be orphaned."
-  };
+  const cloudflareCheck = buildCloudflareCheck(context, zoneProbe);
   const checks = [tunnelCheck, enrollmentCheck, commandsCheck, cloudflareCheck];
   return {
     tunnelId: context.id,
@@ -354,33 +403,52 @@ async function cleanupStep<T>(step: string, work: () => Promise<T>): Promise<T> 
   }
 }
 
-async function cleanupTunnelResources(context: TunnelDeleteContext): Promise<void> {
+type SkippedCleanup = { step: string; reason: string };
+
+async function cleanupTunnelResources(
+  context: TunnelDeleteContext,
+  options: { ignoreErrors: boolean } = { ignoreErrors: false }
+): Promise<SkippedCleanup[]> {
   const client = new CloudflareClient(
     context.cfAccountId ?? context.accountRowId,
     context.apiTokenEncrypted ? decryptSecret(context.apiTokenEncrypted) : "mock",
     context.providerMode
   );
+  // With ignoreErrors the operator has already been shown that Cloudflare
+  // cannot be reached for this tunnel and has accepted that whatever is still
+  // there stays there; each failure is collected so the audit log can say
+  // exactly what was left behind rather than just "forced".
+  const skipped: SkippedCleanup[] = [];
+  const step = async (label: string, work: () => Promise<unknown>): Promise<void> => {
+    try {
+      await cleanupStep(label, work);
+    } catch (error) {
+      if (!options.ignoreErrors) throw error;
+      skipped.push({ step: label, reason: error instanceof Error ? error.message.replace(`${label}: `, "") : String(error) });
+    }
+  };
   if (context.publications.some((publication) => publication.wafRuleId)) {
     // Excludes this tunnel's own routes so the zone's merged WAF rule is
     // rebuilt without them, instead of disabling each route individually.
-    await cleanupStep("zone WAF rule", () =>
+    await step("zone WAF rule", () =>
       reconcileZoneWaf(client, context.zoneId, context.cfZoneId, context.providerMode, { excludeTunnelId: context.id }));
   }
   const deletedDnsRecords = new Set<string>();
   for (const publication of context.publications) {
     if (publication.dnsRecordId && context.cfZoneId && !deletedDnsRecords.has(publication.dnsRecordId)) {
-      await cleanupStep(`DNS record for ${publication.hostname}`, () =>
+      await step(`DNS record for ${publication.hostname}`, () =>
         client.deleteDnsRecord(context.cfZoneId!, publication.dnsRecordId!));
       deletedDnsRecords.add(publication.dnsRecordId);
     }
   }
-  if (context.rdpRouteId) await cleanupStep("RDP tunnel route", () => client.deleteTunnelRoute(context.rdpRouteId!));
-  if (context.rdpTargetId) await cleanupStep("RDP infrastructure target", () => client.deleteInfrastructureTarget(context.rdpTargetId!));
-  if (context.rdpVnetId) await cleanupStep("RDP virtual network", () => client.deleteVirtualNetwork(context.rdpVnetId!));
+  if (context.rdpRouteId) await step("RDP tunnel route", () => client.deleteTunnelRoute(context.rdpRouteId!));
+  if (context.rdpTargetId) await step("RDP infrastructure target", () => client.deleteInfrastructureTarget(context.rdpTargetId!));
+  if (context.rdpVnetId) await step("RDP virtual network", () => client.deleteVirtualNetwork(context.rdpVnetId!));
   if (context.cfTunnelId) {
-    await cleanupStep("tunnel connections", () => client.deleteTunnelConnections(context.cfTunnelId!));
-    await cleanupStep("Cloudflare tunnel", () => client.deleteTunnel(context.cfTunnelId!));
+    await step("tunnel connections", () => client.deleteTunnelConnections(context.cfTunnelId!));
+    await step("Cloudflare tunnel", () => client.deleteTunnel(context.cfTunnelId!));
   }
+  return skipped;
 }
 
 const publicationsJson = `COALESCE((
@@ -1166,7 +1234,7 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const context = await loadTunnelDeleteContext(pool, id);
     if (!context) return reply.code(404).send({ error: "Tunnel not found" });
-    return buildTunnelDeletePreflight(context);
+    return buildTunnelDeletePreflight(context, await probeTunnelZone(context));
   });
 
   app.delete("/api/tunnels/:id", { preHandler: requireAuth }, async (request, reply) => {
@@ -1186,17 +1254,27 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
         await client.query("ROLLBACK");
         return reply.code(404).send({ error: "Tunnel not found" });
       }
-      const preflight = buildTunnelDeletePreflight(context);
+      const preflight = buildTunnelDeletePreflight(context, await probeTunnelZone(context));
       const cloudflareCheck = preflight.checks.find((check) => check.id === "cloudflare");
-      if (!cloudflareCheck?.ok) {
+      const nameConfirmed = body.force && body.confirmName === context.displayName;
+      // Leaving Cloudflare resources behind is never implicit: it needs the
+      // same name confirmation as a forced delete plus its own opt-in, because
+      // an unreachable zone and a token that lost access look identical from
+      // here and only the operator knows which one it is.
+      if (!cloudflareCheck?.ok && !(body.ignoreCloudflareCleanupErrors && nameConfirmed)) {
         await client.query("ROLLBACK");
-        return reply.code(409).send({ error: "Cloudflare cleanup is not ready", preflight });
+        return reply.code(409).send({
+          error: "Cloudflare cleanup is not ready",
+          preflight,
+          requiresNameConfirmation: true,
+          canIgnoreCloudflareCleanupErrors: true
+        });
       }
-      if (!preflight.canDelete && (!body.force || body.confirmName !== context.displayName)) {
+      if (!preflight.canDelete && !nameConfirmed) {
         await client.query("ROLLBACK");
         return reply.code(409).send({ error: "Tunnel safety checks require an explicit name confirmation", preflight, requiresNameConfirmation: true });
       }
-      await cleanupTunnelResources(context);
+      const skipped = await cleanupTunnelResources(context, { ignoreErrors: body.ignoreCloudflareCleanupErrors });
       await writeAudit({
         actorUserId: request.authUser!.id,
         action: "tunnel.deleted",
@@ -1207,12 +1285,21 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
           tunnelCode: context.tunnelCode,
           forced: !preflight.canDelete,
           cfTunnelId: context.cfTunnelId,
-          publicationCount: context.publications.length
+          publicationCount: context.publications.length,
+          // What is still in Cloudflare after this delete, named precisely, so
+          // the trail survives the row that described it.
+          skippedCloudflareCleanup: skipped,
+          orphanedDnsRecordIds: skipped.length
+            ? context.publications.filter((publication) => publication.dnsRecordId).map((publication) => publication.dnsRecordId)
+            : []
         }
       }, client);
       await client.query("DELETE FROM tunnels WHERE id = $1", [id]);
       await client.query("COMMIT");
-      return reply.code(204).send();
+      // 204 stays the answer for a clean delete; a delete that left something
+      // behind has to say so in a body.
+      if (!skipped.length) return reply.code(204).send();
+      return reply.code(200).send({ deleted: true, skipped });
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       const message = error instanceof Error ? error.message : "Tunnel deletion failed";
@@ -1228,9 +1315,15 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
         step: (error as { step?: string }).step ?? null,
         elapsedMs: Date.now() - startedAt
       }, "Tunnel deletion failed");
-      return reply.code(502).send({
+      // Not 502: cfman is itself served through a Cloudflare Tunnel, and the
+      // Cloudflare edge replaces an origin 502 body with its own error page,
+      // so the operator sees "error code: 502" and never the reason. 424
+      // carries the same meaning - a dependency of this request failed - and
+      // reaches the browser intact.
+      return reply.code(424).send({
         error: `Tunnel resources could not be fully deleted: ${message}`,
-        ...((error as { step?: string }).step ? { step: (error as { step?: string }).step } : {})
+        ...((error as { step?: string }).step ? { step: (error as { step?: string }).step } : {}),
+        canIgnoreCloudflareCleanupErrors: true
       });
     } finally {
       client.release();

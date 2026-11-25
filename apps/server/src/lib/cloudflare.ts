@@ -180,6 +180,22 @@ export class CloudflareClient {
     return this.listPages<CloudflareZone>("/zones", query);
   }
 
+  /**
+   * Whether this account's token can still reach one zone. Cloudflare answers
+   * a zone that was deleted and a zone the token no longer covers in the same
+   * way, so the caller is told the reason verbatim rather than being handed a
+   * guess about which of the two it is.
+   */
+  async probeZone(cfZoneId: string): Promise<{ reachable: boolean; reason: string | null }> {
+    if (this.mode === "mock") return { reachable: true, reason: null };
+    try {
+      await this.request<{ id: string }>(`/zones/${cfZoneId}`);
+      return { reachable: true, reason: null };
+    } catch (error) {
+      return { reachable: false, reason: error instanceof Error ? error.message : "Cloudflare rejected the request" };
+    }
+  }
+
   async listTunnels(): Promise<CloudflareTunnel[]> {
     if (this.mode === "mock") return [];
     const query = new URLSearchParams({ is_deleted: "false", per_page: "1000" });

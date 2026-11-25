@@ -1124,3 +1124,6 @@ tbody tr:hover td { background: #fbfcfb; }
 .file-helper-reference-body dt code { color: var(--green-dark); font-size: 10px; font-weight: 700; word-break: break-all; }
 .file-helper-reference-body dd { color: var(--muted); font-size: 10px; line-height: 1.55; }
 .file-helper-reference-variables-label { padding-top: 2px; }
+.checkbox-row { display: flex; align-items: flex-start; gap: 9px; color: #445047; font-size: 11px; line-height: 1.55; cursor: pointer; }
+.checkbox-row input { flex: 0 0 auto; width: 15px; height: 15px; margin-top: 1px; accent-color: var(--red); cursor: pointer; }
+.checkbox-row span { display: inline; }

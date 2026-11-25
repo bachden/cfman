@@ -172,25 +172,32 @@ export function TunnelDrawer({ tunnelId, tab, initialExpandEnrollmentId, initial
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "SSH provisioning failed")
   });
+  const [ignoreCloudflareErrors, setIgnoreCloudflareErrors] = useState(false);
   const deletePreflightMutation = useMutation({
     mutationFn: () => api.get<TunnelDeletePreflight>(`/api/tunnels/${tunnelId}/delete-preflight`),
     onSuccess: (result) => setDeletePreflight(result),
     onError: (error) => { setDeleteOpen(false); toast.error(error instanceof Error ? error.message : "Unable to check tunnel deletion readiness"); }
   });
   const deleteTunnel = useMutation({
-    mutationFn: () => api.delete(`/api/tunnels/${tunnelId}`, {
+    mutationFn: () => api.delete<{ deleted?: boolean; skipped?: Array<{ step: string; reason: string }> } | undefined>(`/api/tunnels/${tunnelId}`, {
       force: Boolean(deletePreflight && !deletePreflight.canDelete),
-      ...(deletePreflight && !deletePreflight.canDelete ? { confirmName: deleteName } : {})
+      ...(deletePreflight && !deletePreflight.canDelete ? { confirmName: deleteName } : {}),
+      ...(ignoreCloudflareErrors ? { ignoreCloudflareCleanupErrors: true } : {})
     }),
-    onSuccess: async () => {
+    onSuccess: async (result) => {
       setDeleteOpen(false);
       setDeletePreflight(null);
+      setIgnoreCloudflareErrors(false);
       onClose();
       await Promise.all([
         queryClient.invalidateQueries({ queryKey: ["tunnels"] }),
         queryClient.invalidateQueries({ queryKey: ["dashboard"] })
       ]);
-      toast.success("Tunnel deleted");
+      // A delete that left Cloudflare resources behind must not report the
+      // same clean success as one that cleaned everything up.
+      const skipped = result?.skipped ?? [];
+      if (skipped.length) toast.warning(`Tunnel deleted; ${skipped.length} Cloudflare resource${skipped.length === 1 ? "" : "s"} left behind. See the audit log.`);
+      else toast.success("Tunnel deleted");
     },
     onError: (error) => {
       toast.error(error instanceof Error ? error.message : "Unable to delete tunnel");
@@ -284,7 +291,7 @@ export function TunnelDrawer({ tunnelId, tab, initialExpandEnrollmentId, initial
     </SideDrawer>
     <UnenrollDialog enrollment={unenrollTarget} commandAgent={currentTunnel?.commandAgent ?? null} automatic={automaticUnenroll} onAutomaticChange={setAutomaticUnenroll} onClose={() => setUnenrollTarget(null)} onConfirm={() => unenrollTarget && issueUnenrollment.mutate({ enrollmentId: unenrollTarget.id, automatic: automaticUnenroll })} submitting={issueUnenrollment.isPending} />
     <EnrollmentDeleteDialog enrollment={deleteEnrollmentTarget} onClose={() => setDeleteEnrollmentTarget(null)} onConfirm={() => deleteEnrollmentTarget && deleteEnrollment.mutate(deleteEnrollmentTarget.id)} deleting={deleteEnrollment.isPending} />
-    <TunnelDeleteDialog open={deleteOpen} preflight={deletePreflight} loading={deletePreflightMutation.isPending} confirmationName={deleteName} onConfirmationNameChange={setDeleteName} onClose={() => { setDeleteOpen(false); setDeletePreflight(null); setDeleteName(""); }} onConfirm={() => deleteTunnel.mutate()} deleting={deleteTunnel.isPending} />
+    <TunnelDeleteDialog open={deleteOpen} preflight={deletePreflight} loading={deletePreflightMutation.isPending} confirmationName={deleteName} onConfirmationNameChange={setDeleteName} ignoreCloudflareErrors={ignoreCloudflareErrors} onIgnoreCloudflareErrorsChange={setIgnoreCloudflareErrors} onClose={() => { setDeleteOpen(false); setDeletePreflight(null); setDeleteName(""); setIgnoreCloudflareErrors(false); }} onConfirm={() => deleteTunnel.mutate()} deleting={deleteTunnel.isPending} />
     <RouteWafDialog tunnel={currentTunnel ?? null} route={wafRoute} onClose={() => setWafRoute(null)} />
     {currentTunnel && <EnableSshDialog tunnel={currentTunnel} open={enableSshOpen} onClose={() => setEnableSshOpen(false)} />}
     {currentTunnel && <TroubleshootDialog tunnel={currentTunnel} open={troubleshootOpen} onClose={() => setTroubleshootOpen(false)} onManageWaf={(route) => { setTroubleshootOpen(false); setWafRoute(route); }} />}
@@ -300,6 +307,8 @@ function TunnelDeleteDialog({
   loading,
   confirmationName,
   onConfirmationNameChange,
+  ignoreCloudflareErrors,
+  onIgnoreCloudflareErrorsChange,
   onClose,
   onConfirm,
   deleting
@@ -309,18 +318,27 @@ function TunnelDeleteDialog({
   loading: boolean;
   confirmationName: string;
   onConfirmationNameChange: (value: string) => void;
+  ignoreCloudflareErrors: boolean;
+  onIgnoreCloudflareErrorsChange: (value: boolean) => void;
   onClose: () => void;
   onConfirm: () => void;
   deleting: boolean;
 }) {
   const requiresName = Boolean(preflight && !preflight.canDelete);
   const nameMatches = !requiresName || confirmationName === preflight?.displayName;
+  // The Cloudflare check failing is a different kind of blocker from the
+  // safety checks: no amount of waiting clears it, and deleting anyway leaves
+  // real resources behind, so it gets its own opt-in rather than riding along
+  // with the force confirmation.
+  const cloudflareUnreachable = Boolean(preflight?.checks.some((check) => check.id === "cloudflare" && !check.ok));
+  const blocked = cloudflareUnreachable && !ignoreCloudflareErrors;
   return <Modal open={open} title={`Delete tunnel · ${preflight?.displayName ?? "Tunnel"}`} onClose={onClose} width="wide">
     {loading || !preflight ? <div className="quiet-empty">Checking deletion readiness...</div> : <div className="delete-confirmation">
       <p>This permanently removes the tunnel from CFMan and attempts to delete its tunnel-owned Cloudflare DNS, tunnel, and RDP network resources.</p>
       <div className="delete-check-list">{preflight.checks.map((check) => <article className={`delete-check-row ${check.ok ? "delete-check-ok" : "delete-check-blocked"}`} key={check.id}><span className="delete-check-icon">{check.ok ? <CheckCircle2 size={17} /> : <AlertTriangle size={17} />}</span><div><strong>{check.label}</strong><p>{check.detail}</p><small><b>How to resolve:</b> {check.resolution}</small></div></article>)}</div>
       {requiresName && <div className="delete-force-panel"><div className="inline-alert"><AlertTriangle size={15} />One or more safety checks are not ready. Force delete will terminate remaining tunnel connections and may interrupt running commands.</div><label className="field"><span className="field-label">Type the tunnel name to confirm <FieldHelp text="Enter the exact display name shown in the tunnel details title. This extra confirmation is required when a tunnel, enrollment, or command is still active." /></span><input value={confirmationName} onChange={(event) => onConfirmationNameChange(event.target.value)} placeholder={preflight.displayName} autoComplete="off" /></label></div>}
-      <div className="form-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button><button className="button button-danger" type="button" disabled={!nameMatches || deleting} onClick={onConfirm}><Trash2 size={15} />{deleting ? "Deleting..." : requiresName ? "Force delete tunnel" : "Delete tunnel"}</button></div>
+      {cloudflareUnreachable && <div className="delete-force-panel"><div className="inline-alert"><AlertTriangle size={15} />Cloudflare cannot be reached for this tunnel, so its DNS and tunnel resources cannot be cleaned up.</div><label className="checkbox-row"><input type="checkbox" checked={ignoreCloudflareErrors} onChange={(event) => onIgnoreCloudflareErrorsChange(event.target.checked)} /><span>Leave unreachable Cloudflare resources behind and delete the CFMan record anyway <FieldHelp text="Only tick this when the zone really is gone from Cloudflare. If the account's API token merely lost access to a zone that still exists, its DNS records will stay live and point at a tunnel that no longer exists. Whatever is left behind is written to the audit log." /></span></label></div>}
+      <div className="form-actions"><button className="button button-secondary" type="button" onClick={onClose}>Cancel</button><button className="button button-danger" type="button" disabled={!nameMatches || blocked || deleting} onClick={onConfirm}><Trash2 size={15} />{deleting ? "Deleting..." : requiresName ? "Force delete tunnel" : "Delete tunnel"}</button></div>
     </div>}
   </Modal>;
 }
