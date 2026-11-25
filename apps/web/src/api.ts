@@ -24,5 +24,13 @@ export const api = {
   post: <T>(path: string, body?: unknown) => request<T>(path, { method: "POST", ...(body === undefined ? {} : { body: JSON.stringify(body) }) }),
   put: <T>(path: string, body: unknown) => request<T>(path, { method: "PUT", body: JSON.stringify(body) }),
   patch: <T>(path: string, body: unknown) => request<T>(path, { method: "PATCH", body: JSON.stringify(body) }),
-  delete: <T>(path: string, body?: unknown) => request<T>(path, { method: "DELETE", ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
+  delete: <T>(path: string, body?: unknown) => request<T>(path, { method: "DELETE", ...(body === undefined ? {} : { body: JSON.stringify(body) }) }),
+  // A file is sent as the request body rather than wrapped in multipart or
+  // base64: the server streams it straight to the storage driver, so nothing
+  // the size of an installer ever has to be held in memory on either side.
+  putFile: <T>(path: string, file: File) => request<T>(path, {
+    method: "PUT",
+    body: file,
+    headers: { "Content-Type": file.type || "application/octet-stream" }
+  })
 };

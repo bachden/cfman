@@ -1441,7 +1441,19 @@ test("executes a script through the configured tunnel command agent", async () =
     assert.match(requestBody.script, /\$TUNNEL_CODE = '0001'/);
     assert.match(requestBody.script, /\$TUNNEL_NAME = 'Highlands Test Tunnel'/);
     assert.match(requestBody.script, /\$TENANT_CODE = 'HLC'/);
-    assert.ok(requestBody.script.endsWith(executionCall <= 2 ? "Write-Output 'ready v2'" : "Write-Output 'inline'"));
+    // The operator's body is dispatched inside the file-helper wrapper, so it
+    // is no longer the tail of the script - but it still has to arrive
+    // verbatim, and the helpers and the file-store variables have to come
+    // with it. CFMAN_AGENT_TOKEN is a live credential, so it may only appear
+    // in what is dispatched, never on the recorded execution.
+    const body = executionCall <= 2 ? "Write-Output 'ready v2'" : "Write-Output 'inline'";
+    assert.ok(requestBody.script.includes(`\n${body}\n`), "the operator's script body must be dispatched verbatim");
+    assert.match(requestBody.script, /function getRemoteFile/);
+    assert.match(requestBody.script, /function uploadToRemote/);
+    assert.ok(requestBody.script.trimEnd().endsWith("} finally { cfmanCleanupLocalCopies }"));
+    assert.match(requestBody.script, /\$CFMAN_FILES_URL = 'https:\/\/cfman\.example\.test\/api\/public\/tunnels\/[0-9a-f-]{36}\/files'/);
+    assert.match(requestBody.script, /\$CFMAN_FILES_UPLOAD_ROOT = 'uploads\/HLC\/0001'/);
+    assert.match(requestBody.script, /\$CFMAN_AGENT_TOKEN = '[A-Za-z0-9_-]{40,}'/);
     // The 3rd call is the inline execution with its ad hoc GREETING argument -
     // it must actually reach the dispatched script as a shell-scoped variable.
     if (executionCall === 3) assert.match(requestBody.script, /\$GREETING = 'hello ad hoc'/);
@@ -1556,6 +1568,12 @@ test("executes a script through the configured tunnel command agent", async () =
     const inlineHistoryEntry = inlineHistory.json().executions.find((execution: { id: string }) => execution.id === inlineResult.executionId);
     assert.deepEqual(inlineHistoryEntry.scriptArguments, [{ name: "GREETING", defaultValue: "hi", description: "", required: false }]);
     assert.equal(inlineHistoryEntry.environmentVariables.GREETING, "hello ad hoc");
+    assert.equal(inlineHistoryEntry.environmentVariables.TENANT_CODE, "HLC");
+    // The file-store variables reach the dispatched script only. Recording
+    // them would put a live command-agent token into execution history, which
+    // anyone who can see the tunnel can read.
+    assert.deepEqual(Object.keys(inlineHistoryEntry.environmentVariables).filter((name: string) => name.startsWith("CFMAN_")), []);
+    assert.ok(!inlineHistoryEntry.script.includes("getRemoteFile"), "the stored script is the operator's own, without the dispatched helpers");
     assert.match(inlineResult.executionId, /^[0-9a-f-]{36}$/);
     assert.ok(inline.json().result.structuredContent.references.some((reference: { path: string; value: string }) => reference.path === "response.executionId" && reference.value === inlineResult.executionId));
     const savedInline = await app.inject({

@@ -261,7 +261,7 @@ tbody tr:hover td { background: #fbfcfb; }
 .field-help { position: relative; display: inline-flex; flex: 0 0 auto; }
 .field-help > button { width: 18px; height: 18px; display: grid; place-items: center; padding: 0; color: #78857d; background: transparent; border-radius: 50%; cursor: help; }
 .field-help > button:hover, .field-help > button:focus-visible { color: var(--green); background: var(--green-soft); outline: none; }
-.field-help-tooltip { position: absolute; z-index: 20; top: calc(100% + 6px); left: -8px; width: min(280px, calc(100vw - 48px)); padding: 9px 10px; color: white; background: #202c25; border: 1px solid #3a4b41; border-radius: 5px; box-shadow: 0 8px 22px rgba(20, 30, 24, .18); font-size: 10px; font-weight: 500; line-height: 1.5; pointer-events: none; opacity: 0; visibility: hidden; transform: translateY(-2px); transition: opacity .12s ease, transform .12s ease, visibility .12s ease; }
+.field-help-tooltip { position: absolute; z-index: 20; top: calc(100% + 6px); left: -8px; white-space: normal; width: min(280px, calc(100vw - 48px)); padding: 9px 10px; color: white; background: #202c25; border: 1px solid #3a4b41; border-radius: 5px; box-shadow: 0 8px 22px rgba(20, 30, 24, .18); font-size: 10px; font-weight: 500; line-height: 1.5; pointer-events: none; opacity: 0; visibility: hidden; transform: translateY(-2px); transition: opacity .12s ease, transform .12s ease, visibility .12s ease; }
 .field-help:hover .field-help-tooltip, .field-help:focus-within .field-help-tooltip, .field-help-open .field-help-tooltip { opacity: 1; visibility: visible; transform: translateY(0); }
 .field input, .field select { width: 100%; height: 38px; padding: 0 11px; background: white; color: var(--ink); border: 1px solid var(--line-strong); border-radius: 5px; outline: none; font-size: 12px; font-weight: 450; }
 .field input:disabled, .field select:disabled { color: #829087; background: #eef2ef; border-color: #d2dad4; cursor: not-allowed; opacity: 1; -webkit-text-fill-color: #829087; }
@@ -963,6 +963,7 @@ tbody tr:hover td { background: #fbfcfb; }
   .page { padding: 22px 15px 40px; }
   .page-header { min-height: 52px; margin-bottom: 16px; }
   .page-header h1 { font-size: 21px; }
+  .page-actions { flex-wrap: wrap; justify-content: flex-end; }
   .page-actions .button { padding: 0 10px; }
   .password-banner, .public-base-url-banner { padding: 8px 12px; justify-content: flex-start; flex-wrap: wrap; }
   .stat-band { grid-template-columns: 1fr 1fr; }
@@ -1078,3 +1079,48 @@ tbody tr:hover td { background: #fbfcfb; }
   .automation-identity-grid { grid-template-columns: 1fr; }
   .automation-trigger-grid { grid-template-columns: 1fr; }
 }
+
+/* File storage: a folder browser over whichever driver the service is configured for. */
+.file-input-hidden { display: none; }
+.file-toolbar { flex-wrap: wrap; }
+.file-breadcrumb { min-width: 0; margin-right: auto; display: flex; align-items: center; flex-wrap: wrap; gap: 1px; }
+.file-breadcrumb > span { display: inline-flex; align-items: center; gap: 1px; color: #9aa6a0; }
+.file-breadcrumb button { min-height: 26px; padding: 0 7px; color: var(--green); background: transparent; border: 0; border-radius: 4px; cursor: pointer; font-size: 11px; font-weight: 700; }
+.file-breadcrumb button:hover:not(:disabled) { background: var(--green-soft); }
+.file-breadcrumb button:disabled { color: var(--ink); cursor: default; }
+/* The chip sits at the right end of the toolbar, so its help bubble has to
+   open leftwards or it hangs off the edge of a phone screen. */
+.file-storage-chip .field-help-tooltip { left: auto; right: -8px; }
+.file-storage-chip { display: inline-flex; align-items: center; gap: 6px; min-height: 26px; padding: 0 5px 0 9px; color: #46524a; background: var(--surface-soft); border: 1px solid var(--line); border-radius: 13px; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.toolbar + .file-table-panel { border-top: 0; border-radius: 0 0 6px 6px; }
+.file-drop-active { box-shadow: inset 0 0 0 2px var(--green); }
+.file-name-cell strong { gap: 7px; }
+.file-name-cell a { color: var(--green); text-decoration: none; }
+.file-name-cell a:hover { text-decoration: underline; }
+.file-name-cell span { word-break: break-all; }
+.file-folder-icon { flex: 0 0 auto; color: #b5862c; }
+.file-file-icon { flex: 0 0 auto; color: #8b968f; }
+.file-row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 1px; }
+.file-row-actions .icon-button { width: 28px; height: 28px; }
+.file-storage-warning { margin-bottom: 14px; padding: 11px 13px; display: flex; flex-direction: column; gap: 4px; color: #8a2f22; background: var(--red-soft); border: 1px solid #e8b5ae; border-radius: 5px; font-size: 11px; line-height: 1.5; }
+.field-note { color: var(--muted); font-size: 10px; line-height: 1.6; }
+.field-note code { color: var(--ink); word-break: break-all; }
+.file-storage-summary { display: flex; flex-direction: column; gap: 13px; }
+.file-storage-summary > div:first-child { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+.file-storage-summary-error { color: var(--red); font-size: 10px; font-weight: 700; }
+.file-storage-summary dl { display: flex; flex-wrap: wrap; gap: 10px 28px; }
+.file-storage-summary dl > div { display: flex; flex-direction: column; gap: 4px; }
+.file-storage-summary dt { display: flex; align-items: center; gap: 5px; color: #445047; font-size: 10px; font-weight: 700; }
+.file-storage-summary dd { margin: 0; color: var(--ink); font-size: 11px; }
+.file-helper-reference { border: 1px solid var(--line); border-radius: 5px; background: var(--surface-soft); }
+.file-helper-reference > summary { padding: 10px 13px; color: #445047; cursor: pointer; font-size: 10px; font-weight: 750; }
+.file-helper-reference > summary:hover { color: var(--green); }
+.file-helper-reference-body { padding: 0 13px 13px; display: flex; flex-direction: column; gap: 11px; }
+.file-helper-reference-body p { color: var(--muted); font-size: 10px; line-height: 1.6; }
+.file-helper-reference-body pre { margin: 0; padding: 10px 11px; overflow-x: auto; background: white; border: 1px solid var(--line); border-radius: 4px; }
+.file-helper-reference-body pre code { color: var(--ink); font-size: 10px; line-height: 1.6; white-space: pre; }
+.file-helper-reference-body dl { display: flex; flex-direction: column; gap: 7px; }
+.file-helper-reference-body dl > div { display: flex; flex-direction: column; gap: 3px; }
+.file-helper-reference-body dt code { color: var(--green-dark); font-size: 10px; font-weight: 700; word-break: break-all; }
+.file-helper-reference-body dd { color: var(--muted); font-size: 10px; line-height: 1.55; }
+.file-helper-reference-variables-label { padding-top: 2px; }

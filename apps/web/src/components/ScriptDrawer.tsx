@@ -11,6 +11,7 @@ import { ExecutionStatsSummary } from "./ExecutionStatsSummary";
 import { FieldHelp } from "./FieldHelp";
 import { HostPlatformIcon } from "./HostPlatformIcon";
 import { Modal } from "./Modal";
+import { FileHelperReference } from "./FileHelperReference";
 import { ScriptEditor } from "./ScriptEditor";
 import { SearchableSelect } from "./SearchableSelect";
 import { SideDrawer } from "./SideDrawer";
@@ -361,6 +362,7 @@ export function ScriptDrawer({ scriptId, version, initialBulkRunId, openSeq, onC
           </button>)}</div>
         </section>}
         <ScriptEditor value={content} language={language} readOnly={selectedVersionData?.version !== detail.latestVersion} onChange={setContent} />
+        <FileHelperReference language={language} driver={bulkSettingsData?.settings.fileStorage.driver} />
         <ScriptArgumentsEditor argumentsList={argumentsList} onChange={setArgumentsList} />
         <div className="script-editor-hint-row"><span className="script-editor-hint">{content !== originalContent ? `Creates version ${(detail.latestVersion ?? 0) + 1}` : "No content changes"}</span></div>
         <div className="form-actions script-editor-actions"><div className="critical-actions"><button className="button button-danger" type="button" disabled={deleteScript.isPending} onClick={() => setDeleteOpen(true)}><Trash2 size={15} />Delete script</button><button className="button button-danger" type="button" onClick={() => { setBulkName(`${name} bulk`); setBulkDescription(""); setBulkTimeoutSeconds(defaultTimeoutSeconds); setBulkNameFilter(""); setBulkTenantCode(""); setBulkCfTunnelStatus("healthy"); setBulkEnrollmentStatus("active"); setBulkTunnelPage(1); setBulkSelectAll(false); setBulkSelectedTunnels({}); setBulkLeftChecked([]); setBulkRightChecked([]); setBulkRightPage(1); setBulkFilterAppliesToSelected(false); setBulkArgumentBindings({}); setBulkOpen(true); }}><Layers3 size={15} />Bulk execute</button></div><label className="script-save-timeout"><span className="script-editor-hint">Default timeout (seconds)</span><input type="number" min={1} max={300} value={defaultTimeoutSeconds} onChange={(event) => setDefaultTimeoutSeconds(Math.min(300, Math.max(1, Number(event.target.value) || 1)))} /></label><button className="button button-primary" type="button" disabled={!name.trim() || !content.trim() || save.isPending || deleteScript.isPending} onClick={() => save.mutate()}><Save size={15} />{save.isPending ? "Saving..." : "Save changes"}</button></div>

@@ -4,6 +4,8 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { automationScriptToolDescription } from "../lib/automation/context.js";
+import { FILE_HELPER_DOCS } from "../lib/storage/script-helpers.js";
+import { FILE_STORAGE_SCRIPT_VARIABLES } from "../lib/storage/index.js";
 import { argumentBindingsSchema, executionVariablesSchema, scriptArgumentsSchema } from "../lib/execution-variables.js";
 import { requireMcpAuth } from "../lib/auth.js";
 
@@ -148,6 +150,17 @@ const automationScriptUpdateField = z
   .min(1)
   .max(262_144)
   .describe("The rule's new script, under the same contract as scriptSource on cfman_create_automation_rule; call cfman_get_automation_capabilities for the full call list and TypeScript declarations. A script that differs from the current version is saved as a new version.");
+
+// Built from the same constants the helpers themselves are generated from, so
+// an agent writing a tunnel script is told exactly what cfman will prepend to
+// it rather than a prose summary that can drift from the real functions.
+const tunnelScriptFileStoreDescription = [
+  "Every script cfman dispatches to a machine gets these file-store functions prepended, so a script addresses a file by its storage path and never builds a URL or an auth header. They are the same paths cfman_list_files shows, whichever storage driver is configured.",
+  ...FILE_HELPER_DOCS.map((helper) => `- ${helper.signature}\n  ${helper.description}`),
+  "They are built on these injected variables, which a script can also use directly:",
+  ...FILE_STORAGE_SCRIPT_VARIABLES.map((variable) => `- ${variable.name}: ${variable.description}`),
+  "A machine reads the whole store but writes only inside CFMAN_FILES_UPLOAD_ROOT."
+].join("\n");
 
 const automationRuleToolDescription = "Create a scheduled rule: a cron timer runs one script that does everything the rule does. The script is saved as version 1, and every later edit adds a version. Read cfman_get_automation_capabilities first.";
 
@@ -304,6 +317,34 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     setNameFilterParams(params, args);
     return callApi(app, token, "GET", `/api/audit?${params}`);
   });
+  registerApiTool(server, app, token, "cfman_list_files", "List one folder of the file store: its direct children, folders first then files. Omit path for the storage root. Which storage driver is behind it (a local directory or an S3-compatible bucket) is reported but never changes how a path is written.", {
+    path: z.string().max(2000).optional().describe("Folder path relative to the storage root, with forward slashes and no leading slash")
+  }, (args) => callApi(app, token, "GET", `/api/files?${new URLSearchParams(args.path ? { path: args.path } : {})}`));
+  registerApiTool(server, app, token, "cfman_stat_file", "Read the size, modification time, and kind of whatever sits at one storage path, or null when nothing does.", {
+    path: z.string().min(1).max(2000)
+  }, (args) => callApi(app, token, "GET", `/api/files/stat?${new URLSearchParams({ path: args.path })}`));
+  registerApiTool(server, app, token, "cfman_read_file", "Read one file out of the file store as text or as base64. Capped at 8 MB, since the content comes back inside the JSON response.", {
+    path: z.string().min(1).max(2000),
+    encoding: z.enum(["utf8", "base64"]).default("utf8").describe("utf8 for text, base64 for anything binary")
+  }, (args) => callApi(app, token, "GET", `/api/files/data?${new URLSearchParams({ path: args.path, encoding: args.encoding })}`));
+  registerApiTool(server, app, token, "cfman_write_file", "Write one file into the file store, creating the folders above it and replacing whatever was there. Capped at 8 MB.", {
+    path: z.string().min(1).max(2000),
+    content: z.string().max(12_000_000),
+    encoding: z.enum(["utf8", "base64"]).default("utf8"),
+    contentType: z.string().trim().max(200).optional().describe("Defaults to the type implied by the file extension")
+  }, (args) => callApi(app, token, "POST", "/api/files/data", args));
+  registerApiTool(server, app, token, "cfman_create_folder", "Create a folder, and every folder above it, in the file store.", {
+    path: z.string().min(1).max(2000)
+  }, (args) => callApi(app, token, "POST", "/api/files/folders", args));
+  registerApiTool(server, app, token, "cfman_move_file", "Move or rename a file or folder inside the file store. Refuses when the destination already exists.", {
+    from: z.string().min(1).max(2000),
+    to: z.string().min(1).max(2000)
+  }, (args) => callApi(app, token, "POST", "/api/files/move", args));
+  registerApiTool(server, app, token, "cfman_delete_file", "Delete one file, or one folder, from the file store. A folder that still has anything in it requires recursive.", {
+    path: z.string().min(1).max(2000),
+    recursive: z.boolean().default(false)
+  }, (args) => callApi(app, token, "DELETE", `/api/files?${new URLSearchParams({ path: args.path, recursive: String(args.recursive) })}`));
+
   registerApiTool(server, app, token, "cfman_get_route_waf", "Read a route WAF policy, including the resolved default CFMan source IP.", {
     tunnelId: z.string().uuid(),
     routeId: z.string().uuid()
@@ -423,7 +464,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
   });
   registerApiTool(server, app, token, "cfman_execute_inline_script", "Schedule one named inline script without adding it to the script library. Returns a stable execution/task identifier; source, output, timing, status, and active enrollment are persisted in execution history with an inline tag and no version. Reference declared arguments in the script body as $NAME (a plain script variable), never $env:NAME - argument values are injected as script-scoped variables, not OS/process environment variables. On Windows targets, non-ASCII output (accented characters, box-drawing, emoji) may render as '?' due to a PowerShell 5.1 console-encoding limitation in headless execution; prefer plain ASCII in Write-Output text when exact rendering matters.", {
     tunnelId: z.string().uuid(),
-    inlineScript: z.string().min(1).max(262144),
+    inlineScript: z.string().min(1).max(262144).describe(tunnelScriptFileStoreDescription),
     name: z.string().trim().min(1).max(120).optional().describe("Operator-facing name shown beside the inline tag in execution history"),
     language: z.enum(["powershell", "bash", "sh"]).optional().describe("Optional for inline scripts; defaults to PowerShell on Windows and Bash on Unix"),
     arguments: scriptArgumentsSchema.optional().describe("An inline script has no saved version to declare arguments on, so declare them here, ad hoc, for this run only. Bind them with argumentBindings the same way as a saved script's declared arguments. Carried over automatically if this execution is later saved as a script with cfman_save_inline_execution_as_script."),
@@ -463,7 +504,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     description: z.string().default(""),
     defaultTimeoutMs: z.number().int().min(1000).max(300000).default(60000),
     arguments: scriptArgumentsSchema.optional(),
-    content: z.string().min(1)
+    content: z.string().min(1).describe(tunnelScriptFileStoreDescription)
   }, (args) => withEncodingWarning(callApi(app, token, "POST", "/api/scripts", args), args.content));
   registerApiTool(server, app, token, "cfman_update_script", "Update saved script metadata without changing its immutable versions. Argument definitions belong to a version, so change them with cfman_create_script_version.", {
     scriptId: z.string().uuid(),
@@ -501,7 +542,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
   }, (args) => callApi(app, token, "DELETE", `/api/scripts/${args.scriptId}`));
   registerApiTool(server, app, token, "cfman_create_script_version", "Append a new immutable version to a saved script, carrying the argument definitions that version declares. Omitting arguments creates a version with none, so pass the current list when only the content changes. Reference declared arguments in the script body as $NAME (a plain script variable), never $env:NAME - argument values are injected as script-scoped variables, not OS/process environment variables.", {
     scriptId: z.string().uuid(),
-    content: z.string().min(1),
+    content: z.string().min(1).describe(tunnelScriptFileStoreDescription),
     arguments: scriptArgumentsSchema.optional()
   }, (args) => {
     const { scriptId, ...body } = args;

@@ -14,6 +14,7 @@ import { authRoutes } from "./routes/auth.js";
 import { notificationRoutes } from "./routes/notifications.js";
 import { dashboardRoutes } from "./routes/dashboard.js";
 import { enrollmentRoutes } from "./routes/enrollment.js";
+import { fileRoutes } from "./routes/files.js";
 import { mcpRoutes } from "./routes/mcp.js";
 import { settingsRoutes } from "./routes/settings.js";
 import { scriptRoutes } from "./routes/scripts.js";
@@ -72,6 +73,7 @@ export async function buildApp() {
   await tunnelRoutes(app);
   await scriptRoutes(app);
   await enrollmentRoutes(app);
+  await fileRoutes(app);
   await dashboardRoutes(app);
   await notificationRoutes(app);
   await automationRoutes(app);

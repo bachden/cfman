@@ -1020,16 +1020,50 @@ printf '%s' "$INSTALL_ID" > "$INSTALL_ID_FILE"
 chmod 600 "$INSTALL_ID_FILE"
 log_message "info" "preflight" "Local enrollment state is ready"
 
+# github.com/<owner>/<repo>/releases/download/... and the GitHub API are served by
+# different front ends, and the former alone has returned 5xx for hours at a time,
+# which used to fail the whole enrollment. The API exposes the same bytes behind an
+# asset id, so resolve one and retry there before giving up.
+resolve_cloudflared_asset_url() {
+  asset_name="$1"
+  curl -fsSL --max-time 30 --retry 3 --retry-all-errors -H 'Accept: application/vnd.github+json' \\
+    "https://api.github.com/repos/cloudflare/cloudflared/releases/tags/$CLOUDFLARED_VERSION" 2>/dev/null \\
+    | tr -d '\\n' \\
+    | tr '{' '\\n' \\
+    | grep "\\"name\\"[[:space:]]*:[[:space:]]*\\"$asset_name\\"" \\
+    | grep -o 'https://api.github.com/repos/cloudflare/cloudflared/releases/assets/[0-9][0-9]*' \\
+    | head -n 1
+}
+
+download_cloudflared_asset() {
+  asset_name="$1"
+  asset_destination="$2"
+  if curl -fsSL --max-time 300 --retry 3 --retry-all-errors \\
+      "https://github.com/cloudflare/cloudflared/releases/download/$CLOUDFLARED_VERSION/$asset_name" \\
+      -o "$asset_destination" && [ -s "$asset_destination" ]; then
+    return 0
+  fi
+  log_message "warn" "download" "GitHub release download for $asset_name failed; retrying through the GitHub release API"
+  asset_api_url="$(resolve_cloudflared_asset_url "$asset_name" || true)"
+  if [ -z "$asset_api_url" ]; then
+    log_message "error" "download" "Unable to resolve $asset_name in the cloudflared $CLOUDFLARED_VERSION release"
+    return 1
+  fi
+  curl -fsSL --max-time 300 --retry 3 --retry-all-errors -H 'Accept: application/octet-stream' \\
+    "$asset_api_url" -o "$asset_destination"
+  [ -s "$asset_destination" ]
+}
+
 if ! command -v cloudflared >/dev/null 2>&1; then
   TEMP_DIR="$(mktemp -d)"
   log_message "info" "download" "Downloading cloudflared $CLOUDFLARED_VERSION for $OS_NAME/$CF_ARCH"
   if [ "$OS_NAME" = "darwin" ]; then
     ARCHIVE="$TEMP_DIR/cloudflared.tgz"
-    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/$CLOUDFLARED_VERSION/cloudflared-darwin-$CF_ARCH.tgz" -o "$ARCHIVE"
+    download_cloudflared_asset "cloudflared-darwin-$CF_ARCH.tgz" "$ARCHIVE"
     tar -xzf "$ARCHIVE" -C "$TEMP_DIR"
     install -m 0755 "$TEMP_DIR/cloudflared" /usr/local/bin/cloudflared
   elif [ "$OS_NAME" = "linux" ]; then
-    curl -fsSL "https://github.com/cloudflare/cloudflared/releases/download/$CLOUDFLARED_VERSION/cloudflared-linux-$CF_ARCH" -o "$TEMP_DIR/cloudflared"
+    download_cloudflared_asset "cloudflared-linux-$CF_ARCH" "$TEMP_DIR/cloudflared"
     install -m 0755 "$TEMP_DIR/cloudflared" /usr/local/bin/cloudflared
   else
     echo "Unsupported operating system: $OS_NAME" >&2
@@ -1327,10 +1361,29 @@ $installId = [guid]::NewGuid().ToString()
 [System.IO.File]::WriteAllText($installIdFile, $installId)
 Send-InstallLog -Level "info" -Step "preflight" -Message "Local enrollment state is ready"
 
+# Mirrors the unix installer: the release download front end can be down while the
+# GitHub API still serves the same asset, so fall back to the asset id before failing.
+function Save-CloudflaredAsset {
+  param([string]$AssetName, [string]$Destination)
+  $directUrl = "https://github.com/cloudflare/cloudflared/releases/download/$CloudflaredVersion/$AssetName"
+  try {
+    Invoke-WebRequest -Uri $directUrl -OutFile $Destination -UseBasicParsing
+    if ((Get-Item $Destination).Length -gt 0) { return }
+    throw "The downloaded file is empty."
+  } catch {
+    Send-InstallLog -Level "warn" -Step "download" -Message "GitHub release download for $AssetName failed ($($_.Exception.Message)); retrying through the GitHub release API"
+  }
+  $apiHeaders = @{ "Accept" = "application/vnd.github+json"; "User-Agent" = "cloudflare-man-installer" }
+  $release = Invoke-RestMethod -Uri "https://api.github.com/repos/cloudflare/cloudflared/releases/tags/$CloudflaredVersion" -UseBasicParsing -Headers $apiHeaders
+  $asset = $release.assets | Where-Object { $_.name -eq $AssetName } | Select-Object -First 1
+  if (-not $asset) { throw "Unable to resolve $AssetName in the cloudflared $CloudflaredVersion release." }
+  $assetHeaders = @{ "Accept" = "application/octet-stream"; "User-Agent" = "cloudflare-man-installer" }
+  Invoke-WebRequest -Uri $asset.url -OutFile $Destination -UseBasicParsing -Headers $assetHeaders
+}
+
 if (-not (Test-Path $binary)) {
   Send-InstallLog -Level "info" -Step "download" -Message "Downloading cloudflared $CloudflaredVersion for windows/$architecture"
-  $downloadUrl = "https://github.com/cloudflare/cloudflared/releases/download/$CloudflaredVersion/cloudflared-windows-$architecture.exe"
-  Invoke-WebRequest -Uri $downloadUrl -OutFile $binary -UseBasicParsing
+  Save-CloudflaredAsset -AssetName "cloudflared-windows-$architecture.exe" -Destination $binary
   $signature = Get-AuthenticodeSignature $binary
   if ($signature.Status -ne "Valid") {
     Remove-Item $binary -Force

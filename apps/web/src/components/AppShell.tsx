@@ -7,6 +7,7 @@ import {
   ScrollText,
   Settings,
   Cable as TunnelIcon,
+  FolderOpen,
   X
 } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
@@ -22,6 +23,7 @@ const navigation = [
   { to: "/tunnels", label: "Tunnels", icon: TunnelIcon },
   { to: "/scripts", label: "Scripts", icon: Code2 },
   { to: "/automation", label: "Automation", icon: Workflow },
+  { to: "/files", label: "Files", icon: FolderOpen },
   { to: "/audit", label: "Audit log", icon: ScrollText },
   { to: "/settings", label: "Settings", icon: Settings }
 ];

@@ -5,6 +5,7 @@ import { BRAND_ICONS, getBranding, getPublicBaseUrlSetting, normalizePublicBaseU
 import { requireAuth, requireSessionAuth } from "../lib/auth.js";
 import { withTransaction } from "../lib/database.js";
 import { getMcpAccessSetting, rotateMcpToken, setMcpEnabled } from "../lib/mcp-access.js";
+import { fileStorageInfo } from "../lib/storage/index.js";
 import { executionVariablesSchema, getGlobalExecutionVariables } from "../lib/execution-variables.js";
 import { disableCloudflareManPublicHostnameWaf, ensureCloudflareManRemoteAgentRoutes } from "../lib/route-waf.js";
 
@@ -33,6 +34,9 @@ async function settingsResponse() {
     ...publicSetting,
     executionVariables,
     branding,
+    // Only the kind of storage and whether it is usable: the base path,
+    // bucket, endpoint, and credentials stay in the service environment.
+    fileStorage: fileStorageInfo(),
     mcp: {
       ...mcpAccess,
       endpoint: `${publicSetting.publicBaseUrl}/mcp`

@@ -4,6 +4,15 @@ import { getChannelByKey, listChannels, sendChannelMessage } from "../notificati
 import { pool } from "../database.js";
 import { argumentBindingsSchema } from "../execution-variables.js";
 import { executeScriptOnTunnel, getExecutionSnapshot, waitForExecution } from "../script-execution.js";
+import {
+  createFolder as createStorageFolder,
+  listFolder,
+  movePath,
+  readFileInline,
+  removePath,
+  statPath,
+  writeFileInline
+} from "../storage/operations.js";
 import { activeEnrollmentPlatformJoin, latestEnrollmentJoin, onboardingStatusExpression } from "../../routes/tunnels.js";
 
 export type AutomationContextOptions = {
@@ -113,6 +122,13 @@ const listExecutionsSchema = z.object({
   limit: z.number().int().min(1).max(200).default(25)
 });
 
+const filePathSchema = z.string().max(2000);
+const fileReadOptionsSchema = z.object({ encoding: z.enum(["utf8", "base64"]).default("utf8") });
+const fileWriteOptionsSchema = z.object({
+  encoding: z.enum(["utf8", "base64"]).default("utf8"),
+  contentType: z.string().trim().max(200).optional()
+});
+
 const executeScriptSchema = z.object({
   tunnel: z.string().trim().min(1).max(160),
   scriptVersionId: z.string().uuid().optional(),
@@ -214,6 +230,41 @@ export const AUTOMATION_CONTEXT_METHODS: AutomationContextMethodDoc[] = [
     description: "Sends a message through one channel, addressed by its key, and records it in that channel's log under this run."
   },
   {
+    name: "listFiles",
+    declaration: "listFiles(path?: string): Promise<{ path: string; parent: string | null; entries: CfmanFileEntry[] }>",
+    description: "Direct children of one folder in the file store, folders first then files, both A-Z. Called without a path it lists the storage root."
+  },
+  {
+    name: "statFile",
+    declaration: "statFile(path: string): Promise<{ file: CfmanFileStat | null }>",
+    description: "Size, modification time, and kind of whatever sits at one storage path, or null when nothing does. The way to check for a file without reading it."
+  },
+  {
+    name: "readFile",
+    declaration: "readFile(path: string, options?: { encoding?: CfmanFileEncoding }): Promise<CfmanFileContent>",
+    description: "Reads one file out of the file store. Text comes back as utf8 by default; pass base64 for anything binary. Capped at 8 MB, since the content crosses into the sandbox as a string."
+  },
+  {
+    name: "writeFile",
+    declaration: "writeFile(path: string, content: string, options?: { encoding?: CfmanFileEncoding; contentType?: string }): Promise<{ file: CfmanFileStat }>",
+    description: "Writes one file into the file store, creating the folders above it and replacing whatever was there. Capped at 8 MB; the content type is inferred from the extension unless given."
+  },
+  {
+    name: "createFolder",
+    declaration: "createFolder(path: string): Promise<{ path: string }>",
+    description: "Creates a folder, and every folder above it, in the file store. Succeeds when it already exists."
+  },
+  {
+    name: "deleteFile",
+    declaration: "deleteFile(path: string, options?: { recursive?: boolean }): Promise<{ path: string }>",
+    description: "Deletes one file, or one folder. A folder that still has anything in it needs recursive, so a wrong path cannot quietly wipe a tree."
+  },
+  {
+    name: "moveFile",
+    declaration: "moveFile(from: string, to: string): Promise<{ from: string; to: string }>",
+    description: "Moves or renames a file or a folder inside the file store. Refuses when the destination already exists."
+  },
+  {
     name: "ask",
     declaration: "ask(channel: string, request: { text: string; buttons: Array<string | { label: string; value?: string }>; timeoutMs?: number }): Promise<CfmanAnswer>",
     description: "Asks a question in the chat with one button per choice and waits for someone to press one. It resolves either way: status is \"answered\" with the pressed button's value, or \"timed_out\" when nobody answered in time. Only channels whose supportsButtons is true can be asked, and the wait never outlives the rule's own timeout."
@@ -307,6 +358,39 @@ interface CfmanExecutionLogLine {
   line: string;
   sequence: number | null;
   createdAt: string;
+}
+
+type CfmanFileEncoding = "utf8" | "base64";
+
+interface CfmanFileEntry {
+  name: string;
+  /** Path relative to the storage root, which is what every file call addresses. */
+  path: string;
+  kind: "file" | "folder";
+  /** Null for a folder: neither storage driver keeps a size for one. */
+  size: number | null;
+  modifiedAt: string | null;
+  contentType: string | null;
+}
+
+interface CfmanFileStat {
+  path: string;
+  name: string;
+  kind: "file" | "folder";
+  size: number;
+  modifiedAt: string | null;
+  contentType: string;
+}
+
+interface CfmanFileContent {
+  path: string;
+  name: string;
+  contentType: string;
+  size: number;
+  modifiedAt: string | null;
+  encoding: CfmanFileEncoding;
+  /** The file's bytes, decoded as the requested encoding. */
+  content: string;
 }
 
 interface CfmanChannel {
@@ -723,6 +807,29 @@ export function createAutomationContext(options: AutomationContextOptions) {
       });
     },
 
+    listFiles: async (path?: unknown) => toPlainJson(await listFolder(filePathSchema.optional().parse(path))),
+    statFile: async (path?: unknown) => toPlainJson({ file: await statPath(filePathSchema.parse(path)) }),
+    readFile: async (path?: unknown, options?: unknown) => {
+      const input = fileReadOptionsSchema.parse(options ?? {});
+      return toPlainJson(await readFileInline(filePathSchema.parse(path), input.encoding));
+    },
+    writeFile: async (path?: unknown, content?: unknown, options?: unknown) => {
+      const input = fileWriteOptionsSchema.parse(options ?? {});
+      const body = z.string().max(12_000_000).parse(content);
+      return toPlainJson({
+        file: await writeFileInline(filePathSchema.parse(path), body, {
+          encoding: input.encoding,
+          contentType: input.contentType
+        })
+      });
+    },
+    createFolder: async (path?: unknown) => toPlainJson(await createStorageFolder(filePathSchema.parse(path))),
+    deleteFile: async (path?: unknown, options?: unknown) => {
+      const input = z.object({ recursive: z.boolean().default(false) }).parse(options ?? {});
+      return toPlainJson(await removePath(filePathSchema.parse(path), { recursive: input.recursive }));
+    },
+    moveFile: async (from?: unknown, to?: unknown) =>
+      toPlainJson(await movePath(filePathSchema.parse(from), filePathSchema.parse(to))),
     ask: async (channelKey?: unknown, request?: unknown) => {
       const input = z.object({
         channel: z.string().trim().min(1).max(64),

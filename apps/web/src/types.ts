@@ -44,11 +44,43 @@ export type Branding = {
   subtitle: string;
 };
 
+// Everything the webapp is told about the file store. The base path, bucket,
+// endpoint, and credentials stay in the service environment, so the UI can
+// report what kind of storage is behind a path but never where it is.
+export type StorageDriver = "local" | "s3";
+
+export type FileStorageInfo = {
+  driver: StorageDriver;
+  configured: boolean;
+  error: string | null;
+  maxUploadBytes: number;
+  /** Folder an enrolled machine's own uploads land under, as <prefix>/<tenant>/<tunnel>. */
+  tunnelUploadPrefix: string;
+};
+
+export type StorageEntry = {
+  name: string;
+  path: string;
+  kind: "file" | "folder";
+  /** Null for a folder: neither storage driver keeps a size for one. */
+  size: number | null;
+  modifiedAt: string | null;
+  contentType: string | null;
+};
+
+export type FolderListing = {
+  storage: FileStorageInfo;
+  path: string;
+  parent: string | null;
+  entries: StorageEntry[];
+};
+
 export type AppSettings = {
   publicBaseUrl: string;
   configured: boolean;
   executionVariables: ExecutionVariables;
   branding: Branding;
+  fileStorage: FileStorageInfo;
   mcp: {
     enabled: boolean;
     endpoint: string;

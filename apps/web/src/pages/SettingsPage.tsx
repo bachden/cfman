@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Braces, Globe2, KeyRound, LogOut, RefreshCw, Save, ServerCog, ShieldCheck, Sparkles } from "lucide-react";
+import { Braces, Cloud, FolderOpen, Globe2, HardDrive, KeyRound, LogOut, RefreshCw, Save, ServerCog, ShieldCheck, Sparkles } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { toast } from "sonner";
 import { ApiError, api } from "../api";
@@ -156,6 +156,7 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
     onError: (requestError) => toast.error(requestError instanceof ApiError ? requestError.message : "Unable to update MCP server")
   });
   useEffect(() => { if (settingsData?.settings.executionVariables) setGlobalVariables(settingsData.settings.executionVariables); }, [settingsData?.settings.executionVariables]);
+  const fileStorage = settingsData?.settings.fileStorage;
   const [branding, setBranding] = useState<Branding | null>(null);
   useEffect(() => { if (settingsData?.settings.branding) setBranding(settingsData.settings.branding); }, [settingsData?.settings.branding]);
   const updateBranding = useMutation({
@@ -240,6 +241,25 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
         <label className="field"><span className="field-label">Title <FieldHelp text="Shown next to the icon at the top of the sidebar on every page. Keep it short." /></span><input value={branding?.title ?? ""} maxLength={40} onChange={(event) => setBranding((current) => current ? { ...current, title: event.target.value } : current)} placeholder="CFMan" /></label>
         <label className="field"><span className="field-label">Subtitle <FieldHelp text="A short tagline shown under the title in the sidebar." /></span><input value={branding?.subtitle ?? ""} maxLength={80} onChange={(event) => setBranding((current) => current ? { ...current, subtitle: event.target.value } : current)} placeholder="Easy Cloudflare tunnels" /></label>
         <div className="form-actions"><button className="button button-primary" type="button" disabled={!branding || updateBranding.isPending} onClick={() => updateBranding.mutate()}><Save size={15} />{updateBranding.isPending ? "Saving..." : "Save branding"}</button></div>
+      </div>
+    </section>
+
+    <section className="settings-section">
+      <header><span><FolderOpen size={19} /></span><div className="settings-heading-copy"><h2>File storage</h2><small>Read-only here: the driver, its base path or bucket, and its credentials come from the service environment, so a path means the same thing to the webapp, an automation script, and an enrolled machine no matter what is behind it.</small></div></header>
+      <div className="settings-form">
+        <div className="file-storage-summary">
+          <div>
+            <span className="file-storage-chip">
+              {fileStorage?.driver === "s3" ? <Cloud size={13} /> : <HardDrive size={13} />}
+              {fileStorage ? (fileStorage.driver === "s3" ? "S3-compatible bucket" : "Local directory") : "Loading..."}
+            </span>
+            {fileStorage && !fileStorage.configured && <span className="file-storage-summary-error">{fileStorage.error}</span>}
+          </div>
+          {fileStorage && <dl>
+            <div><dt>Upload limit</dt><dd>{Math.round(fileStorage.maxUploadBytes / (1024 * 1024))} MB per file</dd></div>
+            <div><dt>Machine upload folder <FieldHelp text="An enrolled machine can read the whole store but may only write inside this folder, derived from its tunnel's tenant code and tunnel code. Scripts receive the resolved path as CFMAN_FILES_UPLOAD_ROOT." /></dt><dd><code>{fileStorage.tunnelUploadPrefix}/&lt;tenant code&gt;/&lt;tunnel code&gt;/</code></dd></div>
+          </dl>}
+        </div>
       </div>
     </section>
 

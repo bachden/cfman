@@ -1,6 +1,9 @@
 import { writeAudit } from "./audit.js";
+import { getPublicBaseUrl } from "./app-settings.js";
 import { createCommandExecution, executeTunnelScript, getCommandAgentConfig } from "./command-agent.js";
 import { pool } from "./database.js";
+import { fileStorageScriptVariables } from "./storage/index.js";
+import { withFileHelpers } from "./storage/script-helpers.js";
 import {
   applyScriptArguments,
   describeArgumentValueSources,
@@ -115,14 +118,30 @@ export async function executeScriptOnTunnel(input: ExecuteScriptOnTunnelInput): 
   if (!agent) throw new ScriptExecutionError(409, "No command agent route is configured for this tunnel");
   let argumentValues: ExecutionVariables;
   let argumentSources: ReturnType<typeof describeArgumentValueSources>;
+  let resolvedVariables: ExecutionVariables;
   try {
     const available = await resolveAvailableVariablesForTunnel(tunnelId);
+    resolvedVariables = available.variables;
     argumentValues = resolveArgumentValues(scriptArguments, available.variables, argumentBindings);
     argumentSources = describeArgumentValueSources(scriptArguments, available.sources, argumentBindings);
   } catch (error) {
     throw new ScriptExecutionError(409, error instanceof Error ? error.message : "Unable to resolve script arguments");
   }
-  const dispatchedScript = applyScriptArguments(executionScript, scriptLanguage, argumentValues);
+  // The file-store variables go into the dispatched prologue but not into
+  // environmentVariables below: CFMAN_AGENT_TOKEN is a live credential, and
+  // the recorded set is what execution history renders.
+  const storageVariables = fileStorageScriptVariables({
+    publicBaseUrl: await getPublicBaseUrl(),
+    tunnelId,
+    agentToken: agent.token,
+    tenantCode: resolvedVariables.TENANT_CODE ?? "",
+    tunnelCode: resolvedVariables.TUNNEL_CODE ?? ""
+  });
+  const dispatchedScript = applyScriptArguments(
+    withFileHelpers(executionScript, scriptLanguage),
+    scriptLanguage,
+    { ...argumentValues, ...storageVariables }
+  );
   const executionHandle = await createCommandExecution({
     tunnelId,
     enrollmentId: enrollment.id,
