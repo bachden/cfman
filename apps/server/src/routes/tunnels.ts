@@ -338,6 +338,22 @@ function buildTunnelDeletePreflight(context: TunnelDeleteContext): TunnelDeleteP
   };
 }
 
+// Names the step a Cloudflare cleanup failure came from. Deleting a tunnel is
+// half a dozen different Cloudflare calls, and "Tunnel resources could not be
+// fully deleted: Cloudflare API returned 400" on its own tells an operator
+// nothing about which resource is in the way.
+async function cleanupStep<T>(step: string, work: () => Promise<T>): Promise<T> {
+  try {
+    return await work();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const labelled = new Error(`${step}: ${message}`) as Error & { step?: string; cause?: unknown };
+    labelled.step = step;
+    labelled.cause = error;
+    throw labelled;
+  }
+}
+
 async function cleanupTunnelResources(context: TunnelDeleteContext): Promise<void> {
   const client = new CloudflareClient(
     context.cfAccountId ?? context.accountRowId,
@@ -347,21 +363,23 @@ async function cleanupTunnelResources(context: TunnelDeleteContext): Promise<voi
   if (context.publications.some((publication) => publication.wafRuleId)) {
     // Excludes this tunnel's own routes so the zone's merged WAF rule is
     // rebuilt without them, instead of disabling each route individually.
-    await reconcileZoneWaf(client, context.zoneId, context.cfZoneId, context.providerMode, { excludeTunnelId: context.id });
+    await cleanupStep("zone WAF rule", () =>
+      reconcileZoneWaf(client, context.zoneId, context.cfZoneId, context.providerMode, { excludeTunnelId: context.id }));
   }
   const deletedDnsRecords = new Set<string>();
   for (const publication of context.publications) {
     if (publication.dnsRecordId && context.cfZoneId && !deletedDnsRecords.has(publication.dnsRecordId)) {
-      await client.deleteDnsRecord(context.cfZoneId, publication.dnsRecordId);
+      await cleanupStep(`DNS record for ${publication.hostname}`, () =>
+        client.deleteDnsRecord(context.cfZoneId!, publication.dnsRecordId!));
       deletedDnsRecords.add(publication.dnsRecordId);
     }
   }
-  if (context.rdpRouteId) await client.deleteTunnelRoute(context.rdpRouteId);
-  if (context.rdpTargetId) await client.deleteInfrastructureTarget(context.rdpTargetId);
-  if (context.rdpVnetId) await client.deleteVirtualNetwork(context.rdpVnetId);
+  if (context.rdpRouteId) await cleanupStep("RDP tunnel route", () => client.deleteTunnelRoute(context.rdpRouteId!));
+  if (context.rdpTargetId) await cleanupStep("RDP infrastructure target", () => client.deleteInfrastructureTarget(context.rdpTargetId!));
+  if (context.rdpVnetId) await cleanupStep("RDP virtual network", () => client.deleteVirtualNetwork(context.rdpVnetId!));
   if (context.cfTunnelId) {
-    await client.deleteTunnelConnections(context.cfTunnelId);
-    await client.deleteTunnel(context.cfTunnelId);
+    await cleanupStep("tunnel connections", () => client.deleteTunnelConnections(context.cfTunnelId!));
+    await cleanupStep("Cloudflare tunnel", () => client.deleteTunnel(context.cfTunnelId!));
   }
 }
 
@@ -1154,6 +1172,7 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
   app.delete("/api/tunnels/:id", { preHandler: requireAuth }, async (request, reply) => {
     const { id } = z.object({ id: z.string().uuid() }).parse(request.params);
     const body = deleteTunnelSchema.parse(request.body ?? {});
+    const startedAt = Date.now();
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
@@ -1197,7 +1216,22 @@ export async function tunnelRoutes(app: FastifyInstance): Promise<void> {
     } catch (error) {
       await client.query("ROLLBACK").catch(() => undefined);
       const message = error instanceof Error ? error.message : "Tunnel deletion failed";
-      return reply.code(502).send({ error: `Tunnel resources could not be fully deleted: ${message}` });
+      // This branch answers the request itself, so the app's error handler
+      // never sees it and nothing was being written to the log. A deletion
+      // that fails mid-cleanup is exactly the case an operator needs a server
+      // trace for, including how long it ran: past roughly 100 seconds the
+      // Cloudflare edge in front of cfman has already given the caller its own
+      // 502 page, and this is then the only record that the attempt happened.
+      request.log.error({
+        err: error,
+        tunnelId: id,
+        step: (error as { step?: string }).step ?? null,
+        elapsedMs: Date.now() - startedAt
+      }, "Tunnel deletion failed");
+      return reply.code(502).send({
+        error: `Tunnel resources could not be fully deleted: ${message}`,
+        ...((error as { step?: string }).step ? { step: (error as { step?: string }).step } : {})
+      });
     } finally {
       client.release();
     }
