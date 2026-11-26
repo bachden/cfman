@@ -43,6 +43,14 @@ export async function openFile(rawPath: unknown): Promise<{ stat: StorageStat; s
   return fileStorage().read(requireStoragePath(rawPath));
 }
 
+// The raw bytes of one file, for a caller that hands them straight to another
+// service rather than to a client of its own - a chat upload, for one - and so
+// needs the file measured against that service's limit instead of the inline
+// text limit.
+export async function readFileBytes(rawPath: unknown, maxBytes: number): Promise<{ stat: StorageStat; data: Buffer }> {
+  return fileStorage().readBuffer(requireStoragePath(rawPath), maxBytes);
+}
+
 export type InlineEncoding = "utf8" | "base64";
 
 export async function readFileInline(

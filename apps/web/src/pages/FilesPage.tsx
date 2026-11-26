@@ -10,6 +10,7 @@ import {
   Pencil,
   RefreshCw,
   Search,
+  Send,
   Trash2,
   Upload
 } from "lucide-react";
@@ -21,7 +22,7 @@ import { CopyButton } from "../components/CopyButton";
 import { FieldHelp } from "../components/FieldHelp";
 import { Modal } from "../components/Modal";
 import { PageHeader } from "../components/PageHeader";
-import type { FolderListing, StorageEntry } from "../types";
+import type { FolderListing, NotificationChannel, StorageEntry } from "../types";
 
 function formatSize(bytes: number | null): string {
   if (bytes === null) return "—";
@@ -64,6 +65,9 @@ export function FilesPage() {
   const [renaming, setRenaming] = useState<StorageEntry | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [deleting, setDeleting] = useState<StorageEntry | null>(null);
+  const [sending, setSending] = useState<StorageEntry | null>(null);
+  const [sendChannelId, setSendChannelId] = useState("");
+  const [caption, setCaption] = useState("");
   const [dropActive, setDropActive] = useState(false);
   const [uploading, setUploading] = useState<{ done: number; total: number } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -75,6 +79,17 @@ export function FilesPage() {
     queryFn: () => api.get<FolderListing>(`/api/files${path ? `?path=${encodeURIComponent(path)}` : ""}`),
     retry: false
   });
+
+  // Only loaded once a file is actually being sent: the channel list is not
+  // part of browsing files.
+  const { data: channelData } = useQuery({
+    queryKey: ["notifications", "channels"],
+    queryFn: () => api.get<{ channels: NotificationChannel[] }>("/api/notifications/channels"),
+    enabled: Boolean(sending)
+  });
+
+  const sendableChannels = (channelData?.channels ?? []).filter((channel) => channel.supportsFiles && channel.enabled);
+  const sendChannel = sendableChannels.find((channel) => channel.id === sendChannelId) ?? sendableChannels[0];
 
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["files"] });
 
@@ -115,6 +130,18 @@ export function FilesPage() {
       toast.success(`Deleted ${result.path}`);
     },
     onError: (failure) => toast.error(failure instanceof Error ? failure.message : "Unable to delete")
+  });
+
+  const sendToChannel = useMutation({
+    mutationFn: ({ entry, channelId, body }: { entry: StorageEntry; channelId: string; body: string }) =>
+      api.post<{ messageId: string }>(`/api/notifications/channels/${channelId}/send`, { body, files: [entry.path] }),
+    onSuccess: () => {
+      const name = sending?.name ?? "The file";
+      setSending(null);
+      setCaption("");
+      toast.success(`Sent ${name} to ${sendChannel?.name ?? "the channel"}`);
+    },
+    onError: (failure) => toast.error(failure instanceof Error ? failure.message : "Unable to send the file")
   });
 
   // Uploaded one at a time, with the count shown as it goes: a browser cannot
@@ -234,6 +261,7 @@ export function FilesPage() {
                 <td onClick={(event) => event.stopPropagation()}><div className="file-row-actions">
                   <CopyButton value={entry.path} label="Copy path" iconOnly />
                   {entry.kind === "file" && <a className="icon-button" href={contentUrl(entry.path, true)} title="Download" aria-label={`Download ${entry.name}`}><Download size={15} /></a>}
+                  {entry.kind === "file" && <button className="icon-button" type="button" title="Send to a notification channel" aria-label={`Send ${entry.name} to a notification channel`} onClick={() => { setSending(entry); setCaption(""); }}><Send size={15} /></button>}
                   <button className="icon-button" type="button" title="Rename" aria-label={`Rename ${entry.name}`} onClick={() => { setRenaming(entry); setRenameValue(entry.name); }}><Pencil size={15} /></button>
                   <button className="icon-button" type="button" title="Delete" aria-label={`Delete ${entry.name}`} onClick={() => setDeleting(entry)}><Trash2 size={15} /></button>
                 </div></td>
@@ -259,6 +287,36 @@ export function FilesPage() {
         <div className="form-actions">
           <button className="button button-secondary cancel-button-left" type="button" onClick={() => setRenaming(null)}>Cancel</button>
           <button className="button button-primary" type="submit" disabled={!renameValue.trim() || renameValue.trim() === renaming?.name || rename.isPending}>{rename.isPending ? "Renaming..." : "Rename"}</button>
+        </div>
+      </form>
+    </Modal>
+
+    <Modal open={Boolean(sending)} title={`Send ${sending?.name ?? ""}`} onClose={() => setSending(null)}>
+      <form className="form-stack" onSubmit={(event) => {
+        event.preventDefault();
+        if (sending && sendChannel) sendToChannel.mutate({ entry: sending, channelId: sendChannel.id, body: caption });
+      }}>
+        {sendableChannels.length === 0
+          ? <p className="field-note">No enabled notification channel can carry a file. Create a Telegram channel under Automation to send one from here.</p>
+          : <>
+            <label className="field"><span className="field-label">Channel</span>
+              <select value={sendChannel?.id ?? ""} onChange={(event) => setSendChannelId(event.target.value)}>
+                {sendableChannels.map((channel) => <option key={channel.id} value={channel.id}>{channel.name} · {channel.target}</option>)}
+              </select>
+            </label>
+            <label className="field"><span className="field-label">Caption <FieldHelp text="Optional text sent with the file. A file on its own is a valid message." /></span>
+              <textarea className="automation-message-input" rows={3} value={caption} placeholder={`${sending?.name ?? ""} from cfman`} onChange={(event) => setCaption(event.target.value)} />
+            </label>
+            <p className="field-note">
+              <code>{sending?.path}</code> ({formatSize(sending?.size ?? null)}) is sent from the file store as a document, so it arrives with its bytes intact. The same file goes out of an automation rule with <code>cfman.sendFile("{sendChannel?.key}", "{sending?.path}")</code>.
+            </p>
+            {sendChannel && (sending?.size ?? 0) > sendChannel.maxFileBytes && <p className="field-note">
+              This file is larger than the {Math.floor(sendChannel.maxFileBytes / (1024 * 1024))} MB this channel accepts per file, so the send will be refused.
+            </p>}
+          </>}
+        <div className="form-actions">
+          <button className="button button-secondary cancel-button-left" type="button" onClick={() => setSending(null)}>Cancel</button>
+          <button className="button button-primary" type="submit" disabled={!sendChannel || sendToChannel.isPending}><Send size={15} />{sendToChannel.isPending ? "Sending..." : "Send file"}</button>
         </div>
       </form>
     </Modal>

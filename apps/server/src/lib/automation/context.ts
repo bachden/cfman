@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { askOnChannel, MAX_PROMPT_TIMEOUT_MS, MIN_PROMPT_TIMEOUT_MS } from "../notification-prompts.js";
-import { getChannelByKey, listChannels, sendChannelMessage } from "../notifications.js";
+import { getChannelByKey, listChannels, resolveChannelAttachments, sendChannelMessage } from "../notifications.js";
 import { pool } from "../database.js";
 import { argumentBindingsSchema } from "../execution-variables.js";
 import { executeScriptOnTunnel, getExecutionSnapshot, waitForExecution } from "../script-execution.js";
@@ -230,6 +230,11 @@ export const AUTOMATION_CONTEXT_METHODS: AutomationContextMethodDoc[] = [
     description: "Sends a message through one channel, addressed by its key, and records it in that channel's log under this run."
   },
   {
+    name: "sendFile",
+    declaration: "sendFile(channel: string, file: string | string[], options?: { caption?: string }): Promise<CfmanSentMessage>",
+    description: "Sends files out of the file store through one channel, as documents rather than re-encoded media, with the caption on the first of them. The paths are the same storage paths cfman.listFiles and cfman.writeFile use, so a script can write a report and then send it. Only channels whose supportsFiles is true accept files, each within that channel's maxFileBytes."
+  },
+  {
     name: "listFiles",
     declaration: "listFiles(path?: string): Promise<{ path: string; parent: string | null; entries: CfmanFileEntry[] }>",
     description: "Direct children of one folder in the file store, folders first then files, both A-Z. Called without a path it lists the storage root."
@@ -403,6 +408,12 @@ interface CfmanChannel {
   supportsButtons: boolean;
   /** How many buttons one question may show on this channel; 0 when it supports none. */
   maxButtons: number;
+  /** True when this channel can carry a file out of the file store, which is what cfman.sendFile needs. */
+  supportsFiles: boolean;
+  /** The largest single file this channel accepts, in bytes; 0 when it carries none. */
+  maxFileBytes: number;
+  /** How many files one message may carry on this channel; 0 when it carries none. */
+  maxFilesPerMessage: number;
 }
 
 interface CfmanAnswer {
@@ -453,6 +464,8 @@ interface CfmanSentMessage {
   providerMessageId: string | null;
   /** True when the body was longer than the channel's own limit and was cut to fit. */
   truncated: boolean;
+  /** The storage paths that went out with the message; empty for a text-only send. */
+  files: string[];
 }
 
 interface CfmanOutput {
@@ -536,6 +549,14 @@ export function automationScriptToolDescription(): string {
     "return `restarted, approved by ${answer.answeredBy}`;",
     "```",
     "The question stays in the chat with its buttons until someone presses one or the timeout passes, and the message is then edited to show the outcome so it cannot be answered twice. The wait is bounded by the rule's own script timeout, so a rule that asks for a decision needs a timeout long enough to cover the answer.",
+    "",
+    "Sending a file the rule just produced, when a channel's supportsFiles is true:",
+    "```js",
+    "const path = `reports/health-${new Date().toISOString().slice(0, 10)}.csv`;",
+    "await cfman.writeFile(path, rows.map((row) => row.join(\",\")).join(\"\\n\"));",
+    "await cfman.sendFile(\"ops-alerts\", path, { caption: `${rule.name}: ${rows.length} tunnel(s) need attention` });",
+    "```",
+    "A file already in the store - an upload from an enrolled machine, for one - is sent the same way, by its path; nothing is re-uploaded through the script.",
     "",
     "Every global and every type named above, as TypeScript declarations:",
     "```ts",
@@ -788,7 +809,41 @@ export function createAutomationContext(options: AutomationContextOptions) {
         messageId: sent.messageId,
         channelKey: sent.channelKey,
         providerMessageId: sent.providerMessageId,
-        truncated: sent.truncated
+        truncated: sent.truncated,
+        files: []
+      });
+    },
+
+    sendFile: async (channelKey?: unknown, file?: unknown, callOptions?: unknown) => {
+      const input = z.object({
+        channel: z.string().trim().min(1).max(64),
+        // One path or several: sending a single report is the common case, and
+        // writing it as an array should not be required to express it.
+        files: z.union([filePathSchema, z.array(filePathSchema).min(1).max(20)])
+          .transform((value) => (Array.isArray(value) ? value : [value])),
+        caption: z.string().max(20_000).default("")
+      }).parse({
+        channel: channelKey,
+        files: file,
+        ...(typeof callOptions === "object" && callOptions ? callOptions : {})
+      });
+      const channel = await getChannelByKey(input.channel);
+      if (!channel) throw new AutomationContextError(`No notification channel with key "${input.channel}"`);
+      const attachments = await resolveChannelAttachments(channel, input.files);
+      const sent = await sendChannelMessage({
+        channel,
+        body: input.caption,
+        attachments,
+        automationRunId: options.automationRunId,
+        requestedBy: options.requestedBy,
+        requestedVia: "automation"
+      });
+      return toPlainJson({
+        messageId: sent.messageId,
+        channelKey: sent.channelKey,
+        providerMessageId: sent.providerMessageId,
+        truncated: sent.truncated,
+        files: sent.attachments.map((attachment) => attachment.path)
       });
     },
 
@@ -802,7 +857,10 @@ export function createAutomationContext(options: AutomationContextOptions) {
           enabled: channel.enabled,
           target: channel.target,
           supportsButtons: channel.supportsButtons,
-          maxButtons: channel.maxButtons
+          maxButtons: channel.maxButtons,
+          supportsFiles: channel.supportsFiles,
+          maxFileBytes: channel.maxFileBytes,
+          maxFilesPerMessage: channel.maxFilesPerMessage
         }))
       });
     },

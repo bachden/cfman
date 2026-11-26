@@ -10,6 +10,7 @@ import {
   listChannels,
   parseChannelConfig,
   parseChannelSecrets,
+  resolveChannelAttachments,
   sendChannelMessage,
   toChannelSummary,
   ChannelSendError,
@@ -39,7 +40,16 @@ const updateChannelSchema = z.object({
   secrets: z.record(z.string(), z.unknown()).optional()
 });
 
-const sendSchema = z.object({ body: z.string().min(1).max(20_000) });
+// A message needs text, a file, or both: an empty send is a mistake, but a
+// file on its own is a perfectly ordinary thing to want.
+const sendSchema = z.object({
+  body: z.string().max(20_000).default(""),
+  // Paths in the file store, which is where the bytes come from; the webapp
+  // never re-uploads a file it already put there.
+  files: z.array(z.string().trim().min(1).max(1024)).max(20).default([])
+}).refine((value) => value.body.trim().length > 0 || value.files.length > 0, {
+  message: "A message needs a body, at least one file, or both"
+});
 
 export async function notificationRoutes(app: FastifyInstance): Promise<void> {
   app.get("/api/notifications/channels", { preHandler: requireAuth }, async () => ({
@@ -164,10 +174,14 @@ export async function notificationRoutes(app: FastifyInstance): Promise<void> {
     const body = sendSchema.parse(request.body);
     const channel = await getChannelById(id);
     if (!channel) return reply.code(404).send({ error: "Channel not found" });
+    // Resolved before anything is sent, so a bad path answers 404 instead of
+    // landing a caption in the chat with no file under it.
+    const attachments = await resolveChannelAttachments(channel, body.files);
     try {
       const result = await sendChannelMessage({
         channel,
         body: body.body,
+        attachments,
         requestedBy: request.authUser!.id,
         requestedVia: request.authUser!.sessionId === null ? "mcp" : "web"
       });
@@ -176,7 +190,12 @@ export async function notificationRoutes(app: FastifyInstance): Promise<void> {
         action: "notification.message_sent",
         entityType: "notification_channel",
         entityId: id,
-        details: { key: channel.key, messageId: result.messageId, bodyLength: result.bodyLength }
+        details: {
+          key: channel.key,
+          messageId: result.messageId,
+          bodyLength: result.bodyLength,
+          ...(result.attachments.length ? { files: result.attachments.map((file) => file.path) } : {})
+        }
       });
       return result;
     } catch (error) {
@@ -198,7 +217,7 @@ export async function notificationRoutes(app: FastifyInstance): Promise<void> {
     const offset = (query.page - 1) * query.pageSize;
     const [messages, count] = await Promise.all([
       pool.query(
-        `SELECT m.id, m.body, m.status, m.error, m.provider_message_id AS "providerMessageId",
+        `SELECT m.id, m.body, m.attachments, m.status, m.error, m.provider_message_id AS "providerMessageId",
                 m.automation_run_id AS "automationRunId", r.key AS "ruleKey", r.name AS "ruleName",
                 m.requested_via AS "requestedVia", u.username AS "requestedBy", m.created_at AS "createdAt"
            FROM notification_messages m

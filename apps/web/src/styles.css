@@ -1104,6 +1104,14 @@ tbody tr:hover td { background: #fbfcfb; }
 .file-row-actions .icon-button { width: 28px; height: 28px; }
 .file-storage-warning { margin-bottom: 14px; padding: 11px 13px; display: flex; flex-direction: column; gap: 4px; color: #8a2f22; background: var(--red-soft); border: 1px solid #e8b5ae; border-radius: 5px; font-size: 11px; line-height: 1.5; }
 .field-note { color: var(--muted); font-size: 10px; line-height: 1.6; }
+.channel-attachments { display: flex; flex-direction: column; gap: 7px; }
+.channel-attachment-add { display: flex; align-items: center; gap: 7px; }
+.channel-attachment-add input { flex: 1 1 auto; min-width: 0; }
+.channel-attachment-list { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.channel-attachment-list li { display: flex; align-items: center; gap: 6px; min-width: 0; color: #46524a; }
+.channel-attachment-list li svg { flex: 0 0 auto; color: #8b968f; }
+.channel-attachment-list li code { min-width: 0; overflow-wrap: anywhere; font-size: 10px; }
+.channel-attachment-list li .icon-button { width: 22px; height: 22px; margin-left: auto; }
 .field-note code { color: var(--ink); word-break: break-all; }
 .file-storage-summary { display: flex; flex-direction: column; gap: 13px; }
 .file-storage-summary > div:first-child { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }

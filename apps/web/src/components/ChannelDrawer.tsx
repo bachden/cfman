@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { ChevronLeft, ChevronRight, Save, Send, Trash2 } from "lucide-react";
+import { ChevronLeft, ChevronRight, Paperclip, Plus, Save, Send, Trash2, X } from "lucide-react";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
 import { api } from "../api";
@@ -28,6 +28,11 @@ function formatTimestamp(value: string | null): string {
   return value ? new Date(value).toLocaleString() : "—";
 }
 
+// Attachment limits are platform limits, which are always whole megabytes.
+function megabytes(bytes: number): string {
+  return `${Math.floor(bytes / (1024 * 1024))} MB`;
+}
+
 export function ChannelDrawer({
   channelId,
   onClose,
@@ -44,6 +49,10 @@ export function ChannelDrawer({
   const [form, setForm] = useState<ChannelForm>(emptyForm);
   const [loadedChannelId, setLoadedChannelId] = useState<string | null>(null);
   const [testBody, setTestBody] = useState("cfman test message");
+  // Storage paths rather than browser files: the bytes already live in the
+  // file store, and the chat is handed them from there.
+  const [testFiles, setTestFiles] = useState<string[]>([]);
+  const [filePathDraft, setFilePathDraft] = useState("");
   const [deleteOpen, setDeleteOpen] = useState(false);
   const [messagePage, setMessagePage] = useState(1);
 
@@ -116,10 +125,15 @@ export function ChannelDrawer({
   });
 
   const sendTest = useMutation({
-    mutationFn: () => api.post<{ messageId: string }>(`/api/notifications/channels/${channelId}/send`, { body: testBody }),
+    mutationFn: () => api.post<{ messageId: string }>(`/api/notifications/channels/${channelId}/send`, {
+      body: testBody,
+      ...(testFiles.length ? { files: testFiles } : {})
+    }),
     onSuccess: async () => {
+      setTestFiles([]);
+      setFilePathDraft("");
       await invalidate();
-      toast.success("Message sent");
+      toast.success(testFiles.length ? `Sent with ${testFiles.length} file(s)` : "Message sent");
     },
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to send the message")
   });
@@ -135,6 +149,20 @@ export function ChannelDrawer({
     onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to delete the channel")
   });
 
+  // Added by path rather than picked here: the drawer is not a file browser,
+  // and the Files page already hands out the exact path with one click.
+  const attachmentLimit = channel?.maxFilesPerMessage ?? 0;
+  const draftPath = filePathDraft.trim().replace(/^\/+|\/+$/g, "");
+  const canAttach = draftPath.length > 0 && !testFiles.includes(draftPath) && testFiles.length < attachmentLimit;
+  const attachFile = () => {
+    if (!canAttach) {
+      if (draftPath && testFiles.length >= attachmentLimit) toast.error(`One message can carry at most ${attachmentLimit} file(s) on this channel`);
+      return;
+    }
+    setTestFiles((current) => [...current, draftPath]);
+    setFilePathDraft("");
+  };
+
   const canSave = form.name.trim().length > 0
     && form.chatId.trim().length > 0
     && (!isNew || (/^[a-z0-9][a-z0-9_-]*$/.test(form.key.trim()) && form.botToken.trim().length > 0));
@@ -143,6 +171,7 @@ export function ChannelDrawer({
     <strong>{isNew ? "New notification channel" : form.name || "Notification channel"}</strong>
     {!isNew && <code className="automation-key-chip">{form.key}</code>}
     {!isNew && channel?.supportsButtons && <span className="automation-buttons-chip" title={`A rule script can ask a question here with up to ${channel.maxButtons} buttons`}>buttons</span>}
+    {!isNew && channel?.supportsFiles && <span className="automation-buttons-chip" title={`This channel can carry files out of the file store: up to ${channel.maxFilesPerMessage} per message, ${megabytes(channel.maxFileBytes)} each`}>files</span>}
     {!isNew && channel && <StatusBadge status={channel.enabled ? "enabled" : "inactive"} label={channel.enabled ? "enabled" : "disabled"} />}
   </div>;
 
@@ -183,7 +212,28 @@ export function ChannelDrawer({
       {!isNew && <section className="automation-section">
         <header><h3>Send a message</h3><span>Goes to the same chat cfman.sendMessage writes to.</span></header>
         <textarea className="automation-message-input" rows={3} value={testBody} onChange={(event) => setTestBody(event.target.value)} />
-        <div className="form-actions"><button className="button button-secondary" type="button" disabled={!testBody.trim() || sendTest.isPending} onClick={() => sendTest.mutate()}><Send size={15} />{sendTest.isPending ? "Sending..." : "Send message"}</button></div>
+        {channel?.supportsFiles && <div className="channel-attachments">
+          <div className="channel-attachment-add">
+            <input
+              value={filePathDraft}
+              placeholder="reports/daily.csv"
+              onChange={(event) => setFilePathDraft(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Enter") { event.preventDefault(); attachFile(); } }}
+            />
+            <button className="button button-secondary" type="button" disabled={!canAttach} onClick={attachFile}><Plus size={14} />Attach</button>
+          </div>
+          <p className="field-note">
+            A path in the file store, exactly as the Files page's <strong>Copy path</strong> gives it. Up to {channel.maxFilesPerMessage} file(s) per message, {megabytes(channel.maxFileBytes)} each. Each one arrives as a document, with the text above as the caption of the first; nothing is uploaded from this browser.
+          </p>
+          {testFiles.length > 0 && <ul className="channel-attachment-list">
+            {testFiles.map((path) => <li key={path}>
+              <Paperclip size={12} />
+              <code>{path}</code>
+              <button className="icon-button" type="button" title="Remove" aria-label={`Remove ${path}`} onClick={() => setTestFiles((current) => current.filter((entry) => entry !== path))}><X size={13} /></button>
+            </li>)}
+          </ul>}
+        </div>}
+        <div className="form-actions"><button className="button button-secondary" type="button" disabled={(!testBody.trim() && testFiles.length === 0) || sendTest.isPending} onClick={() => sendTest.mutate()}><Send size={15} />{sendTest.isPending ? "Sending..." : testFiles.length ? `Send with ${testFiles.length} file(s)` : "Send message"}</button></div>
       </section>}
 
       {!isNew && <section className="automation-section">
@@ -195,7 +245,16 @@ export function ChannelDrawer({
               <td>{formatTimestamp(message.createdAt)}</td>
               <td><StatusBadge status={message.status === "sent" ? "succeeded" : "failed"} label={message.status} /></td>
               <td>{message.ruleKey ? `rule · ${message.ruleKey}` : message.requestedVia === "mcp" ? "AI" : "manual"}</td>
-              <td><div className="automation-message-body">{message.error ? <span className="automation-run-error">{message.error}</span> : null}<pre>{message.body}</pre></div></td>
+              <td><div className="automation-message-body">
+                {message.error ? <span className="automation-run-error">{message.error}</span> : null}
+                {message.body ? <pre>{message.body}</pre> : null}
+                {(message.attachments ?? []).length > 0 && <ul className="channel-attachment-list">
+                  {message.attachments.map((attachment) => <li key={attachment.path}>
+                    <Paperclip size={12} />
+                    <code title={attachment.path}>{attachment.name}</code>
+                  </li>)}
+                </ul>}
+              </div></td>
             </tr>)}
         </tbody></table></div>
         {messageData && messageData.pagination.totalPages > 1 && <div className="table-pagination"><span>{messageData.pagination.total} total</span><div>

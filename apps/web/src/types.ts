@@ -422,15 +422,29 @@ export type NotificationChannel = {
   // Whether a rule script can ask a question with buttons on this channel.
   supportsButtons: boolean;
   maxButtons: number;
+  // Whether this channel can carry a file out of the file store, and what the
+  // platform behind it accepts in one message.
+  supportsFiles: boolean;
+  maxFileBytes: number;
+  maxFilesPerMessage: number;
   lastUsedAt: string | null;
   lastError: string | null;
   createdAt: string;
   updatedAt: string;
 };
 
+export type NotificationMessageAttachment = {
+  path: string;
+  name: string;
+  size: number;
+  contentType: string;
+};
+
 export type NotificationMessage = {
   id: string;
   body: string;
+  // The storage paths that went out with the message; empty for text alone.
+  attachments: NotificationMessageAttachment[];
   status: "sent" | "failed";
   error: string | null;
   providerMessageId: string | null;

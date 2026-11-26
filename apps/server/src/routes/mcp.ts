@@ -609,9 +609,10 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
   registerApiTool(server, app, token, "cfman_delete_channel", "Delete a channel. Refused while any automation rule script still names its key.", {
     channelId: z.string().uuid()
   }, (args) => callApi(app, token, "DELETE", `/api/notifications/channels/${args.channelId}`));
-  registerApiTool(server, app, token, "cfman_send_channel_message", "Send a message through one channel immediately and record it in that channel's message log.", {
+  registerApiTool(server, app, token, "cfman_send_channel_message", "Send a message through one channel immediately and record it in that channel's message log. Files are storage paths in cfman's own file store (cfman_list_files), not uploads: each is delivered as a document, with body used as the caption of the first one. Either body or files is enough on its own.", {
     channelId: z.string().uuid(),
-    body: z.string().min(1).max(20_000)
+    body: z.string().max(20_000).default(""),
+    files: z.array(z.string().min(1).max(1024)).max(20).optional().describe("Storage paths to attach, e.g. [\"reports/daily.csv\"]. A Telegram channel accepts up to 10 files per message, 50 MB each.")
   }, (args) => {
     const { channelId, ...body } = args;
     return callApi(app, token, "POST", `/api/notifications/channels/${channelId}/send`, body);
