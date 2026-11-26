@@ -95,7 +95,7 @@ export function AutomationPage() {
               ? <tr><td colSpan={5}><div className="quiet-empty">No notification channel configured yet.</div></td></tr>
               : filteredChannels.map((channel) => <tr key={channel.id} className="data-row" tabIndex={0} onClick={() => openChannelDrawer(channel.id)} onKeyDown={(event) => { if (event.key === "Enter" || event.key === " ") { event.preventDefault(); openChannelDrawer(channel.id); } }}>
                 <td><div className="primary-cell"><strong>{channel.name}</strong><span>{channel.key}{channel.description ? ` · ${channel.description}` : ""}</span></div></td>
-                <td><div className="automation-channel-type">{channel.typeLabel}{channel.supportsButtons && <span className="automation-buttons-chip" title={`A rule script can ask a question here with up to ${channel.maxButtons} buttons`}>buttons</span>}</div></td>
+                <td><div className="automation-channel-type">{channel.typeLabel}{channel.supportsButtons && <span className="automation-buttons-chip" title={`A rule script can ask a question here with up to ${channel.maxButtons} buttons`}>buttons</span>}{channel.supportsFiles && <span className="automation-buttons-chip" title={`A message here can carry up to ${channel.maxFilesPerMessage} file(s) out of the file store, ${Math.floor(channel.maxFileBytes / (1024 * 1024))} MB each`}>files</span>}</div></td>
                 <td>{channel.target}</td>
                 <td>{formatTimestamp(channel.lastUsedAt)}</td>
                 <td>{channel.lastError

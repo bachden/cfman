@@ -335,7 +335,11 @@ export function AutomationRuleDrawer({
         </details>
         {channels.length > 0 && <div className="automation-channel-keys">
           <span>Channel keys</span>
-          {channels.map((channel) => <code key={channel.key} title={`${channel.name} · ${channel.target}${channel.supportsButtons ? ` · buttons: up to ${channel.maxButtons}` : " · messages only"}`}>{channel.key}{channel.supportsButtons ? " ⏎" : ""}</code>)}
+          {channels.map((channel) => <code key={channel.key} title={[
+            `${channel.name} · ${channel.target}`,
+            channel.supportsButtons ? `buttons: up to ${channel.maxButtons}` : "messages only",
+            ...(channel.supportsFiles ? [`files: up to ${channel.maxFilesPerMessage}, ${Math.floor(channel.maxFileBytes / (1024 * 1024))} MB each`] : [])
+          ].join(" · ")}>{channel.key}{channel.supportsButtons ? " ⏎" : ""}</code>)}
           <span className="automation-channel-keys-hint">⏎ can also be asked with cfman.ask</span>
         </div>}
       </section>

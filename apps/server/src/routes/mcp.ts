@@ -317,7 +317,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     setNameFilterParams(params, args);
     return callApi(app, token, "GET", `/api/audit?${params}`);
   });
-  registerApiTool(server, app, token, "cfman_list_files", "List one folder of the file store: its direct children, folders first then files. Omit path for the storage root. Which storage driver is behind it (a local directory or an S3-compatible bucket) is reported but never changes how a path is written.", {
+  registerApiTool(server, app, token, "cfman_list_files", "List one folder of the file store: its direct children, folders first then files. Omit path for the storage root. Which storage driver is behind it (a local directory or an S3-compatible bucket) is reported but never changes how a path is written. A path listed here can be read with cfman_read_file or sent to a chat with cfman_send_channel_message, which never re-uploads it.", {
     path: z.string().max(2000).optional().describe("Folder path relative to the storage root, with forward slashes and no leading slash")
   }, (args) => callApi(app, token, "GET", `/api/files?${new URLSearchParams(args.path ? { path: args.path } : {})}`));
   registerApiTool(server, app, token, "cfman_stat_file", "Read the size, modification time, and kind of whatever sits at one storage path, or null when nothing does.", {
@@ -585,7 +585,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     return callApi(app, token, "PUT", `/api/tunnels/${tunnelId}/enrollments/${enrollmentId}/execution-variables`, body);
   });
 
-  registerApiTool(server, app, token, "cfman_list_channels", "List notification channels with their key, type, target, last send result, and whether the channel can show buttons (supportsButtons) so a rule script may ask a question with cfman.ask. A rule script addresses a channel by its key, never by its id.", {}, () => callApi(app, token, "GET", "/api/notifications/channels"));
+  registerApiTool(server, app, token, "cfman_list_channels", "List notification channels with their key, type, target, last send result, and what each one can do: supportsButtons, so a rule script may ask a question with cfman.ask, and supportsFiles with maxFileBytes and maxFilesPerMessage, so a message may carry files out of the file store (cfman_send_channel_message, or cfman.sendFile in a rule script). A rule script addresses a channel by its key, never by its id.", {}, () => callApi(app, token, "GET", "/api/notifications/channels"));
   registerApiTool(server, app, token, "cfman_create_channel", "Create a notification channel. For type telegram, config takes chatId (numeric id or @channelusername), optional parseMode (none, markdown, html) and disableNotification; secrets takes botToken.", {
     key: channelKeyField,
     name: z.string().trim().min(1).max(120).describe("Human-readable label; processing always uses the key"),
@@ -617,7 +617,7 @@ function createMcpServer(app: FastifyInstance, token: string): McpServer {
     const { channelId, ...body } = args;
     return callApi(app, token, "POST", `/api/notifications/channels/${channelId}/send`, body);
   });
-  registerApiTool(server, app, token, "cfman_get_channel_messages", "Read the send log of one channel, including which automation run produced each message.", {
+  registerApiTool(server, app, token, "cfman_get_channel_messages", "Read the send log of one channel, including which automation run produced each message and, in attachments, the storage paths that went out with it.", {
     channelId: z.string().uuid(),
     page: z.number().int().min(1).default(1),
     pageSize: z.number().int().min(5).max(100).default(20)
