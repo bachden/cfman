@@ -6,7 +6,7 @@ import { writeAudit } from "../lib/audit.js";
 import { requireAuth } from "../lib/auth.js";
 import { pool } from "../lib/database.js";
 import { decryptSecret } from "../lib/security.js";
-import { MAX_UPLOAD_BYTES, fileStorageInfo, tunnelUploadRootById } from "../lib/storage/index.js";
+import { fileStorageInfo, fileStorageSettings, getMaxUploadBytes, tunnelUploadRootById } from "../lib/storage/index.js";
 import {
   createFolder,
   listFolder,
@@ -55,10 +55,13 @@ async function sendFile(reply: FastifyReply, found: { stat: { name: string; size
   return reply.send(found.stream);
 }
 
-function assertUploadSize(request: FastifyRequest): void {
+// Rejects an oversized upload on its declared length before a byte is spooled.
+// spoolUpload still meters the stream, because Content-Length is the client's
+// claim and a chunked body carries none at all.
+function assertUploadSize(request: FastifyRequest, maxBytes: number): void {
   const declared = Number(request.headers["content-length"] ?? "0");
-  if (Number.isFinite(declared) && declared > MAX_UPLOAD_BYTES) {
-    throw new StorageError(`Upload exceeds the ${Math.floor(MAX_UPLOAD_BYTES / (1024 * 1024))} MB limit`, 413);
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    throw new StorageError(`Upload exceeds the ${Math.floor(maxBytes / (1024 * 1024))} MB limit`, 413);
   }
 }
 
@@ -99,7 +102,7 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
 
     instance.get("/api/files", { preHandler: requireAuth }, async (request) => {
       const query = pathQuery.parse(request.query);
-      return { storage: fileStorageInfo(), ...(await listFolder(query.path)) };
+      return { storage: await fileStorageSettings(), ...(await listFolder(query.path)) };
     });
 
     instance.get("/api/files/stat", { preHandler: requireAuth }, async (request) => {
@@ -121,8 +124,9 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
 
     instance.put("/api/files/content", { preHandler: requireAuth }, async (request, reply) => {
       const query = requiredPathQuery.parse(request.query);
-      assertUploadSize(request);
-      const upload = await spoolUpload(request.body as Readable, MAX_UPLOAD_BYTES);
+      const maxBytes = await getMaxUploadBytes();
+      assertUploadSize(request, maxBytes);
+      const upload = await spoolUpload(request.body as Readable, maxBytes);
       try {
         const file = await writeSpooledUpload(query.path, upload, { contentType: requestContentType(request) });
         await writeAudit({
@@ -232,9 +236,10 @@ export async function fileRoutes(app: FastifyInstance): Promise<void> {
       const tunnelId = await authenticateTunnelAgent(request, reply);
       if (!tunnelId) return reply;
       const query = requiredPathQuery.parse(request.query);
-      assertUploadSize(request);
+      const maxBytes = await getMaxUploadBytes();
+      assertUploadSize(request, maxBytes);
       const writeRoot = await tunnelUploadRootById(tunnelId);
-      const upload = await spoolUpload(request.body as Readable, MAX_UPLOAD_BYTES);
+      const upload = await spoolUpload(request.body as Readable, maxBytes);
       try {
         const file = await writeSpooledUpload(query.path, upload, { contentType: requestContentType(request), writeRoot });
         await writeAudit({

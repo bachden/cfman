@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { config } from "../../config.js";
+import { getMaxUploadMb } from "../app-settings.js";
 import { pool } from "../database.js";
 import { LocalFileStorage } from "./local.js";
 import { joinStoragePath, storageSlug } from "./paths.js";
@@ -9,7 +10,12 @@ import { StorageError, type FileStorageBackend, type StorageDriver } from "./typ
 export * from "./paths.js";
 export * from "./types.js";
 
-export const MAX_UPLOAD_BYTES = config.FILE_STORAGE_MAX_UPLOAD_MB * 1024 * 1024;
+// Operator-editable in Settings rather than fixed at boot, so raising the
+// limit does not need a redeploy. Read per request; the setting is one small
+// row and an upload is already doing far more work than that lookup.
+export async function getMaxUploadBytes(): Promise<number> {
+  return (await getMaxUploadMb()) * 1024 * 1024;
+}
 
 // The ceiling on a file read into memory instead of streamed: an automation
 // script receives the bytes through a worker postMessage, and an MCP tool
@@ -73,16 +79,22 @@ export function fileStorage(): FileStorageBackend {
 }
 
 // What the webapp is allowed to know: the kind of storage, and whether it is
-// usable. Never the base path, bucket, endpoint, or credentials.
-export function fileStorageInfo(): { driver: StorageDriver; configured: boolean; error: string | null; maxUploadBytes: number; tunnelUploadPrefix: string } {
+// usable. Never the base path, bucket, endpoint, or credentials. Everything
+// here comes from the service environment, so it needs no database round trip
+// and stays usable from the audit-log call sites that only want the driver.
+export function fileStorageInfo(): { driver: StorageDriver; configured: boolean; error: string | null; tunnelUploadPrefix: string } {
   const resolved = configuration();
   return {
     driver: config.FILE_STORAGE_DRIVER,
     configured: resolved.ok,
     error: resolved.ok ? null : resolved.error,
-    maxUploadBytes: MAX_UPLOAD_BYTES,
     tunnelUploadPrefix: config.FILE_STORAGE_TUNNEL_UPLOAD_PREFIX
   };
+}
+
+/** The same thing plus the operator-set upload limit: what the API answers with. */
+export async function fileStorageSettings(): Promise<ReturnType<typeof fileStorageInfo> & { maxUploadBytes: number }> {
+  return { ...fileStorageInfo(), maxUploadBytes: await getMaxUploadBytes() };
 }
 
 function shortDigest(value: string): string {

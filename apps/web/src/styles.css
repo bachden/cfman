@@ -1127,3 +1127,4 @@ tbody tr:hover td { background: #fbfcfb; }
 .checkbox-row { display: flex; align-items: flex-start; gap: 9px; color: #445047; font-size: 11px; line-height: 1.55; cursor: pointer; }
 .checkbox-row input { flex: 0 0 auto; width: 15px; height: 15px; margin-top: 1px; accent-color: var(--red); cursor: pointer; }
 .checkbox-row span { display: inline; }
+.file-storage-limit-field { max-width: 260px; }

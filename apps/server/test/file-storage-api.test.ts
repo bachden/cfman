@@ -14,6 +14,7 @@ process.env.DATABASE_SCHEMA = "test_file_storage";
 process.env.FILE_STORAGE_DRIVER = "local";
 process.env.FILE_STORAGE_LOCAL_PATH = storageRoot;
 process.env.FILE_STORAGE_TUNNEL_UPLOAD_PREFIX = "uploads";
+process.env.FILE_STORAGE_MAX_UPLOAD_MB = "512";
 
 let app: FastifyInstance;
 let pool: (typeof import("../src/lib/database.js"))["pool"];
@@ -268,6 +269,65 @@ test("the webapp needs a session, and the file routes are not open to the world"
     const response = await app.inject({ method: "GET", url, headers: { host } });
     assert.equal(response.statusCode, 401, `${url}: ${response.body}`);
   }
+});
+
+test("the upload limit is an operator setting, applied to the webapp and to a machine alike", async () => {
+  const before = await app.inject({ method: "GET", url: "/api/files", headers: session() });
+  // The environment variable is what the deployment starts from.
+  assert.equal(before.json().storage.maxUploadBytes, 512 * 1024 * 1024);
+
+  const narrowed = await app.inject({
+    method: "PUT",
+    url: "/api/settings/file-storage",
+    headers: session(),
+    payload: { maxUploadMb: 1 }
+  });
+  assert.equal(narrowed.statusCode, 200, narrowed.body);
+  assert.equal(narrowed.json().fileStorage.maxUploadBytes, 1024 * 1024);
+
+  // Every reader of the limit sees the new value without a restart.
+  const listing = await app.inject({ method: "GET", url: "/api/files", headers: session() });
+  assert.equal(listing.json().storage.maxUploadBytes, 1024 * 1024);
+  const settings = await app.inject({ method: "GET", url: "/api/settings", headers: session() });
+  assert.equal(settings.json().settings.fileStorage.maxUploadBytes, 1024 * 1024);
+
+  const tooBig = Buffer.alloc(2 * 1024 * 1024, 0x61);
+  const refused = await app.inject({
+    method: "PUT",
+    url: "/api/files/content?path=limits/too-big.bin",
+    headers: session({ "content-type": "application/octet-stream" }),
+    payload: tooBig
+  });
+  assert.equal(refused.statusCode, 413, refused.body);
+  assert.match(refused.json().error, /exceeds the 1 MB limit/);
+
+  // An enrolled machine is held to the same limit, not a separate one.
+  const refusedFromMachine = await app.inject({
+    method: "PUT",
+    url: `/api/public/tunnels/${tunnelId}/files/content?path=${encodeURIComponent("uploads/ideaLAB/ldap/too-big.bin")}`,
+    headers: agent({ "content-type": "application/octet-stream" }),
+    payload: tooBig
+  });
+  assert.equal(refusedFromMachine.statusCode, 413, refusedFromMachine.body);
+
+  const accepted = await app.inject({
+    method: "PUT",
+    url: "/api/files/content?path=limits/small.bin",
+    headers: session({ "content-type": "application/octet-stream" }),
+    payload: Buffer.alloc(1024, 0x61)
+  });
+  assert.equal(accepted.statusCode, 201, accepted.body);
+
+  for (const maxUploadMb of [0, -1, 20_481, 1.5]) {
+    const rejected = await app.inject({ method: "PUT", url: "/api/settings/file-storage", headers: session(), payload: { maxUploadMb } });
+    assert.equal(rejected.statusCode, 400, `${maxUploadMb}: ${rejected.body}`);
+  }
+  // A rejected value leaves the stored one alone.
+  const unchanged = await app.inject({ method: "GET", url: "/api/files", headers: session() });
+  assert.equal(unchanged.json().storage.maxUploadBytes, 1024 * 1024);
+
+  await app.inject({ method: "DELETE", url: "/api/files?path=limits&recursive=true", headers: session() });
+  await app.inject({ method: "PUT", url: "/api/settings/file-storage", headers: session(), payload: { maxUploadMb: 512 } });
 });
 
 test("settings report the storage kind and nothing about where it lives", async () => {

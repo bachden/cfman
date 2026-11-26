@@ -6,6 +6,13 @@ type QueryExecutor = Pick<Pool | PoolClient, "query">;
 
 const PUBLIC_BASE_URL_KEY = "public_base_url";
 const BRANDING_KEY = "branding";
+const MAX_UPLOAD_MB_KEY = "file_storage_max_upload_mb";
+
+// Bounds the operator can choose between. The ceiling is the same one the
+// environment variable allows, so moving the value into the database cannot
+// widen what a deployment was willing to accept.
+export const MIN_UPLOAD_MB = 1;
+export const MAX_UPLOAD_MB = 20_480;
 
 export const BRAND_ICONS = ["cloud-cog", "cloud", "cable", "globe", "shield-check", "server", "zap"] as const;
 export type BrandIcon = (typeof BRAND_ICONS)[number];
@@ -68,4 +75,28 @@ export async function setPublicBaseUrl(value: string, userId: string, executor: 
     [PUBLIC_BASE_URL_KEY, normalized, userId]
   );
   return normalized;
+}
+
+// The largest file the storage will accept, in megabytes. Operator-editable in
+// Settings; FILE_STORAGE_MAX_UPLOAD_MB is the value a deployment starts from
+// and the fallback until somebody changes it, so an existing install keeps the
+// limit it already had.
+export async function getMaxUploadMb(executor: QueryExecutor = pool): Promise<number> {
+  const result = await executor.query("SELECT value FROM app_settings WHERE key = $1", [MAX_UPLOAD_MB_KEY]);
+  const stored = Number(result.rows[0]?.value);
+  if (!Number.isInteger(stored) || stored < MIN_UPLOAD_MB || stored > MAX_UPLOAD_MB) return config.FILE_STORAGE_MAX_UPLOAD_MB;
+  return stored;
+}
+
+export async function setMaxUploadMb(value: number, userId: string, executor: QueryExecutor = pool): Promise<number> {
+  if (!Number.isInteger(value) || value < MIN_UPLOAD_MB || value > MAX_UPLOAD_MB) {
+    throw new Error(`The upload limit must be a whole number of megabytes between ${MIN_UPLOAD_MB} and ${MAX_UPLOAD_MB}`);
+  }
+  await executor.query(
+    `INSERT INTO app_settings(key, value, updated_by, updated_at)
+     VALUES ($1, $2, $3, now())
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = now()`,
+    [MAX_UPLOAD_MB_KEY, String(value), userId]
+  );
+  return value;
 }

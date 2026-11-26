@@ -8,7 +8,12 @@ import { FieldHelp } from "../components/FieldHelp";
 import { AddVariableButton, ExecutionVariablesEditor } from "../components/ExecutionVariablesEditor";
 import { PageHeader } from "../components/PageHeader";
 import { BRAND_ICON_COMPONENTS, BRAND_ICON_OPTIONS } from "../components/brand-icons";
-import type { AppSettings, Branding, ExecutionVariables, User } from "../types";
+import type { AppSettings, Branding, ExecutionVariables, FileStorageInfo, User } from "../types";
+
+// Mirrors MIN_UPLOAD_MB / MAX_UPLOAD_MB on the server so the input bounds the
+// value before a request that would only be rejected.
+const MIN_UPLOAD_MB = 1;
+const MAX_UPLOAD_MB = 20_480;
 
 type McpSettingsResponse = {
   settings: AppSettings["mcp"];
@@ -157,6 +162,25 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
   });
   useEffect(() => { if (settingsData?.settings.executionVariables) setGlobalVariables(settingsData.settings.executionVariables); }, [settingsData?.settings.executionVariables]);
   const fileStorage = settingsData?.settings.fileStorage;
+  const storedMaxUploadMb = fileStorage ? Math.round(fileStorage.maxUploadBytes / (1024 * 1024)) : null;
+  const [maxUploadMb, setMaxUploadMb] = useState("");
+  useEffect(() => { if (storedMaxUploadMb !== null) setMaxUploadMb(String(storedMaxUploadMb)); }, [storedMaxUploadMb]);
+  const parsedMaxUploadMb = Number(maxUploadMb);
+  const maxUploadChanged = Number.isInteger(parsedMaxUploadMb)
+    && parsedMaxUploadMb >= MIN_UPLOAD_MB
+    && parsedMaxUploadMb <= MAX_UPLOAD_MB
+    && parsedMaxUploadMb !== storedMaxUploadMb;
+  const updateFileStorage = useMutation({
+    mutationFn: () => api.put<{ fileStorage: FileStorageInfo }>("/api/settings/file-storage", { maxUploadMb: parsedMaxUploadMb }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ["settings"] });
+      // The Files page reads the limit from its own listing response, so its
+      // client-side pre-check has to be refetched too.
+      await queryClient.invalidateQueries({ queryKey: ["files"] });
+      toast.success("Upload limit updated");
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Unable to update the upload limit")
+  });
   const [branding, setBranding] = useState<Branding | null>(null);
   useEffect(() => { if (settingsData?.settings.branding) setBranding(settingsData.settings.branding); }, [settingsData?.settings.branding]);
   const updateBranding = useMutation({
@@ -245,7 +269,7 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
     </section>
 
     <section className="settings-section">
-      <header><span><FolderOpen size={19} /></span><div className="settings-heading-copy"><h2>File storage</h2><small>Read-only here: the driver, its base path or bucket, and its credentials come from the service environment, so a path means the same thing to the webapp, an automation script, and an enrolled machine no matter what is behind it.</small></div></header>
+      <header><span><FolderOpen size={19} /></span><div className="settings-heading-copy"><h2>File storage</h2><small>Which storage is in use, and where it lives, comes from the service environment and cannot be changed here - so a path means the same thing to the webapp, an automation script, and an enrolled machine no matter what is behind it. The upload limit is set here.</small></div></header>
       <div className="settings-form">
         <div className="file-storage-summary">
           <div>
@@ -256,9 +280,16 @@ export function SettingsPage({ user, onLogout, onPasswordChanged }: { user: User
             {fileStorage && !fileStorage.configured && <span className="file-storage-summary-error">{fileStorage.error}</span>}
           </div>
           {fileStorage && <dl>
-            <div><dt>Upload limit</dt><dd>{Math.round(fileStorage.maxUploadBytes / (1024 * 1024))} MB per file</dd></div>
             <div><dt>Machine upload folder <FieldHelp text="An enrolled machine can read the whole store but may only write inside this folder, derived from its tunnel's tenant code and tunnel code. Scripts receive the resolved path as CFMAN_FILES_UPLOAD_ROOT." /></dt><dd><code>{fileStorage.tunnelUploadPrefix}/&lt;tenant code&gt;/&lt;tunnel code&gt;/</code></dd></div>
           </dl>}
+        </div>
+        <label className="field file-storage-limit-field">
+          <span className="field-label">Maximum upload size (MB per file) <FieldHelp text="Applies to every upload: the Files page, the API, and a script pushing a file from an enrolled machine. An upload past the limit is refused on its declared size before any of it is stored. Takes effect immediately; no restart." /></span>
+          <input type="number" min={MIN_UPLOAD_MB} max={MAX_UPLOAD_MB} step={1} value={maxUploadMb} onChange={(event) => setMaxUploadMb(event.target.value)} disabled={settingsLoading} />
+        </label>
+        <div className="form-actions">
+          <span>{storedMaxUploadMb !== null && Number(maxUploadMb) !== storedMaxUploadMb ? `Saved value: ${storedMaxUploadMb} MB` : "\u00a0"}</span>
+          <button className="button button-primary" type="button" disabled={!maxUploadChanged || updateFileStorage.isPending} onClick={() => updateFileStorage.mutate()}><Save size={15} />{updateFileStorage.isPending ? "Saving..." : "Save upload limit"}</button>
         </div>
       </div>
     </section>

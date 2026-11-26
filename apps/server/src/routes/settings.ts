@@ -1,11 +1,11 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { writeAudit } from "../lib/audit.js";
-import { BRAND_ICONS, getBranding, getPublicBaseUrlSetting, normalizePublicBaseUrl, setBranding, setPublicBaseUrl } from "../lib/app-settings.js";
+import { BRAND_ICONS, MAX_UPLOAD_MB, MIN_UPLOAD_MB, getBranding, getPublicBaseUrlSetting, normalizePublicBaseUrl, setBranding, setMaxUploadMb, setPublicBaseUrl } from "../lib/app-settings.js";
 import { requireAuth, requireSessionAuth } from "../lib/auth.js";
 import { withTransaction } from "../lib/database.js";
 import { getMcpAccessSetting, rotateMcpToken, setMcpEnabled } from "../lib/mcp-access.js";
-import { fileStorageInfo } from "../lib/storage/index.js";
+import { fileStorageSettings } from "../lib/storage/index.js";
 import { executionVariablesSchema, getGlobalExecutionVariables } from "../lib/execution-variables.js";
 import { disableCloudflareManPublicHostnameWaf, ensureCloudflareManRemoteAgentRoutes } from "../lib/route-waf.js";
 
@@ -21,6 +21,9 @@ const settingsSchema = z.object({
 });
 
 const mcpSettingsSchema = z.object({ enabled: z.boolean() });
+const fileStorageSettingsSchema = z.object({
+  maxUploadMb: z.coerce.number().int().min(MIN_UPLOAD_MB).max(MAX_UPLOAD_MB)
+});
 const executionVariableSettingsSchema = z.object({ variables: executionVariablesSchema });
 const brandingSchema = z.object({
   icon: z.enum(BRAND_ICONS),
@@ -29,14 +32,14 @@ const brandingSchema = z.object({
 });
 
 async function settingsResponse() {
-  const [publicSetting, mcpAccess, executionVariables, branding] = await Promise.all([getPublicBaseUrlSetting(), getMcpAccessSetting(), getGlobalExecutionVariables(), getBranding()]);
+  const [publicSetting, mcpAccess, executionVariables, branding, fileStorage] = await Promise.all([getPublicBaseUrlSetting(), getMcpAccessSetting(), getGlobalExecutionVariables(), getBranding(), fileStorageSettings()]);
   return {
     ...publicSetting,
     executionVariables,
     branding,
     // Only the kind of storage and whether it is usable: the base path,
     // bucket, endpoint, and credentials stay in the service environment.
-    fileStorage: fileStorageInfo(),
+    fileStorage,
     mcp: {
       ...mcpAccess,
       endpoint: `${publicSetting.publicBaseUrl}/mcp`
@@ -89,6 +92,22 @@ export async function settingsRoutes(app: FastifyInstance): Promise<void> {
       }, client);
     });
     return { variables: body.variables };
+  });
+
+  app.put("/api/settings/file-storage", { preHandler: requireAuth }, async (request) => {
+    const body = fileStorageSettingsSchema.parse(request.body);
+    await withTransaction(async (client) => {
+      await setMaxUploadMb(body.maxUploadMb, request.authUser!.id, client);
+      await writeAudit({
+        actorUserId: request.authUser!.id,
+        action: "settings.file_storage_updated",
+        entityType: "settings",
+        entityId: "file_storage_max_upload_mb",
+        details: { maxUploadMb: body.maxUploadMb },
+        ipAddress: request.ip
+      }, client);
+    });
+    return { fileStorage: await fileStorageSettings() };
   });
 
   app.put("/api/settings/branding", { preHandler: requireAuth }, async (request) => {
